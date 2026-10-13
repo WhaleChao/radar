@@ -212,7 +212,7 @@ describe('sidebarDestinationsMatching', () => {
 })
 
  it('qualifies the collapsed category total as well as the individual kind', () => {
- const widget = { name: 'widgets', kind: 'Widget', group: 'read.example.test', version: 'v1', namespaced: true, isCRD: true, verbs: ['get', 'list', 'watch'] }
+ const widget = { name: 'widgets', kind: 'Widget', group: 'read.example.test', version: 'v1', namespaced: true, isCrd: true, verbs: ['get', 'list', 'watch'] }
  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[widget]} resourceCounts={{ 'read.example.test/Widget': 3 }} resourceCoverage={{ 'read.example.test/Widget': { status: 'partial', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], total: 1, omitted: 0 } } } }} />)
  const start = html.indexOf('>Test Read Example</span>')
  expect(start).toBeGreaterThan(-1)
