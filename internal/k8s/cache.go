@@ -20,6 +20,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -118,7 +119,8 @@ type ResourceChange = k8score.ResourceChange
 // status, pod workload lookup, timeline integration).
 type ResourceCache struct {
 	*k8score.ResourceCache
-	secretsEnabled bool // Whether secrets informer is running (requires RBAC)
+	permissionResult *PermissionCheckResult
+	secretsEnabled   bool // Whether secrets informer is running (requires RBAC)
 	// argoDrift tracks how long each manual-sync ArgoCD Application has been
 	// continuously OutOfSync. Lives here so its lifecycle is the cache's:
 	// recreated per cluster, dropped on a kubeconfig context switch.
@@ -360,9 +362,19 @@ func InitResourceCache(ctx context.Context) error {
 		// runs under contextOpMu, so the operation that superseded the probe is
 		// already tearing this cache down, and the ctx.Err() check below drops
 		// out of the boot path that does not hold that lock.
-		permResult, _ := CheckResourcePermissions(rbacCtx)
+		permResult, probeErr := bootstrapResourcePermissions(rbacCtx, func(ctx context.Context, retry bool) (*PermissionCheckResult, bool) {
+			if retry {
+				InvalidateResourcePermissionsCache()
+			}
+			return CheckResourcePermissions(ctx)
+		})
 		cancel()
 		logTiming("    Resource access probes: %v", time.Since(rbacStart))
+
+		if probeErr != nil {
+			initErr = probeErr
+			return
+		}
 
 		if ctx.Err() != nil {
 			initErr = ctx.Err()
@@ -451,6 +463,7 @@ func InitResourceCache(ctx context.Context) error {
 		}
 
 		wrapped := &ResourceCache{
+			permissionResult:            clonePermissionCheckResult(permResult),
 			secretsEnabled:              scopes["secrets"].Enabled,
 			argoDrift:                   newArgoDriftTracker(),
 			cronJobScheduleObservations: cronJobScheduleObservations,
@@ -2180,4 +2193,52 @@ func (c *ResourceCache) GetPodsForWorkload(namespace string, selector *metav1.La
 	}
 
 	return matchingPods
+}
+
+// PermissionResult returns the probes that selected this cache's informer
+// scope. A later global refresh must not re-label rows from this cache.
+func (rc *ResourceCache) PermissionResult() *PermissionCheckResult {
+	if rc == nil {
+		return nil
+	}
+	return clonePermissionCheckResult(rc.permissionResult)
+}
+
+// A transient startup 401 must not freeze a narrowed informer set for the
+// lifetime of the connection. Retry once within the existing probe budget;
+// persistent rejection fails initialization into the connection's auth owner.
+func bootstrapResourcePermissions(ctx context.Context, check func(context.Context, bool) (*PermissionCheckResult, bool)) (*PermissionCheckResult, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		result, _ := check(ctx, attempt > 0)
+		if err := permissionUnauthorized(result); err != nil {
+			if attempt == 1 || ctx.Err() != nil {
+				return nil, fmt.Errorf("resource access probe rejected credentials: %w", err)
+			}
+			continue
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return result, nil
+	}
+	panic("unreachable")
+}
+
+func permissionUnauthorized(result *PermissionCheckResult) error {
+	if result == nil {
+		return nil
+	}
+	for _, err := range result.ProbeErrors {
+		if apierrors.IsUnauthorized(err) {
+			return err
+		}
+	}
+	for _, byNamespace := range result.NamespaceProbeErrors {
+		for _, err := range byNamespace {
+			if apierrors.IsUnauthorized(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }

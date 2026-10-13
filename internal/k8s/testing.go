@@ -595,10 +595,19 @@ func SetTestPermissionResult(result *PermissionCheckResult) func() {
 	cachedPermResult = result
 	resourcePermsExpiry = time.Now().Add(time.Minute)
 	resourcePermsMu.Unlock()
+	cache := GetResourceCache()
+	var previousBound *PermissionCheckResult
+	if cache != nil {
+		previousBound = cache.permissionResult
+		cache.permissionResult = clonePermissionCheckResult(result)
+	}
 
 	return func() {
 		resourcePermsMu.Lock()
 		cachedPermResult, resourcePermsExpiry = prevResult, prevExpiry
+		if cache != nil {
+			cache.permissionResult = previousBound
+		}
 		resourcePermsMu.Unlock()
 	}
 }
