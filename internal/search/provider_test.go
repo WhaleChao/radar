@@ -222,3 +222,25 @@ func TestCacheProviderCatalogLoadsUntilCRDDiscoveryCompletes(t *testing.T) {
 		t.Fatalf("search after CRD discovery = %+v, want %+v", res.Unsearched, want)
 	}
 }
+
+func TestTypedSearchCoveragePreservesKnownExclusionBeforeSync(t *testing.T) {
+	core, err := k8score.NewResourceCache(k8score.CacheConfig{Client: fake.NewClientset(), ResourceScopes: map[string]k8score.ResourceScope{"services": {Enabled: true}, "pods": {Enabled: true, Namespace: "team-a"}}, DeferredTypes: map[string]bool{"pods": true}, DebugSyncDelays: map[string]time.Duration{"pods": time.Hour}, DeferredSyncTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(core.Stop)
+	provider := &CacheProvider{cache: &k8s.ResourceCache{ResourceCache: core}}
+	for _, tc := range []struct {
+		namespaces []string
+		reason     string
+	}{
+		{[]string{"team-b"}, "collector_scope_limited"},
+		{[]string{"team-a"}, "kind_sync_pending"},
+		{[]string{"team-a", "team-b"}, "kind_sync_pending"},
+		{nil, "kind_sync_pending"},
+	} {
+		if got := provider.TypedCoverage("Pod", tc.namespaces); string(got) != tc.reason {
+			t.Fatalf("%v: %s, want %s", tc.namespaces, got, tc.reason)
+		}
+	}
+}
