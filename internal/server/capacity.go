@@ -89,7 +89,15 @@ func currentCapacityClusterIdentity() capacityClusterIdentity {
 }
 
 func (identity capacityClusterIdentity) stillCurrent() bool {
-	return identity == capacityClusterIdentityNow()
+	live := capacityClusterIdentityNow()
+	// A timeline store that was unavailable at startup is installed later
+	// without a subsystem reset, when its database starts answering. A
+	// response read without it describes the same cluster, so that one change
+	// alone does not invalidate it.
+	if identity.timeline == nil {
+		live.timeline = nil
+	}
+	return identity == live
 }
 
 type capacityLoadResult struct {
@@ -441,7 +449,7 @@ func (s *Server) loadCapacityModel(w http.ResponseWriter, r *http.Request, ident
 	result.meta.Provider = capacityProvider(result.meta.Provider, nodePools, nodeClaims, nodeClasses, result.meta.Coverage)
 	resourceCache := k8s.GetResourceCache()
 	ownerResolutionAllowed, workloadAttributionPartial := capacityOwnerResolutionPermissions(pods, func(group, resource, namespace string) bool {
-		return s.canRead(r, group, resource, namespace, "list") && capacityCacheCoversNamespace(resourceCache, resource, namespace)
+		return resourceCache != nil && s.canRead(r, group, resource, namespace, "list") && resourceCache.AssessKindRead(resource, []string{namespace}).Complete
 	})
 	if workloadAttributionPartial {
 		coverage := result.meta.Coverage[capacityapi.CoverageWorkloads]
@@ -712,11 +720,16 @@ func (s *Server) loadCapacityPods(r *http.Request, meta *capacityapi.ResponseMet
 		return nil
 	}
 	sourceNamespaces := namespaces
-	cacheNamespaces := capacityNamespacesWithinCache(cache, "pods", sourceNamespaces)
-	namespaces = cacheNamespaces.namespaces
-	if cacheNamespaces.unavailable {
+	assessment := cache.AssessKindRead("pods", sourceNamespaces)
+	if assessment.Readiness != k8s.KindReady {
+		meta.Coverage[capacityapi.CoveragePods] = unavailableCoverage("pod_cache_unavailable", []string{"scheduledRequests", "aggregateDemand", "workloads", "summary.actions", "demand.summary"})
+		meta.Coverage[capacityapi.CoverageWorkloads] = meta.Coverage[capacityapi.CoveragePods]
+		return nil
+	}
+	namespaces = assessment.Read
+	if !assessment.Complete && len(namespaces) == 0 {
 		coverage := unavailableCoverage("pod_cache_scope_unavailable", []string{"scheduledRequests", "aggregateDemand", "workloads", "summary.actions", "demand.summary"})
-		if explicit || cacheNamespaces.limited && sourceNamespaces == nil {
+		if explicit || !assessment.AllNamespaces && sourceNamespaces == nil {
 			coverage.Scope = capacityapi.CoverageScopeExplicitNamespaces
 		} else if sourceNamespaces != nil {
 			coverage.Scope = capacityapi.CoverageScopeAllAuthorizedNamespaces
@@ -729,8 +742,8 @@ func (s *Server) loadCapacityPods(r *http.Request, meta *capacityapi.ResponseMet
 	pods := listPodsScoped(cache.Pods(), namespaces)
 	scope := capacityapi.CoverageScopeCluster
 	status := capacityapi.CoverageAvailable
-	if namespaces != nil || cacheNamespaces.limited {
-		if explicit || cacheNamespaces.limited && sourceNamespaces == nil {
+	if namespaces != nil || !assessment.AllNamespaces {
+		if explicit || !assessment.AllNamespaces && sourceNamespaces == nil {
 			scope = capacityapi.CoverageScopeExplicitNamespaces
 		} else {
 			scope = capacityapi.CoverageScopeAllAuthorizedNamespaces
@@ -739,11 +752,11 @@ func (s *Server) loadCapacityPods(r *http.Request, meta *capacityapi.ResponseMet
 			status = capacityapi.CoveragePartial
 		}
 	}
-	if cacheNamespaces.partial {
+	if !assessment.Complete {
 		status = capacityapi.CoveragePartial
 	}
 	coverage := capacityapi.NewSourceCoverage(status, scope)
-	if cacheNamespaces.partial {
+	if !assessment.Complete {
 		coverage.ReasonCode = "pod_cache_scope_partial"
 	}
 	coverage.Namespaces = append([]string{}, namespaces...)

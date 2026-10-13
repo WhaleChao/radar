@@ -157,6 +157,14 @@ func namespaceForError(namespaces []string) string {
 	return strings.Join(namespaces, ",")
 }
 
+func resourceReadCacheIsCurrent(cache *k8s.ResourceCache) bool {
+	active, syncing := k8s.SnapshotCaches()
+	if active != nil {
+		return cache == active
+	}
+	return cache != nil && cache == syncing
+}
+
 // resourceReadCache returns the cache to read kind from and the namespaces to
 // read under namespaceCoverageError's rule: nil (an unrestricted caller) reads
 // the typed collector's covered namespaces, so a non-nil answer to nil means

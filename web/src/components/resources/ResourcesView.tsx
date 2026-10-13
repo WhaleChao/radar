@@ -34,6 +34,9 @@ interface ResourcesViewProps {
   onResourceClickYaml?: NavigateToResource
   onKindChange?: () => void
   onClearNamespaces?: () => void
+  rememberedKindSearch?: (kind: { name: string; group: string }) => string | undefined
+  onKindFiltersChange?: (kind: { name: string; group: string }, search: string) => void
+  onApplyNamespacesToAllSections?: (namespaces: string[]) => Promise<unknown> | void
 }
 
 type SelectedKindInfo = { name: string; kind: string; group: string } | null
@@ -69,7 +72,7 @@ function hasResourceCount(counts: Record<string, number> | undefined, key: strin
   return Object.prototype.hasOwnProperty.call(counts ?? {}, key)
 }
 
-export function ResourcesView({ namespaces, selectedResource, onResourceClick, onResourceClickYaml, onKindChange, onClearNamespaces }: ResourcesViewProps) {
+export function ResourcesView({ namespaces, selectedResource, onResourceClick, onResourceClickYaml, onKindChange, onClearNamespaces, rememberedKindSearch, onKindFiltersChange, onApplyNamespacesToAllSections }: ResourcesViewProps) {
   const location = useLocation()
   const navigate = useNavigate()
   const { connection } = useConnection()
@@ -342,6 +345,9 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       onResourceClickYaml={onResourceClickYaml}
       onKindChange={onKindChange}
       onClearNamespaces={onClearNamespaces}
+      rememberedKindSearch={rememberedKindSearch}
+      onKindFiltersChange={onKindFiltersChange}
+      onApplyNamespacesToAllSections={onApplyNamespacesToAllSections}
       // Injected data
       apiResources={apiResources}
       // Lightweight counts for sidebar (replaces 233 parallel queries)

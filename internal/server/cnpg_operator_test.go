@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/skyhook-io/radar/pkg/k8score"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/k8s"
@@ -364,5 +369,82 @@ func TestCNPGOperator_DeniedDeploymentsWithholdComponents(t *testing.T) {
 	}
 	if got.Components == nil || len(got.Components) != 0 || got.Config == nil {
 		t.Errorf("components=%v config=%v, want empty arrays", got.Components, got.Config)
+	}
+}
+
+func TestCNPGTypedReadersPreserveReadiness(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		timeout      time.Duration
+		readiness    k8s.KindReadiness
+		state        string
+		configReason string
+	}{
+		{"pending", time.Minute, k8s.KindPending, cnpgCoverageSyncing, "ConfigMaps are still loading"},
+		{"failed", time.Millisecond, k8s.KindFailed, cnpgCoverageError, "ConfigMaps failed to load"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			k8s.ResetResourceCache()
+			t.Cleanup(func() {
+				k8s.ResetResourceCache()
+				if err := k8s.InitTestResourceCache(testFakeClient); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if err := k8s.InitTestPromotedSyncingCache(fake.NewClientset(), 5*time.Second, tt.timeout, map[string]time.Duration{"deployments": time.Hour, "pods": time.Hour, "configmaps": time.Hour}); err != nil {
+				t.Fatal(err)
+			}
+			cache := k8s.GetResourceCache()
+			deadline := time.Now().Add(5 * time.Second)
+			for cache.KindReadinessFor("deployments") != tt.readiness && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := cache.KindReadinessFor("deployments"); got != tt.readiness {
+				t.Fatalf("readiness = %v", got)
+			}
+			got, _ := getCNPGOperatorNoAuth(t, "")
+			if got.Coverage["deployments"].State != tt.state || len(got.Components) != 0 {
+				t.Fatalf("operator = %+v", got)
+			}
+			r := httptest.NewRequest(http.MethodGet, "/api/cnpg/workspace", nil)
+			acc, _, pods, _ := testServerSrv.cnpgWorkspaceReadPods(r, cache, nil, map[string]types.UID{})
+			if acc.state != tt.state || len(pods) != 0 {
+				t.Fatalf("pod evidence = %+v, %v", acc, pods)
+			}
+			ref := testServerSrv.cnpgOperatorConfigMap(r, cache, "cnpg-system", "config", "operator")
+			if ref.Reason != tt.configReason || ref.Exists != nil || ref.Readable {
+				t.Fatalf("config reference = %+v", ref)
+			}
+		})
+	}
+}
+
+func TestCNPGConfigMapUnavailableIsNotLoading(t *testing.T) {
+	k8s.ResetResourceCache()
+	t.Cleanup(func() {
+		k8s.ResetResourceCache()
+		if err := k8s.InitTestResourceCache(testFakeClient); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, tt := range []struct {
+		name   string
+		scopes map[string]k8score.ResourceScope
+		reason string
+	}{
+		{"disabled", map[string]k8score.ResourceScope{"services": {Enabled: true}}, "Radar is not collecting ConfigMaps"},
+		{"outside scope", map[string]k8score.ResourceScope{"configmaps": {Enabled: true, Namespace: "other"}}, "Radar does not watch ConfigMaps in cnpg-system"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			k8s.ResetResourceCache()
+			if err := k8s.InitScopedTestResourceCache(fake.NewClientset(), tt.scopes); err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodGet, "/api/cnpg/operator", nil)
+			ref := testServerSrv.cnpgOperatorConfigMap(r, k8s.GetResourceCache(), "cnpg-system", "config", "operator")
+			if ref.Reason != tt.reason || ref.Exists != nil || ref.Readable || strings.Contains(ref.Reason, "loading") {
+				t.Fatalf("config reference = %+v", ref)
+			}
+		})
 	}
 }

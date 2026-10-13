@@ -1923,3 +1923,26 @@ func TestListDynamicResourcesRejectsRetiredCacheHandle(t *testing.T) {
 		t.Fatalf("retired cache served a multi-namespace read: %v", err)
 	}
 }
+
+func TestTypedReadRejectsRetainedPreviousCache(t *testing.T) {
+	k8s.ResetTestState()
+	t.Cleanup(k8s.ResetTestState)
+	oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "old"}}
+	if err := k8s.InitTestResourceCache(fake.NewClientset(oldPod)); err != nil {
+		t.Fatal(err)
+	}
+	previous := k8s.GetResourceCache()
+	if !resourceReadCacheIsCurrent(previous) {
+		t.Fatal("current cache rejected")
+	}
+	k8s.ResetResourceCache()
+	if err := k8s.InitTestResourceCache(fake.NewClientset()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k8s.FetchResource(previous, "pods", "alpha", "old"); err != nil {
+		t.Fatalf("retained old cache no longer serves its rows: %v", err)
+	}
+	if resourceReadCacheIsCurrent(previous) || !resourceReadCacheIsCurrent(k8s.GetResourceCache()) {
+		t.Fatal("cache generation replacement was not detected")
+	}
+}

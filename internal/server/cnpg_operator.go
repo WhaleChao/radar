@@ -163,12 +163,12 @@ func (s *Server) cnpgOperatorScope(r *http.Request) []string {
 
 func (s *Server) cnpgOperatorDeployments(r *http.Request, cache *k8s.ResourceCache, scope []string) (cnpgKindAccess, []string, []*appsv1.Deployment) {
 	acc, denied, read := s.cnpgTypedScope(r, cache, scope, "apps", "deployments")
-	if acc.state == cnpgCoverageDenied || acc.state == cnpgCoverageError {
+	if acc.state != cnpgCoverageFull && acc.state != cnpgCoveragePartial {
 		return acc, denied, nil
 	}
 	lister := cache.Deployments()
-	if lister == nil || !cache.IsKindReady("deployments") {
-		return cnpgKindAccess{state: cnpgCoverageSyncing}, nil, nil
+	if lister == nil {
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil
 	}
 	var out []*appsv1.Deployment
 	if read == nil {
@@ -190,12 +190,12 @@ func (s *Server) cnpgOperatorDeployments(r *http.Request, cache *k8s.ResourceCac
 
 func (s *Server) cnpgOperatorServices(r *http.Request, cache *k8s.ResourceCache, scope []string) (cnpgKindAccess, []string, []*corev1.Service) {
 	acc, denied, read := s.cnpgTypedScope(r, cache, scope, "", "services")
-	if acc.state == cnpgCoverageDenied || acc.state == cnpgCoverageError {
+	if acc.state != cnpgCoverageFull && acc.state != cnpgCoveragePartial {
 		return acc, denied, nil
 	}
 	lister := cache.Services()
-	if lister == nil || !cache.IsKindReady("services") {
-		return cnpgKindAccess{state: cnpgCoverageSyncing}, nil, nil
+	if lister == nil {
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil
 	}
 	hasPlugin, err := labels.Parse(cnpgPluginNameLabel)
 	if err != nil {
@@ -334,13 +334,25 @@ func (s *Server) cnpgOperatorConfigMap(r *http.Request, cache *k8s.ResourceCache
 		state.Reason = "no permission to get ConfigMaps in " + namespace
 		return ref
 	}
-	lister := cache.ConfigMaps()
-	if lister == nil {
-		state.Reason = "ConfigMaps are still loading"
+	assessment := cache.AssessKindRead("configmaps", []string{namespace})
+	if len(assessment.Uncovered) > 0 {
+		state.Reason = "Radar does not watch ConfigMaps in " + namespace
 		return ref
 	}
-	if !capacityCacheCoversNamespace(cache, "configmaps", namespace) {
-		state.Reason = "Radar does not watch ConfigMaps in " + namespace
+	switch assessment.Readiness {
+	case k8s.KindPending:
+		state.Reason = "ConfigMaps are still loading"
+		return ref
+	case k8s.KindFailed:
+		state.Reason = "ConfigMaps failed to load"
+		return ref
+	case k8s.KindUnavailable:
+		state.Reason = "Radar is not collecting ConfigMaps"
+		return ref
+	}
+	lister := cache.ConfigMaps()
+	if lister == nil {
+		state.Reason = "could not read the ConfigMap"
 		return ref
 	}
 	cm, err := lister.ConfigMaps(namespace).Get(name)
