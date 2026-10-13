@@ -173,7 +173,10 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 
 		return cache, namespaces, nil
 	}
-	cache, readiness := k8s.ReadableCacheForKind(gvr.Resource)
+	cache, syncing := k8s.SnapshotCaches()
+	if cache == nil {
+		cache = syncing
+	}
 	if cache == nil {
 		return nil, nil, errNotConnected()
 	}
@@ -188,7 +191,8 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 			}
 		}
 	}
-	switch readiness {
+	assessment := cache.AssessKindRead(gvr.Resource, namespaces)
+	switch assessment.Readiness {
 	case k8s.KindPending:
 		return nil, nil, readErrorf(readreason.KindSyncPending, "%s are still loading, please retry shortly", gvr.Resource)
 	case k8s.KindFailed:
@@ -204,7 +208,6 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 		}
 		return nil, nil, readErrorf(readreason.KindNotWatched, "Radar is not watching resource %q in API group %q; check Radar's collector list/watch permissions and collection configuration", gvr.Resource, gvr.Group)
 	}
-	assessment := cache.AssessKindRead(gvr.Resource, namespaces)
 	covered := assessment.Read
 	if assessment.AllNamespaces {
 		return cache, namespaces, nil
@@ -383,6 +386,16 @@ func callerVisibleNamespaces(ctx context.Context, namespaces []string) []string 
 // repeated. Direct API reads need no informer and remain authoritative without
 // one.
 func checkDynamicResourceRead(ctx context.Context, kind, group, namespace, verb string, readErr error) (bool, error) {
+	dynamicCache := k8s.GetDynamicResourceCache()
+	gvr, ok := dynamicReadGVR(kind, group)
+	return checkDynamicResourceReadFrom(ctx, kind, group, namespace, verb, readErr, dynamicCache, gvr, ok)
+}
+
+func checkDynamicResourceReadFrom(ctx context.Context, kind, group, namespace, verb string, readErr error, dynamicCache *k8s.DynamicResourceCache, gvr schema.GroupVersionResource, ok bool) (bool, error) {
+	var classified *readError
+	if errors.As(readErr, &classified) {
+		return false, readErr
+	}
 	if errors.Is(readErr, k8s.ErrUnknownDynamicKind) {
 		return false, readErrorf(readreason.UnknownKind, "%w", readErr)
 	}
@@ -392,8 +405,6 @@ func checkDynamicResourceRead(ctx context.Context, kind, group, namespace, verb 
 		}
 		return false, readErrorf(readreason.KindNotWatched, "%s: %w", kind, readErr)
 	}
-	dynamicCache := k8s.GetDynamicResourceCache()
-	gvr, ok := dynamicReadGVR(kind, group)
 	direct := ok && directRead(gvr, verb)
 	if apierrors.IsForbidden(readErr) && ok && dynamicCache != nil && !direct && namespace != "" {
 		var covered []string
@@ -420,7 +431,7 @@ func checkDynamicResourceRead(ctx context.Context, kind, group, namespace, verb 
 		if !dynamicCache.IsNamespaceSynced(gvr, namespace) {
 			_, waitErr := dynamicCache.ListBlocking(gvr, namespace, dynamicSyncWait)
 			if waitErr != nil {
-				return checkDynamicResourceRead(ctx, kind, group, namespace, verb, waitErr)
+				return checkDynamicResourceReadFrom(ctx, kind, group, namespace, verb, waitErr, dynamicCache, gvr, ok)
 			}
 		}
 	}
@@ -468,27 +479,35 @@ func dynamicReadGVR(kind, group string) (schema.GroupVersionResource, bool) {
 	return gvr, ok && (group == "" || group == gvr.Group)
 }
 
-func dynamicScopeSynced(kind, group, namespace string) bool {
-	gvr, ok := dynamicReadGVR(kind, group)
-	dynamicCache := k8s.GetDynamicResourceCache()
-	return ok && dynamicCache != nil && dynamicCache.IsNamespaceSynced(gvr, namespace)
-}
-
 // readDynamicScope performs one dynamic-cache read and checks its scope. A
 // read that may have started before the scope's informer finished its initial
 // sync can have served a partial store, so it is repeated once sync is proven.
 // A scope already synced before and after the read was answered by that read;
 // repeating it would only deep-copy the store a second time.
 func readDynamicScope[T any](ctx context.Context, kind, group, namespace, verb string, read func() (T, error)) (T, error) {
-	syncedBefore := dynamicScopeSynced(kind, group, namespace)
+	dynamicCache := k8s.GetDynamicResourceCache()
+	discovery := k8s.GetResourceDiscovery()
+	cache := k8s.GetResourceCache()
+	gvr, ok := dynamicReadGVR(kind, group)
+	current := func() bool {
+		return dynamicCache == k8s.GetDynamicResourceCache() && discovery == k8s.GetResourceDiscovery() && cache == k8s.GetResourceCache()
+	}
+	synced := func() bool { return ok && dynamicCache != nil && dynamicCache.IsNamespaceSynced(gvr, namespace) }
+	syncedBefore := synced()
 	out, err := read()
-	settled := syncedBefore && dynamicScopeSynced(kind, group, namespace)
-	ready, err := checkDynamicResourceRead(ctx, kind, group, namespace, verb, err)
+	if !current() {
+		return out, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+	}
+	settled := syncedBefore && synced()
+	ready, err := checkDynamicResourceReadFrom(ctx, kind, group, namespace, verb, err, dynamicCache, gvr, ok)
 	if ready && !settled && (err == nil || isObjectNotFound(err)) {
 		out, err = read()
 		if err != nil {
-			_, err = checkDynamicResourceRead(ctx, kind, group, namespace, verb, err)
+			_, err = checkDynamicResourceReadFrom(ctx, kind, group, namespace, verb, err, dynamicCache, gvr, ok)
 		}
+	}
+	if !current() {
+		return out, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
 	}
 	return out, err
 }
@@ -530,9 +549,30 @@ func resourceGetError(ctx context.Context, err error, kind, namespace, name stri
 }
 
 func fetchMCPDynamicResource(ctx context.Context, cache *k8s.ResourceCache, kind, group, namespace, name string) (*unstructured.Unstructured, error) {
+	dynamicCache := k8s.GetDynamicResourceCache()
+	discovery := k8s.GetResourceDiscovery()
+	gvr, known := dynamicReadGVR(kind, group)
+	current := func() bool {
+		return cache == k8s.GetResourceCache() && dynamicCache == k8s.GetDynamicResourceCache() && discovery == k8s.GetResourceDiscovery()
+	}
+	if !current() {
+		return nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+	}
 	obj, err := readDynamicScope(ctx, kind, group, namespace, "get", func() (*unstructured.Unstructured, error) {
+		if !current() {
+			return nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+		}
+		if known && dynamicCache != nil && !k8s.TypedKindOwnsGroup(kind, group) {
+			if directRead(gvr, "get") {
+				return dynamicCache.GetDirect(ctx, gvr, namespace, name)
+			}
+			return dynamicCache.Get(gvr, namespace, name)
+		}
 		return cache.GetDynamicWithGroup(ctx, kind, namespace, name, group)
 	})
+	if !current() {
+		return nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+	}
 	if isObjectNotFound(err) {
 		return obj, resourceGetError(ctx, err, kind, namespace, name)
 	}

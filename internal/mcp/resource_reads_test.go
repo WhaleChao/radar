@@ -1902,3 +1902,24 @@ func TestResourceReadsNonWatchableKindIsNotSupported(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 }
+
+func TestReadDynamicScopeRejectsChangedHandlesBeforeAbsence(t *testing.T) {
+	setupListCoverageFixture(t, coverageCRD, false)
+	_, err := readDynamicScope(context.Background(), "widgets", "example.test", "alpha", "get", func() (*unstructured.Unstructured, error) {
+		k8s.ResetTestDynamicState()
+		return nil, k8score.ErrResourceNotFound
+	})
+	if err == nil || !strings.HasPrefix(err.Error(), "kind_sync_pending:") || !strings.Contains(err.Error(), "context changed") || isObjectNotFound(err) {
+		t.Fatalf("changed cluster produced authoritative absence: %v", err)
+	}
+}
+
+func TestListDynamicResourcesRejectsRetiredCacheHandle(t *testing.T) {
+	setupListCoverageFixture(t, coverageCRD, false)
+	retired := k8s.GetResourceCache()
+	k8s.ResetResourceCache()
+	_, _, err := listDynamicResources(context.Background(), retired, "widgets", "example.test", []string{"alpha", "beta"}, false, "none")
+	if err == nil || !strings.HasPrefix(err.Error(), "kind_sync_pending:") || !strings.Contains(err.Error(), "context changed") {
+		t.Fatalf("retired cache served a multi-namespace read: %v", err)
+	}
+}

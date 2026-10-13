@@ -43,6 +43,11 @@ export function namedInventoryRows(
   namespacesRead?: readonly string[],
   namespacesReadOmitted = 0,
 ): NamedInventoryRow[] {
+  const observedNamespaces = new Set(
+    resources
+      .map((resource) => resource.namespace ?? scopeNamespace)
+      .filter(Boolean),
+  );
   const seen = new Set<string>();
   const out: NamedInventoryRow[] = [];
   for (const item of items) {
@@ -83,7 +88,8 @@ export function namedInventoryRows(
         unread &&
         namespace &&
         namespacesReadOmitted === 0 &&
-        !namespacesRead.includes(namespace)
+        !namespacesRead.includes(namespace) &&
+        !observedNamespaces.has(namespace)
           ? namespace
           : undefined,
       readOnlyIn:
@@ -93,7 +99,9 @@ export function namedInventoryRows(
       coverageUnknown: Boolean(
         unread &&
         namespacesReadOmitted > 0 &&
-        (!namespace || !namespacesRead.includes(namespace)),
+        (!namespace ||
+          (!namespacesRead.includes(namespace) &&
+            !observedNamespaces.has(namespace))),
       ),
     });
   }

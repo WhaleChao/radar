@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/skyhook-io/radar/pkg/k8score"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -93,5 +94,34 @@ func TestBootstrapNamespace401RecoveryWiresRecoveredInformerCoverage(t *testing.
 	defer core.Stop()
 	if assessment := core.AssessKindRead("pods", []string{"alpha", "beta"}); !assessment.Complete {
 		t.Fatalf("recovered credentials still froze narrowed scope: %+v", assessment)
+	}
+}
+
+func TestBootstrapProbeBudgetExpiryKeepsNonAuthGrants(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	grants := &PermissionCheckResult{Perms: &ResourcePermissions{Pods: true}, Scopes: map[string]k8score.ResourceScope{"pods": {Enabled: true, Namespace: "alpha"}}, ScopeCandidatesTruncated: true}
+	calls := 0
+	got, err := bootstrapResourcePermissions(ctx, func(context.Context, bool) (*PermissionCheckResult, bool) { calls++; return grants, true })
+	if err != nil || got != grants || calls != 1 {
+		t.Fatalf("probe budget discarded completed grants: got=%+v err=%v calls=%d", got, err, calls)
+	}
+}
+
+func TestBootstrap401RetryBudgetExpiryDoesNotPublishFalseRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	rejected := &PermissionCheckResult{Perms: &ResourcePermissions{}, ProbeErrors: map[string]error{"pods": apierrors.NewUnauthorized("startup credentials rejected")}}
+	calls := 0
+	got, err := bootstrapResourcePermissions(ctx, func(context.Context, bool) (*PermissionCheckResult, bool) {
+		calls++
+		if calls == 1 {
+			return rejected, true
+		}
+		<-ctx.Done()
+		return &PermissionCheckResult{Perms: &ResourcePermissions{}, Scopes: map[string]k8score.ResourceScope{}}, true
+	})
+	if got != nil || !apierrors.IsUnauthorized(err) || calls != 2 {
+		t.Fatalf("expired retry implied credentials recovered: got=%+v err=%v calls=%d", got, err, calls)
 	}
 }

@@ -2207,17 +2207,26 @@ func (rc *ResourceCache) PermissionResult() *PermissionCheckResult {
 // A transient startup 401 must not freeze a narrowed informer set for the
 // lifetime of the connection. Retry once within the existing probe budget;
 // persistent rejection fails initialization into the connection's auth owner.
+// Non-auth probe budget expiry retains established grants; outer cancellation
+// is checked by initialization before any informer is wired.
 func bootstrapResourcePermissions(ctx context.Context, check func(context.Context, bool) (*PermissionCheckResult, bool)) (*PermissionCheckResult, error) {
+	var rejected error
 	for attempt := 0; attempt < 2; attempt++ {
 		result, _ := check(ctx, attempt > 0)
 		if err := permissionUnauthorized(result); err != nil {
+			rejected = err
 			if attempt == 1 || ctx.Err() != nil {
 				return nil, fmt.Errorf("resource access probe rejected credentials: %w", err)
 			}
 			continue
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			if rejected != nil {
+				return nil, fmt.Errorf("resource access probe could not confirm recovered credentials within its budget: %w", rejected)
+			}
+			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, ctx.Err()
+			}
 		}
 		return result, nil
 	}

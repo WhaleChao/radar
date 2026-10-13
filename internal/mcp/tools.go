@@ -944,6 +944,13 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 
 func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, group string, namespaces []string, clusterScoped bool, contextMode string) (*mcp.CallToolResult, any, error) {
 	dynamicCache := k8s.GetDynamicResourceCache()
+	discovery := k8s.GetResourceDiscovery()
+	current := func() bool {
+		return cache == k8s.GetResourceCache() && dynamicCache == k8s.GetDynamicResourceCache() && discovery == k8s.GetResourceDiscovery()
+	}
+	if !current() {
+		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+	}
 	gvr, found := discoveredGVR(kind, group)
 	// No namespaces means an unrestricted caller and no --namespace-scope pin
 	// (the pin and explicit requests always arrive as namespaces): the
@@ -951,6 +958,15 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 	unrestrictedAll := !clusterScoped && namespaces == nil
 	listAt := func(ns string) func() ([]*unstructured.Unstructured, error) {
 		return func() ([]*unstructured.Unstructured, error) {
+			if !current() {
+				return nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+			}
+			if found && dynamicCache != nil {
+				if k8s.ShouldBypassDynamicInformer(gvr) {
+					return dynamicCache.ListDirect(ctx, gvr, ns)
+				}
+				return dynamicCache.List(gvr, ns)
+			}
 			return cache.ListDynamicWithGroup(ctx, kind, ns, group)
 		}
 	}
@@ -1053,6 +1069,9 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 		}
 	}
 
+	if !current() {
+		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+	}
 	return listResult(allItems, coverage)
 }
 

@@ -127,6 +127,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
     };
     const rows = [
       { kind: "Service", name: "present", namespace: namespaces[0] },
+      { kind: "Service", name: "observed", namespace: "team-39" },
     ];
     const projection = project([
       tool(
@@ -146,7 +147,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
     expect(data.namespacesRead).toEqual(namespaces.slice(0, 8));
     expect(data.namespacesReadOmitted).toBe(32);
     expect(inventory.latest.summary).toBe(
-      "1 returned · only 40 namespaces read",
+      "2 returned · only 40 namespaces read",
     );
     const entries = namedInventoryRows(
       data.resources,
@@ -154,6 +155,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
         { subject: { kind: "Service", name: "api" } },
         { subject: { kind: "Service", name: "api", namespace: "team-40" } },
         { subject: { kind: "Service", name: "api", namespace: "unread" } },
+        { subject: { kind: "Service", name: "api", namespace: "team-39" } },
       ],
       undefined,
       data.namespacesRead,
@@ -163,6 +165,8 @@ describe("a list Radar's collector read only in some namespaces", () => {
     expect(entries[1].coverageUnknown).toBe(true);
     expect(entries[2].coverageUnknown).toBe(true);
     expect(entries[2].notRead).toBeUndefined();
+    expect(entries[3].coverageUnknown).toBe(false);
+    expect(entries[3].notRead).toBeUndefined();
     const html = renderToStaticMarkup(
       createElement(StoryExcerpt, {
         excerpt: { kind: "rows", entries },
@@ -173,10 +177,11 @@ describe("a list Radar's collector read only in some namespaces", () => {
       }),
     );
     expect(html).toContain(
-      "api: read coverage is unknown for this namespace; namespace details were abbreviated",
+      "api: read coverage is unknown here; namespace details were abbreviated",
     );
     expect(html).not.toContain("team-04");
     expect(html).not.toContain("Not in this listing: team-40/api");
+    expect(html).toContain("Not in this listing: team-39/api");
     expect(html).not.toContain("unread/api: unread was not read");
     expect(html).toContain("unread/api: read coverage is unknown");
     const empty = project([

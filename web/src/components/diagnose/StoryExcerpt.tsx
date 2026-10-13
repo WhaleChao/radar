@@ -83,7 +83,7 @@ export function StoryExcerpt({
                   )}
                 >
                   {entry.coverageUnknown
-                    ? `${entry.label}: read coverage is unknown for this namespace; namespace details were abbreviated`
+                    ? `${entry.label}: read coverage is unknown here; namespace details were abbreviated`
                     : entry.notRead
                       ? `${entry.label}: ${entry.notRead} was not read`
                       : entry.readOnlyIn
