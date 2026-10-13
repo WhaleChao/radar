@@ -86,9 +86,6 @@ func newCoverage(q Query) *coverage {
 // quiet reports whether a kind-level reason goes unreported for this query,
 // so callers can skip work that could only produce it.
 func (c *coverage) quiet(reason readreason.Code) bool {
-	if reason == readreason.KindNotWatched {
-		return true
-	}
 	return classify(reason) == classScope && !c.namedKinds
 }
 

@@ -40,7 +40,7 @@ func TestCacheProviderTypedCoverageUsesReadinessAndScope(t *testing.T) {
 		{"Pod", nil, "collector_scope_limited"},
 		{"Pod", []string{"team-b"}, "collector_scope_limited"},
 		{"Pod", []string{"team-a", "team-b"}, "collector_scope_limited"},
-		{"Secret", []string{"team-a"}, "kind_sync_pending"},
+		{"Secret", []string{"team-a"}, "kind_not_watched"},
 	} {
 		if got := p.TypedCoverage(tc.kind, tc.namespaces); string(got) != tc.reason {
 			t.Errorf("%s %v: got %q want %q", tc.kind, tc.namespaces, got, tc.reason)
@@ -75,7 +75,7 @@ func TestCacheProviderUnavailableTypedUsesCollectorPermissions(t *testing.T) {
 		}
 	}
 	p.permissions.Secrets = true
-	if got := p.TypedCoverage("Secret", nil); got != "kind_sync_pending" {
+	if got := p.TypedCoverage("Secret", nil); got != "kind_not_watched" {
 		t.Fatalf("allowed but unavailable: %q", got)
 	}
 }

@@ -27,6 +27,7 @@ type CacheProvider struct {
 	dynamic      *k8s.DynamicResourceCache
 	discovery    *k8s.ResourceDiscovery
 	permissions  *k8s.ResourcePermissions
+	probeErrors  map[string]error
 	observations *k8score.DynamicObservationView
 }
 
@@ -42,8 +43,12 @@ func NewCacheProvider() *CacheProvider {
 		dynamic:   k8s.GetDynamicResourceCache(),
 		discovery: k8s.GetResourceDiscovery(),
 	}
-	if result := k8s.GetCachedPermissionResult(); result != nil {
+	if result := cache.PermissionResult(); result != nil {
 		provider.permissions = result.Perms
+		provider.probeErrors = result.ProbeErrors
+	}
+	if cache != k8s.GetResourceCache() || provider.dynamic != k8s.GetDynamicResourceCache() || provider.discovery != k8s.GetResourceDiscovery() {
+		return nil
 	}
 	return provider
 }
@@ -107,32 +112,26 @@ func (p *CacheProvider) DynamicResources() ([]schema.GroupVersionResource, error
 }
 
 func (p *CacheProvider) TypedCoverage(kind string, namespaces []string) readreason.Code {
-	switch p.cache.KindReadinessForKindName(kind) {
+	resource := k8s.CanonicalBuiltinKind(kind)
+	assessment := p.cache.AssessKindRead(resource, namespaces)
+	switch assessment.Readiness {
 	case k8s.KindPending:
 		return readreason.KindSyncPending
 	case k8s.KindFailed:
 		return readreason.KindSyncFailed
 	case k8s.KindUnavailable:
+		if apierrors.IsUnauthorized(p.probeErrors[resource]) {
+			return readreason.CollectorUnauthorized
+		}
 		if p.permissions != nil && !p.permissions.CanList(kind) {
 			return readreason.CollectorAccessDenied
 		}
-		return readreason.KindSyncPending
+		return readreason.KindNotWatched
 	}
-	if isClusterScopedKind(kind) {
-		return ""
+	if !isClusterScopedKind(kind) && !assessment.Complete {
+		return readreason.CollectorScopeLimited
 	}
-	resource := k8s.CanonicalBuiltinKind(kind)
-	if len(namespaces) == 0 {
-		if !p.cache.IsKindClusterWide(resource) {
-			return readreason.CollectorScopeLimited
-		}
-	} else {
-		for _, ns := range namespaces {
-			if !p.cache.KindCoversNamespace(resource, ns) {
-				return readreason.CollectorScopeLimited
-			}
-		}
-	}
+
 	return ""
 }
 
