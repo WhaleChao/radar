@@ -177,23 +177,17 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   // unguarded on exactly the clusters the guard protects. Counts arrive
   // right after 'connected' and settle the guard then.
   const syncShellActive = connection.state === 'connecting'
-  // A kind whose sync deadline fired is unavailable-with-a-reason: hand it to
-  // the list endpoint, whose 503 kind_sync_failed renders the honest error —
-  // the guard would otherwise trap it on "count unavailable" forever. Safe to
-  // unblock: the server serves no rows for a failed kind.
-  const selectedCountFailedSync =
-    selectedCountUnavailable && countsData?.reasons?.[selectedCountKey] === 'kind_sync_failed'
-  // A guarded kind whose informer hasn't finished reports unavailable with a
-  // kind_sync_pending reason — "count not known YET", so keep the loading
-  // state. Keyed on the reason, not on connection.state: deferred kinds sync
-  // after connect. Reasonless unavailable stays a real verification failure
-  // and blocks the view as before.
+  // A reasoned unavailable count must reach the list endpoint, which supplies
+  // the collector error without materializing an unchecked large payload.
+  const selectedCountReadFailure = selectedCountUnavailable &&
+    Boolean(countsData?.reasons?.[selectedCountKey]) &&
+    countsData?.reasons?.[selectedCountKey] !== 'kind_sync_pending'
   const selectedCountPendingSync =
     (selectedCountUnavailable && countsData?.reasons?.[selectedCountKey] === 'kind_sync_pending') ||
-    (syncShellActive && selectedCountUnavailable && !selectedCountFailedSync)
+    (syncShellActive && selectedCountUnavailable && !selectedCountReadFailure)
   const waitingForGuardCount = isSelectedKindGuarded &&
     ((!countsData && (!countsIsError || syncShellActive)) || selectedCountPendingSync)
-  const largeListBlocked = isSelectedKindGuarded && countsData != null && !selectedCountPendingSync && !selectedCountFailedSync &&
+  const largeListBlocked = isSelectedKindGuarded && countsData != null && !selectedCountPendingSync && !selectedCountReadFailure &&
     (selectedCountUnavailable || (selectedCountKnown && (selectedCount ?? 0) > selectedKindRowLimit))
   const selectedKindQueryBlocked = waitingForGuardCount || largeListBlocked
   const podCount = countsData?.counts.Pod

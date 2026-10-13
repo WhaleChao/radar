@@ -58,6 +58,10 @@ func collectionFailure(resource string, err error) *resourceReadFailure {
 	switch {
 	case errors.Is(err, k8score.ErrResourceListTooLarge):
 		return &resourceReadFailure{400, "resource_list_too_large", "Too many resources to load; select fewer namespaces"}
+	case errors.Is(err, k8score.ErrCollectionNotSupported):
+		return &resourceReadFailure{503, readreason.CollectionNotSupported, fmt.Sprintf("%s cannot be collected with list/watch", resource)}
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		return &resourceReadFailure{503, readreason.ReadError, "Kubernetes read did not finish within the request budget; retry with fewer namespaces"}
 	case apierrors.IsUnauthorized(err):
 		return &resourceReadFailure{http.StatusServiceUnavailable, readreason.CollectorUnauthorized, "Kubernetes rejected Radar's collector credentials"}
 	case apierrors.IsForbidden(err):
@@ -253,7 +257,11 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 			var items []*unstructured.Unstructured
 			var readErr error
 			if ctx.Err() != nil {
-				readErr = namespaceReadFailure(dynamicCache, gvr, namespace)
+				if direct {
+					readErr = collectionFailure(gvr.Resource, ctx.Err())
+				} else {
+					readErr = namespaceReadFailure(dynamicCache, gvr, namespace)
+				}
 			} else if direct {
 				items, readErr = dynamicCache.ListDirectBounded(ctx, gvr, namespace, limit)
 			} else {

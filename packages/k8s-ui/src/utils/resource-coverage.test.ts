@@ -30,6 +30,9 @@ describe('resource coverage presentation', () => {
   it('retains partial numeric counts without treating zero as absence', () => {
     expect(resourceCountLabel(23, partial)).toBe('≥23')
     expect(resourceCountLabel(0, partial)).toBe('–')
+    expect(resourceCountLabel(0, { status: 'unknown' })).toBe('–')
+    expect(resourceCountLabel(23, { status: 'unknown' })).toBe('≥23')
+    expect(resourceCountLabel(23, complete)).toBe('23')
     expect(isConfirmedEmpty(0, partial)).toBe(false)
     expect(isConfirmedEmpty(0, undefined)).toBe(false)
     expect(isConfirmedEmpty(0, complete)).toBe(true)

@@ -30,6 +30,6 @@ export function isConfirmedEmpty(count: number | null | undefined, coverage: Res
 }
 
 export function resourceCountLabel(count: number, coverage: ResourceCoverage | undefined): string {
-  if (count === 0 && coverage?.status === 'partial') return '–'
-  return `${coverage?.status === 'partial' ? '≥' : ''}${count.toLocaleString()}`
+  if (count === 0 && coverage?.status !== 'complete') return '–'
+  return `${coverage?.status !== 'complete' ? '≥' : ''}${count.toLocaleString()}`
 }

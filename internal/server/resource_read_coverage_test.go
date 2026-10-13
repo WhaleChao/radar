@@ -16,6 +16,7 @@ import (
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/readreason"
 	"github.com/skyhook-io/radar/pkg/resourceapi"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -664,5 +665,17 @@ func TestDirectResourceListFollowsSmallPagesWithinBudget(t *testing.T) {
 				t.Fatalf("continue tokens = %v; small pages must be read until the budget or end", continuations)
 			}
 		})
+	}
+}
+
+func TestCollectionFailureKeepsUnsupportedAndTimeoutCauses(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		reason readreason.Code
+	}{{fmt.Errorf("wrapped: %w", k8score.ErrCollectionNotSupported), readreason.CollectionNotSupported}, {context.DeadlineExceeded, readreason.ReadError}, {context.Canceled, readreason.ReadError}} {
+		failure := collectionFailure("widgets", tc.err)
+		if failure.status != 503 || failure.reason != tc.reason {
+			t.Fatalf("%v classified as %+v", tc.err, failure)
+		}
 	}
 }
