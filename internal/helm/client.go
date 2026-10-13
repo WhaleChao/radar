@@ -32,6 +32,7 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/release"
@@ -737,30 +738,28 @@ func (c *Client) GetValuesRevisionAsUser(namespace, name string, allValues bool,
 }
 
 func getValuesWith(actionConfig *action.Configuration, name string, allValues bool, revision int) (*HelmValues, error) {
-	getValuesAction := action.NewGetValues(actionConfig)
-	getValuesAction.AllValues = allValues
-	getValuesAction.Version = revision
-
-	values, err := getValuesAction.Run(name)
+	getAction := action.NewGet(actionConfig)
+	getAction.Version = revision
+	rel, err := getAction.Run(name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get helm release values: %w", err)
 	}
 
+	userSupplied := rel.Config
+	if userSupplied == nil {
+		userSupplied = map[string]any{}
+	}
+	result := &HelmValues{UserSupplied: userSupplied}
+
 	if allValues {
-		result := &HelmValues{
-			Computed:     values,
-			UserSupplied: map[string]any{},
+		computed, err := chartutil.CoalesceValues(rel.Chart, rel.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute helm release values: %w", err)
 		}
-		getValuesAction.AllValues = false
-		getValuesAction.Version = revision
-		userValues, err := getValuesAction.Run(name)
-		if err == nil {
-			result.UserSupplied = userValues
-		}
-		return result, nil
+		result.Computed = computed
 	}
 
-	return &HelmValues{UserSupplied: values}, nil
+	return result, nil
 }
 
 // GetValuesDiff returns a values diff between two revisions.
@@ -1545,6 +1544,10 @@ func helmReleaseStorageSnapshotFromSecrets(ctx context.Context, secrets []corev1
 			log.Printf("[helm] failed to decode release secret %s/%s: %v", secret.Namespace, secret.Name, err)
 			continue
 		}
+		// Helm stores Release.Labels on the Secret, not in the encoded payload.
+		// Restore them like Helm's own List does, so the batch upgrade check sees
+		// the recorded chart source.
+		rel.Labels = secret.Labels
 		snapshot.storageNamespaces[releaseStorageKey(rel)] = secret.Namespace
 
 		historyKey := releaseHistoryKey(rel)
@@ -2139,6 +2142,13 @@ func (c *Client) checkForUpgrade(namespace, name, username string, groups []stri
 	info := &UpgradeInfo{
 		CurrentVersion: currentVersion,
 	}
+	if recorded, ok := chartSourceFromRelease(rel); ok {
+		if c.applyRecordedUpgrade(info, *recorded, chartName, currentVersion, nil) {
+			return info, nil
+		}
+		markUpgradeSourceIssue(info, UpgradeSourceIssueUnavailable, recordedSourceUnavailableMessage)
+		return info, nil
+	}
 
 	// Load repository file. A missing/empty/unreadable repo config is not fatal —
 	// the user may rely solely on registered OCI sources, so we fall through to the
@@ -2282,6 +2292,9 @@ func (c *Client) availableVersions(namespace, name, username string, groups []st
 		return nil, fmt.Errorf("failed to get release: %w", err)
 	}
 	chartName := rel.Chart.Metadata.Name
+	if recorded, ok := chartSourceFromRelease(rel); ok {
+		return capVersions(c.candidateVersions(*recorded, chartName, nil)), nil
+	}
 
 	// Resolve the classic repo the same way the upgrade check does, then return
 	// that repo's full version list — never a union across repos, which could mix
@@ -2982,7 +2995,13 @@ func (c *Client) loadTargetChart(actionConfig *action.Configuration, rel *releas
 	chartName := rel.Chart.Metadata.Name
 	sendProgress("resolving", fmt.Sprintf("Finding %s version %s in repositories...", chartName, targetVersion), "")
 
-	chartPath, resolvedRepo, err := c.resolveUpgradeChartPath(chartName, targetVersion, repositoryName, chartSourceHosts(rel.Chart.Metadata.Home, rel.Chart.Metadata.Sources))
+	var chartPath, resolvedRepo string
+	var err error
+	if recorded, ok := chartSourceFromRelease(rel); ok {
+		chartPath, resolvedRepo, err = c.resolveRecordedChartPath(actionConfig, *recorded, chartName, targetVersion)
+	} else {
+		chartPath, resolvedRepo, err = c.resolveUpgradeChartPath(chartName, targetVersion, repositoryName, chartSourceHosts(rel.Chart.Metadata.Home, rel.Chart.Metadata.Sources))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3326,6 +3345,30 @@ func (c *Client) batchCheckUpgrades(ctx context.Context, namespace, username str
 		currentVersion := rel.Chart.Metadata.Version
 		chartName := rel.Chart.Metadata.Name
 		info := &UpgradeInfo{CurrentVersion: currentVersion}
+
+		// Recorded provenance decides, exactly as in checkForUpgrade, so the list
+		// never advertises an upgrade from a source the drawer would refuse.
+		if recorded, ok := chartSourceFromRelease(rel); ok {
+			var versions []string
+			if recorded.Type == "repository" {
+				if configured := c.configuredRepositoryForSource(*recorded); configured != nil {
+					versions = sortVersionsDesc(chartAllVersions[chartName][configured.Name])
+				}
+			} else if len(ListOCISources()) > 0 {
+				if !ociReady {
+					ociLister = c.newRegistryClient()
+					ociReady = true
+				}
+				if ociLister != nil {
+					versions = c.candidateVersions(*recorded, chartName, cachedTagLister{ociLister, tagCache})
+				}
+			}
+			if !c.applyRecordedVersions(info, *recorded, versions, currentVersion) {
+				markUpgradeSourceIssue(info, UpgradeSourceIssueUnavailable, recordedSourceUnavailableMessage)
+			}
+			result.Releases[key] = info
+			continue
+		}
 
 		baseCandidates, ok := chartRepoVersions[chartName]
 		if !ok {
@@ -3914,6 +3957,16 @@ func (c *Client) installWith(actionConfig *action.Configuration, req *InstallReq
 	if err != nil {
 		return nil, err
 	}
+	resolvedSource, err := c.installChartSource(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record chart source: %w", err)
+	}
+	if resolvedSource != nil {
+		if err := validateChartSourceCandidate(resolvedSource); err != nil {
+			return nil, err
+		}
+	}
+	req.resolvedSource = resolvedSource
 
 	cp, err := c.locateChartPath(actionConfig, chartURL, resolvedVersion)
 	if err != nil {
@@ -4101,6 +4154,16 @@ func (c *Client) installWithProgressUsing(actionConfig *action.Configuration, re
 	if err != nil {
 		return nil, err
 	}
+	resolvedSource, err := c.installChartSource(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record chart source: %w", err)
+	}
+	if resolvedSource != nil {
+		if err := validateChartSourceCandidate(resolvedSource); err != nil {
+			return nil, err
+		}
+	}
+	req.resolvedSource = resolvedSource
 
 	sendProgress("downloading", fmt.Sprintf("Downloading chart %s-%s...", req.ChartName, req.Version), chartURL)
 

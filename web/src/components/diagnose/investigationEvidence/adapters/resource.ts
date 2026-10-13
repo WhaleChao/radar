@@ -226,20 +226,74 @@ export function adaptListNamespaces(
   );
 }
 
+// A list Radar's collector could read only in some namespaces arrives as
+// `{coverage, items}`, naming the namespaces it read; a complete list is the
+// bare array.
+function listedRows(
+  payload: unknown,
+):
+  | {
+      rows: unknown[];
+      coverage?: {
+        namespacesRead: string[];
+        namespacesTotal: number;
+        namespacesOmitted: number;
+        note: string;
+      };
+    }
+  | undefined {
+  if (Array.isArray(payload)) return { rows: payload };
+  const value = record(payload);
+  const coverage = record(value?.coverage);
+  const read = record(coverage?.read);
+  const namespaceSet = record(read?.namespaces);
+  const namespacesRead = stringArray(namespaceSet?.names);
+  const total = namespaceSet?.total;
+  const omitted = namespaceSet?.omitted;
+  if (
+    !value ||
+    !Array.isArray(value.items) ||
+    coverage?.status !== "partial" ||
+    read?.type !== "namespaces" ||
+    !namespacesRead?.length ||
+    typeof total !== "number" ||
+    !Number.isInteger(total) ||
+    typeof omitted !== "number" ||
+    !Number.isInteger(omitted) ||
+    omitted < 0 ||
+    total !== namespacesRead.length + omitted ||
+    !nonEmptyString(coverage.note)
+  ) {
+    return undefined;
+  }
+  return {
+    rows: value.items,
+    coverage: {
+      namespacesRead,
+      namespacesTotal: total,
+      namespacesOmitted: omitted,
+      note: coverage.note,
+    },
+  };
+}
+
 export function adaptListResources(
   builder: ProjectionBuilder,
   source: InvestigationEvidenceSource,
   payload: unknown,
   options: { title?: string } = {},
 ): void {
-  if (!Array.isArray(payload)) {
+  const listed = listedRows(payload);
+  if (!listed) {
     invalidPayload(builder, source);
     return;
   }
-  const resources = payload
+  const { rows, coverage } = listed;
+  const namespacesRead = coverage?.namespacesRead;
+  const resources = rows
     .map(resourceSummary)
     .filter((item): item is InvestigationResourceSummary => Boolean(item));
-  if (resources.length !== payload.length) {
+  if (resources.length !== rows.length) {
     invalidPayload(builder, source);
     return;
   }
@@ -259,10 +313,14 @@ export function adaptListResources(
   if (resources.length === 0) {
     // list_resources intentionally returns [] for some RBAC-filtered reads;
     // even a successful transport outcome therefore cannot prove absence.
+    // The requested kind may be an alias ("svc"), so a partial read's copy
+    // is the server's note, which names the resource it resolved.
     builder.limit(
       source,
       "Resource inventory",
-      `Radar found no matching resources for ${scope}. Anything you do not have permission to read was not searched.`,
+      coverage
+        ? `The listing returned nothing. ${coverage.note}`
+        : `Radar found no matching resources for ${scope}. Anything you do not have permission to read was not searched.`,
       "unknown",
     );
     return;
@@ -288,8 +346,24 @@ export function adaptListResources(
       relevance: "broader",
       tone: hasAdverseResource ? "warning" : "neutral",
       title,
-      summary: `${resources.length} returned${nonEmptyString(args?.group) ? ` · ${args.group}` : ""}`,
-      data: { type: "inventory", resources, scope },
+      summary: [
+        `${resources.length} returned`,
+        nonEmptyString(args?.group) ? args.group : undefined,
+        namespacesRead
+          ? `only ${coverage!.namespacesTotal > 2 ? `${coverage!.namespacesTotal} namespaces` : namespacesRead.join(", ")} read`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      data: namespacesRead
+        ? {
+            type: "inventory",
+            resources,
+            scope,
+            namespacesRead,
+            namespacesReadOmitted: coverage!.namespacesOmitted,
+          }
+        : { type: "inventory", resources, scope },
     },
   );
 }

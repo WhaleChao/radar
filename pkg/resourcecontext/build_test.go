@@ -3,6 +3,8 @@ package resourcecontext
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +70,7 @@ func (m mockServiceBackends) PodsForServiceSelector(namespace string, selector l
 type mockResourceProvider struct {
 	pods         []*corev1.Pod
 	deploys      []*appsv1.Deployment
+	replicaSets  []*appsv1.ReplicaSet
 	daemonSets   []*appsv1.DaemonSet
 	statefulSets []*appsv1.StatefulSet
 	jobs         []*batchv1.Job
@@ -82,7 +85,7 @@ func (m mockResourceProvider) DaemonSets() ([]*appsv1.DaemonSet, error)   { retu
 func (m mockResourceProvider) StatefulSets() ([]*appsv1.StatefulSet, error) {
 	return m.statefulSets, nil
 }
-func (m mockResourceProvider) ReplicaSets() ([]*appsv1.ReplicaSet, error)  { return nil, nil }
+func (m mockResourceProvider) ReplicaSets() ([]*appsv1.ReplicaSet, error)  { return m.replicaSets, nil }
 func (m mockResourceProvider) Jobs() ([]*batchv1.Job, error)               { return m.jobs, nil }
 func (m mockResourceProvider) CronJobs() ([]*batchv1.CronJob, error)       { return m.cronJobs, nil }
 func (m mockResourceProvider) Ingresses() ([]*networkingv1.Ingress, error) { return nil, nil }
@@ -1263,7 +1266,7 @@ func TestBuild_ConfigMapReferencedBy(t *testing.T) {
 	}
 }
 
-func TestBuild_SecretReferencedByCapsAndSkipsOwnedPods(t *testing.T) {
+func TestBuild_SecretReferencedByCapsIncludingOwnedPods(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db-creds", Namespace: "prod"}}
 	deploys := make([]*appsv1.Deployment, 0, maxReferencedByItems+1)
 	for i := 0; i < maxReferencedByItems+1; i++ {
@@ -1313,7 +1316,7 @@ func TestBuild_SecretReferencedByCapsAndSkipsOwnedPods(t *testing.T) {
 	if rc.ReferencedBy == nil {
 		t.Fatal("ReferencedBy: got nil")
 	}
-	if got, want := rc.ReferencedBy.Total, maxReferencedByItems+1; got != want {
+	if got, want := rc.ReferencedBy.Total, maxReferencedByItems+2; got != want {
 		t.Fatalf("ReferencedBy.Total: got %d want %d", got, want)
 	}
 	if got, want := len(rc.ReferencedBy.Items), maxReferencedByItems; got != want {
@@ -1321,11 +1324,6 @@ func TestBuild_SecretReferencedByCapsAndSkipsOwnedPods(t *testing.T) {
 	}
 	if !rc.ReferencedBy.Truncated {
 		t.Fatal("ReferencedBy.Truncated: got false want true")
-	}
-	for _, ref := range rc.ReferencedBy.Items {
-		if ref.Kind == "Pod" {
-			t.Fatalf("owned pod should be skipped when controller workload is available: %+v", ref)
-		}
 	}
 }
 
@@ -2026,5 +2024,227 @@ func TestProjectionContextMonitoringAndPolicyPermissions(t *testing.T) {
 	denied := Build(context.Background(), obj, Options{Relationships: rel, AccessChecker: denyChecker{group: "example.io", kind: "Widget", namespace: "demo"}})
 	if len(denied.Monitors)+len(denied.MonitorTargets)+len(denied.Protects)+len(denied.HealthChecks)+len(denied.StagedPolicies)+len(denied.ExposedBy) != 0 {
 		t.Fatalf("new context refs ignored permissions: %+v", denied)
+	}
+}
+
+func TestPodSpecReferencePathsContainerAndVolumeProvenance(t *testing.T) {
+	spec := corev1.PodSpec{
+		InitContainers:      []corev1.Container{{EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "credential"}}}}}},
+		EphemeralContainers: []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "credential"}}}}}}},
+		Volumes:             []corev1.Volume{{VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{NodePublishSecretRef: &corev1.LocalObjectReference{Name: "credential"}}}}},
+	}
+	got := podSpecReferencePaths(spec, "spec", refTarget{kind: "Secret", namespace: "team", name: "credential"})
+	want := []string{
+		"spec.ephemeralContainers[].envFrom[].secretRef.name",
+		"spec.initContainers[].envFrom[].secretRef.name",
+		"spec.volumes[].csi.nodePublishSecretRef.name",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reference paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuild_PodSpecConsumersRequireCoreTargetGroup(t *testing.T) {
+	var spec corev1.PodSpec
+	if err := json.Unmarshal([]byte(`{
+ "containers":[{"name":"app","envFrom":[{"configMapRef":{"name":"env-config"}},{"secretRef":{"name":"env-secret"}}],"env":[{"name":"C","valueFrom":{"configMapKeyRef":{"name":"key-config","key":"key"}}},{"name":"S","valueFrom":{"secretKeyRef":{"name":"key-secret","key":"key"}}}]}],
+ "initContainers":[{"name":"init","envFrom":[{"configMapRef":{"name":"init-config"}},{"secretRef":{"name":"init-secret"}}]}],
+ "ephemeralContainers":[{"name":"debug","envFrom":[{"configMapRef":{"name":"debug-config"}},{"secretRef":{"name":"debug-secret"}}]}],
+ "imagePullSecrets":[{"name":"pull"}],
+ "volumes":[
+ {"name":"config","configMap":{"name":"volume-config"}},
+ {"name":"secret","secret":{"secretName":"volume-secret"}},
+ {"name":"projected","projected":{"sources":[{"configMap":{"name":"projected-config"}},{"secret":{"name":"projected-secret"}}]}},
+ {"name":"csi","csi":{"driver":"example.com","nodePublishSecretRef":{"name":"csi"}}},
+ {"name":"flex","flexVolume":{"driver":"example.com","secretRef":{"name":"flex"}}},
+ {"name":"azure","azureFile":{"secretName":"azure","shareName":"data"}},
+ {"name":"ceph","cephfs":{"secretRef":{"name":"ceph"}}},
+ {"name":"rbd","rbd":{"secretRef":{"name":"rbd"}}},
+ {"name":"cinder","cinder":{"secretRef":{"name":"cinder"}}},
+ {"name":"scale","scaleIO":{"secretRef":{"name":"scale"}}},
+ {"name":"iscsi","iscsi":{"secretRef":{"name":"iscsi"}}},
+ {"name":"storage","storageos":{"secretRef":{"name":"storage"}}}
+ ]}`), &spec); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "team"}, Spec: spec}
+	provider := mockResourceProvider{pods: []*corev1.Pod{pod}}
+	refs := []struct{ Kind, Name, Path string }{
+		{"ConfigMap", "env-config", "containers[].envFrom[].configMapRef.name"},
+		{"Secret", "env-secret", "containers[].envFrom[].secretRef.name"},
+		{"ConfigMap", "key-config", "containers[].env[].valueFrom.configMapKeyRef.name"},
+		{"Secret", "key-secret", "containers[].env[].valueFrom.secretKeyRef.name"},
+		{"ConfigMap", "init-config", "initContainers[].envFrom[].configMapRef.name"},
+		{"Secret", "init-secret", "initContainers[].envFrom[].secretRef.name"},
+		{"ConfigMap", "debug-config", "ephemeralContainers[].envFrom[].configMapRef.name"},
+		{"Secret", "debug-secret", "ephemeralContainers[].envFrom[].secretRef.name"},
+		{"ConfigMap", "volume-config", "volumes[].configMap.name"},
+		{"Secret", "volume-secret", "volumes[].secret.secretName"},
+		{"ConfigMap", "projected-config", "volumes[].projected.sources[].configMap.name"},
+		{"Secret", "projected-secret", "volumes[].projected.sources[].secret.name"},
+		{"Secret", "pull", "imagePullSecrets[].name"},
+		{"Secret", "csi", "volumes[].csi.nodePublishSecretRef.name"},
+		{"Secret", "flex", "volumes[].flexVolume.secretRef.name"},
+		{"Secret", "azure", "volumes[].azureFile.secretName"},
+		{"Secret", "ceph", "volumes[].cephfs.secretRef.name"},
+		{"Secret", "rbd", "volumes[].rbd.secretRef.name"},
+		{"Secret", "cinder", "volumes[].cinder.secretRef.name"},
+		{"Secret", "scale", "volumes[].scaleIO.secretRef.name"},
+		{"Secret", "iscsi", "volumes[].iscsi.secretRef.name"},
+		{"Secret", "storage", "volumes[].storageos.secretRef.name"},
+	}
+	for _, ref := range refs {
+		t.Run(ref.Kind+"/"+ref.Name, func(t *testing.T) {
+			for _, version := range []string{"v1", "foreign.example/v1"} {
+				obj := &unstructured.Unstructured{Object: map[string]any{"apiVersion": version, "kind": ref.Kind, "metadata": map[string]any{"name": ref.Name, "namespace": "team"}}}
+				rc := Build(context.Background(), obj, Options{Tier: TierBasic, Provider: provider})
+				if version != "v1" {
+					if rc.ReferencedBy != nil {
+						t.Fatalf("foreign target acquired core consumers: %+v", rc.ReferencedBy)
+					}
+					continue
+				}
+				if rc.ReferencedBy == nil || rc.ReferencedBy.Total != 1 || !reflect.DeepEqual(rc.ReferencedBy.Items[0].Paths, []string{"spec." + ref.Path}) {
+					t.Fatalf("core target lost consumer provenance: %+v", rc.ReferencedBy)
+				}
+			}
+		})
+	}
+}
+
+func TestBuild_UsesDeclaredPodReferencesAcrossAllContainerAndVolumeSources(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "live", Namespace: "team"}, Spec: corev1.PodSpec{
+		ServiceAccountName: "runner",
+		ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "registry"}},
+		EphemeralContainers: []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+			Name: "debug", EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "debug-config"}}}},
+		}}},
+		Volumes: []corev1.Volume{
+			{Name: "driver", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "example.csi", NodePublishSecretRef: &corev1.LocalObjectReference{Name: "driver-credential"}}}},
+			{Name: "disk", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}},
+		},
+	}}
+	rc := Build(context.Background(), pod, Options{AccessChecker: allowAllChecker{}})
+	if rc.Uses == nil || len(rc.Uses.ConfigMaps) != 1 || rc.Uses.ConfigMaps[0].Name != "debug-config" || len(rc.Uses.Secrets) != 2 || len(rc.Uses.PVCs) != 1 || (rc.Uses.ServiceAccount == nil || rc.Uses.ServiceAccount.Name != "runner") {
+		t.Fatalf("declared Pod dependencies = %+v", rc.Uses)
+	}
+	denied := Build(context.Background(), pod, Options{AccessChecker: denyChecker{kind: "Secret", namespace: "team"}})
+	if denied.Uses == nil || len(denied.Uses.Secrets) != 0 || !hasOmitted(denied.Omitted, "uses.secrets") {
+		t.Fatalf("denied credential identities = %+v omitted=%+v", denied.Uses, denied.Omitted)
+	}
+}
+
+func TestBuild_ReverseReferencesRetainAdmittedPodsAndReplicaSetTemplates(t *testing.T) {
+	controller := true
+	makeSpec := func(name string) corev1.PodSpec {
+		return corev1.PodSpec{ServiceAccountName: "runner", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}, ImagePullSecrets: []corev1.LocalObjectReference{{Name: name}}}
+	}
+	provider := mockResourceProvider{
+		deploys:     []*appsv1.Deployment{{ObjectMeta: metav1.ObjectMeta{Name: "current-template", Namespace: "team"}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: makeSpec("new-registry")}}}},
+		replicaSets: []*appsv1.ReplicaSet{{ObjectMeta: metav1.ObjectMeta{Name: "old-template", Namespace: "team"}, Spec: appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{Spec: makeSpec("old-registry")}}}},
+		pods:        []*corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "admitted", Namespace: "team", OwnerReferences: []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "old-template", Controller: &controller}}}, Spec: makeSpec("admitted-registry")}},
+	}
+	for _, test := range []struct {
+		obj       runtime.Object
+		wantKinds []string
+	}{
+		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admitted-registry", Namespace: "team"}}, []string{"Pod"}},
+		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "old-registry", Namespace: "team"}}, []string{"ReplicaSet"}},
+		{&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "team"}}, []string{"Deployment", "Pod", "ReplicaSet"}},
+		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "team"}}, []string{"Deployment", "Pod", "ReplicaSet"}},
+	} {
+		rc := Build(context.Background(), test.obj, Options{Provider: provider, AccessChecker: allowAllChecker{}})
+		if rc.ReferencedBy == nil || rc.ReferencedBy.Total != len(test.wantKinds) {
+			t.Fatalf("%T reverse references = %+v", test.obj, rc.ReferencedBy)
+		}
+		for i, want := range test.wantKinds {
+			if rc.ReferencedBy.Items[i].Kind != want || len(rc.ReferencedBy.Items[i].Paths) == 0 {
+				t.Fatalf("%T reference[%d] = %+v, want %s with paths", test.obj, i, rc.ReferencedBy.Items[i], want)
+			}
+		}
+	}
+	denied := Build(context.Background(), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "team"}}, Options{Provider: provider, AccessChecker: denyChecker{kind: "Pod", namespace: "team"}})
+	if denied.ReferencedBy == nil || denied.ReferencedBy.Total != 2 || len(denied.ReferencedBy.Items) != 2 || !hasOmitted(denied.Omitted, "referencedBy") {
+		t.Fatalf("visible-only identity consumer count = %+v omitted=%+v", denied.ReferencedBy, denied.Omitted)
+	}
+	for _, target := range []struct{ kind, name string }{{"PersistentVolumeClaim", "data"}, {"ServiceAccount", "runner"}} {
+		custom := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "example.io/v1", "kind": target.kind, "metadata": map[string]any{"name": target.name, "namespace": "team"}}}
+		if rc := Build(context.Background(), custom, Options{Provider: provider}); rc.ReferencedBy != nil {
+			t.Fatalf("foreign %s borrowed core declarations: %+v", target.kind, rc.ReferencedBy)
+		}
+	}
+
+}
+
+func TestBuild_ReferencedByCapPreservesTemplateAndPodKinds(t *testing.T) {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "settings", Namespace: "prod"}}
+	spec := corev1.PodSpec{Containers: []corev1.Container{{Name: "app", EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}}}}}
+	provider := mockResourceProvider{
+		deploys:      []*appsv1.Deployment{{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "prod"}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: spec}}}},
+		replicaSets:  []*appsv1.ReplicaSet{{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "prod"}, Spec: appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{Spec: spec}}}},
+		statefulSets: []*appsv1.StatefulSet{{ObjectMeta: metav1.ObjectMeta{Name: "stateful", Namespace: "prod"}, Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{Spec: spec}}}},
+	}
+	for i := 0; i < maxReferencedByItems+5; i++ {
+		provider.pods = append(provider.pods, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%02d", i), Namespace: "prod"}, Spec: spec})
+	}
+	rc := Build(context.Background(), cm, Options{Tier: TierBasic, Provider: provider})
+	if rc.ReferencedBy == nil || rc.ReferencedBy.Total != len(provider.pods)+3 || !rc.ReferencedBy.Truncated || len(rc.ReferencedBy.Items) != maxReferencedByItems {
+		t.Fatalf("capped refs: %+v", rc.ReferencedBy)
+	}
+	kinds := map[string]bool{}
+	for _, ref := range rc.ReferencedBy.Items {
+		kinds[ref.Kind] = true
+	}
+	for _, kind := range []string{"Deployment", "Pod", "ReplicaSet", "StatefulSet"} {
+		if !kinds[kind] {
+			t.Fatalf("missing %s evidence: %+v", kind, rc.ReferencedBy.Items)
+		}
+	}
+	rc = Build(context.Background(), cm, Options{Tier: TierBasic, Provider: provider, AccessChecker: denyChecker{kind: "Pod", namespace: "prod"}})
+	if rc.ReferencedBy == nil || rc.ReferencedBy.Total != 3 || len(rc.ReferencedBy.Items) != 3 || rc.ReferencedBy.Truncated {
+		t.Fatalf("denied Pod population affected sampling: %+v", rc.ReferencedBy)
+	}
+}
+
+func TestBuild_NodeAssignedPods(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}
+	pod := func(namespace, name, nodeName string, phase corev1.PodPhase) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}, Spec: corev1.PodSpec{NodeName: nodeName}, Status: corev1.PodStatus{Phase: phase}}
+	}
+	owned := pod("b", "controlled", "worker", corev1.PodRunning)
+	owned.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web", Controller: ptrBool(true)}}
+	provider := mockResourceProvider{pods: []*corev1.Pod{nil, owned, pod("a", "pending", "worker", corev1.PodPending), pod("a", "other", "other", corev1.PodRunning), pod("a", "unscheduled", "", corev1.PodPending), pod("a", "done", "worker", corev1.PodSucceeded), pod("a", "failed", "worker", corev1.PodFailed)}}
+	rc := Build(context.Background(), node, Options{Tier: TierBasic, Provider: provider})
+	if rc.ReferencedBy == nil || rc.ReferencedBy.Total != 2 || rc.ReferencedBy.Truncated {
+		t.Fatalf("assigned pods: %+v", rc.ReferencedBy)
+	}
+	for i, want := range []string{"pending", "controlled"} {
+		ref := rc.ReferencedBy.Items[i]
+		if ref.Kind != "Pod" || ref.Group != "" || ref.Name != want || len(ref.Paths) != 1 || ref.Paths[0] != "spec.nodeName" {
+			t.Fatalf("pod reference: %+v", ref)
+		}
+	}
+	rc = Build(context.Background(), node, Options{Tier: TierBasic, Provider: provider, AccessChecker: denyChecker{kind: "Pod", namespace: "b"}})
+	if rc.ReferencedBy == nil || rc.ReferencedBy.Total != 1 || len(rc.ReferencedBy.Items) != 1 || !hasOmitted(rc.Omitted, "referencedBy") {
+		t.Fatalf("gated context: %+v", rc)
+	}
+	custom := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "custom.example/v1", "kind": "Node", "metadata": map[string]interface{}{"name": "worker"}}}
+	if got := Build(context.Background(), custom, Options{Tier: TierBasic, Provider: provider}).ReferencedBy; got != nil {
+		t.Fatalf("custom Node matched core placement: %+v", got)
+	}
+}
+
+func TestBuild_NodeAssignedPodsBounded(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}
+	pods := make([]*corev1.Pod, maxReferencedByItems+3)
+	for i := range pods {
+		pods[i] = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "visible", Name: fmt.Sprintf("pod-%02d", len(pods)-i)}, Spec: corev1.PodSpec{NodeName: "worker"}}
+	}
+	rc := Build(context.Background(), node, Options{Tier: TierBasic, Provider: mockResourceProvider{pods: pods}})
+	if rc.ReferencedBy == nil || rc.ReferencedBy.Total != len(pods) || len(rc.ReferencedBy.Items) != maxReferencedByItems || !rc.ReferencedBy.Truncated {
+		t.Fatalf("bounded context: %+v", rc.ReferencedBy)
+	}
+	if rc.ReferencedBy.Items[0].Name != "pod-01" {
+		t.Fatalf("unstable order: %+v", rc.ReferencedBy.Items)
 	}
 }

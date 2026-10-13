@@ -216,11 +216,9 @@ func TestHandleGitOpsDiagnose_PerKindRBAC(t *testing.T) {
 		t.Fatalf("expected forbidden without get on applications.argoproj.io, got %v", err)
 	}
 
-	// Granting the per-kind get lets the read through (then fails for not-found,
-	// not forbidden) — proving the gate is the only thing blocking it.
 	getPermCache().Get("limited", nil).SetCanI("get", "argoproj.io", "applications", "argocd", true)
 	if _, _, err := handleDiagnose(ctx, nil, testDiagnoseInput("application", "argocd", "guestbook")); err == nil || strings.Contains(err.Error(), "forbidden") {
-		t.Errorf("with get granted, expected a non-forbidden (not-found) error, got %v", err)
+		t.Errorf("with get granted, expected a non-forbidden error, got %v", err)
 	}
 }
 

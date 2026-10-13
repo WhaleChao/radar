@@ -1,6 +1,7 @@
 import { dedupeResourceRefs, omitResourceRefs } from '../../utils/resource-refs'
+import { customResourceDefinitionRef, getCRDDefinitionsSnapshot, subscribeCRDDefinitions } from '../../utils/navigation'
 import { Disclosure } from './Disclosure'
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useState, useSyncExternalStore } from 'react'
 import { Copy, Check, Tag, AlertTriangle, CheckCircle, ExternalLink, Layers, X, Minus } from 'lucide-react'
 import { clsx } from 'clsx'
 import { formatDuration, formatResources } from '../resources/resource-utils'
@@ -412,11 +413,13 @@ interface AlertBannerProps {
   message?: React.ReactNode
   items?: string[]
   children?: React.ReactNode
-  /** Replaces the default bottom margin when the banner sits in a tighter layout. */
+  /** A control at the end of the title line, e.g. a link to where the problem is handled. */
+  action?: React.ReactNode
+  /** Replaces the default bottom margin (`mb-4`). */
   className?: string
 }
 
-export function AlertBanner({ variant, icon, title, message, items, children, className }: AlertBannerProps) {
+export function AlertBanner({ variant, icon, title, message, items, children, action, className }: AlertBannerProps) {
   const colors = ALERT_COLORS[variant]
   const Icon = icon || DEFAULT_ICONS[variant]
   const hasBody = message || items || children
@@ -427,7 +430,14 @@ export function AlertBanner({ variant, icon, title, message, items, children, cl
         <Icon className={clsx('w-4 h-4 shrink-0', colors.title, hasBody && 'mt-0.5')} />
         {hasBody ? (
           <div className="flex-1 min-w-0">
-            <div className={clsx('text-sm font-medium', colors.title, items && 'mb-1')}>{title}</div>
+            {action ? (
+              <div className={clsx('flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1', items && 'mb-1')}>
+                <div className={clsx('min-w-0 text-sm font-medium', colors.title)}>{title}</div>
+                <div className="shrink-0">{action}</div>
+              </div>
+            ) : (
+              <div className={clsx('text-sm font-medium', colors.title, items && 'mb-1')}>{title}</div>
+            )}
             {message && <div className={clsx('text-xs mt-1 break-words', colors.message)}>{message}</div>}
             {items && items.length > 0 && (
               <ul className={clsx('text-xs space-y-1', colors.list)}>
@@ -440,6 +450,11 @@ export function AlertBanner({ variant, icon, title, message, items, children, cl
               </ul>
             )}
             {children}
+          </div>
+        ) : action ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <div className={clsx('min-w-0 text-sm font-medium', colors.title)}>{title}</div>
+            <div className="shrink-0">{action}</div>
           </div>
         ) : (
           <div className={clsx('text-sm font-medium', colors.title)}>{title}</div>
@@ -527,13 +542,16 @@ export function AnnotationsSection({ data }: { data: any }) {
   )
 }
 
-export function MetadataSection({ data }: { data: any }) {
+export function MetadataSection({ data, onNavigate }: { data: any; onNavigate?: (ref: ResourceRef) => void }) {
+  useSyncExternalStore(subscribeCRDDefinitions, getCRDDefinitionsSnapshot, getCRDDefinitionsSnapshot)
   const meta = data.metadata
   if (!meta) return null
+  const definition = customResourceDefinitionRef(data.apiVersion, data.kind)
 
   return (
     <Section title="Metadata" defaultExpanded>
       <PropertyList>
+        {definition && <Property label="Definition" value={<ResourceLink {...definition} onNavigate={onNavigate} />} />}
         <Property label="UID" value={meta.uid} />
         <Property label="Resource Version" value={meta.resourceVersion} />
         <Property label="Generation" value={meta.generation} />

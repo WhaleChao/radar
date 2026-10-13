@@ -641,6 +641,13 @@ func (d *DynamicResourceCache) fanoutSettledLocked(gvr schema.GroupVersionResour
 	return ok
 }
 
+func (d *DynamicResourceCache) FallbackNamespaces() []string {
+	if d == nil {
+		return nil
+	}
+	return append([]string(nil), d.fallbackNamespaces()...)
+}
+
 func (d *DynamicResourceCache) fallbackNamespaces() []string {
 	if len(d.config.NamespaceFallbacks) > 0 {
 		return d.config.NamespaceFallbacks
@@ -747,6 +754,9 @@ func (d *DynamicResourceCache) walkScopesContext(parent context.Context, gvr sch
 	if err == nil {
 		return probeOutcome{scopes: []string{""}, complete: true, fullWalk: true, answered: []string{""}}
 	}
+	if apierrors.IsUnauthorized(err) {
+		return probeOutcome{complete: true, fullWalk: true, err: err}
+	}
 	if !isAuthProbeError(err) {
 		// Transient/NotFound on proxy-fronted clusters — fail open to a
 		// cluster-wide informer rather than disabling the kind; real
@@ -776,6 +786,7 @@ func (d *DynamicResourceCache) walkScopesContext(parent context.Context, gvr sch
 	answered := make(map[string]bool, len(fallbacks))
 	complete := true
 	var unanswered error
+	var unauthorized error
 	// probe lists one candidate under its own deadline and records the
 	// answer. It reports whether the walk can go on, and the probe's error.
 	probe := func(ns string, deadline time.Duration) (bool, error) {
@@ -787,6 +798,9 @@ func (d *DynamicResourceCache) walkScopesContext(parent context.Context, gvr sch
 		probeErr := d.listProbe(nsCtx, gvr, ns)
 		nsCancel()
 		switch {
+		case apierrors.IsUnauthorized(probeErr):
+			unauthorized = probeErr
+			return false, probeErr
 		case ctx.Err() != nil:
 			// The probe ran into the shared deadline, so whatever it returned
 			// is no answer. The cache will retry it within its own budget.
@@ -834,6 +848,9 @@ func (d *DynamicResourceCache) walkScopesContext(parent context.Context, gvr sch
 		if IsClientRateLimited(probeErr) {
 			complete, unanswered = false, probeErr
 		}
+	}
+	if unauthorized != nil {
+		return probeOutcome{complete: true, fullWalk: true, err: unauthorized}
 	}
 	var silent, answeredNamespaces []string
 	for _, ns := range fallbacks {
@@ -1882,11 +1899,16 @@ func (d *DynamicResourceCache) ListNamespaces(gvr schema.GroupVersionResource, n
 // doesn't cover starting a watch that isn't running yet, which can wait for
 // CRD discovery and scope probes.
 func (d *DynamicResourceCache) ListBlocking(gvr schema.GroupVersionResource, namespace string, timeout time.Duration) ([]*unstructured.Unstructured, error) {
+	return d.ListBlockingContext(context.Background(), gvr, namespace, timeout)
+}
+
+// ListBlockingContext bounds this caller without owning the shared watch lifetime.
+func (d *DynamicResourceCache) ListBlockingContext(ctx context.Context, gvr schema.GroupVersionResource, namespace string, timeout time.Duration) ([]*unstructured.Unstructured, error) {
 	if d == nil {
 		return nil, fmt.Errorf("dynamic resource cache not initialized")
 	}
 
-	if err := d.ensureWatching(gvr, namespace); err != nil {
+	if err := d.EnsureWatchingContext(ctx, gvr, namespace); err != nil {
 		return nil, err
 	}
 
@@ -1902,7 +1924,7 @@ func (d *DynamicResourceCache) ListBlocking(gvr schema.GroupVersionResource, nam
 		}
 	}
 	if len(pending) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		cache.WaitForCacheSync(ctx.Done(), pending...)
 		cancel()
 	}

@@ -448,6 +448,13 @@ export type InvestigationEvidenceData =
       type: "inventory";
       resources: InvestigationResourceSummary[];
       scope: string;
+      /**
+       * Set only when Radar's collector read the kind in just these
+       * namespaces: a name missing from the rows is unknown outside them.
+       */
+      namespacesRead?: string[];
+      /** Names omitted from the read namespace preview, not unread namespaces. */
+      namespacesReadOmitted?: number;
     }
   | {
       type: "ranking";

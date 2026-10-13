@@ -1,0 +1,60 @@
+{
+  "description": "list_resources results for an unrestricted, unscoped read that Radar's collector could serve only in some namespaces (Services covered in alpha and gamma), exactly as an MCP client receives them. internal/mcp asserts the producer still returns these results, internal/ai that every agent backend passes the text through unchanged, and web's investigationEvidence projection that Findings shows the rows with the coverage caveat.",
+  "cases": [
+    {
+      "name": "partial",
+      "objects": [
+        "alpha",
+        "beta"
+      ],
+      "arguments": {
+        "kind": "services",
+        "context": "none"
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"coverage\":{\"status\":\"partial\",\"requested\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"names\":[\"alpha\",\"gamma\"],\"total\":2,\"omitted\":0}},\"gaps\":[{\"reason\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha,gamma\\\"; objects in other namespaces were not read, so this result cannot show they don't exist.\"},\"items\":[{\"kind\":\"Service\",\"name\":\"alpha-object\",\"namespace\":\"alpha\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "partial and empty",
+      "objects": [
+        "beta"
+      ],
+      "arguments": {
+        "kind": "services",
+        "context": "none"
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"coverage\":{\"status\":\"partial\",\"requested\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"names\":[\"alpha\",\"gamma\"],\"total\":2,\"omitted\":0}},\"gaps\":[{\"reason\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha,gamma\\\"; objects in other namespaces were not read, so this result cannot show they don't exist.\"},\"items\":[]}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "partial and empty, kind by alias",
+      "objects": [
+        "beta"
+      ],
+      "arguments": {
+        "kind": "svc",
+        "context": "none"
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"coverage\":{\"status\":\"partial\",\"requested\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"names\":[\"alpha\",\"gamma\"],\"total\":2,\"omitted\":0}},\"gaps\":[{\"reason\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha,gamma\\\"; objects in other namespaces were not read, so this result cannot show they don't exist.\"},\"items\":[]}"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -394,6 +394,9 @@ func GetRelationshipsWithObject(kind, namespace, name string, obj any, topo *Top
 				continue
 			}
 			rel.Consumers = append(rel.Consumers, *ref)
+			if isConfigurationDependency(refForNodeID(edge.Source)) {
+				rel.Dependents = appendResourceRef(rel.Dependents, *ref)
+			}
 			if reflectionEdge(edge, nodeByID) {
 				if rel.Reflection == nil {
 					rel.Reflection = &ReflectionRelationships{}
@@ -479,6 +482,9 @@ func GetRelationshipsWithObject(kind, namespace, name string, obj any, topo *Top
 				}
 			}
 		case EdgeConfigures:
+			if isConfigurationDependency(ref) {
+				rel.Dependencies = appendResourceRef(rel.Dependencies, *ref)
+			}
 			if reflectionEdge(edge, nodeByID) {
 				if rel.Reflection == nil {
 					rel.Reflection = &ReflectionRelationships{}
@@ -586,9 +592,17 @@ func GetRelationshipsWithObject(kind, namespace, name string, obj any, topo *Top
 				}
 			}
 		case "node", "nodes":
-			allPods, _ := provider.Pods()
+			if resourceGroup != "" {
+				break
+			}
+			allPods, podsErr := provider.Pods()
+			rel.PodPlacementObserved = true
+			rel.PodPlacementUnavailable = podsErr != nil
+			if podsErr != nil {
+				break
+			}
 			for _, pod := range allPods {
-				if pod.Spec.NodeName == name && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+				if pod != nil && pod.Spec.NodeName == name && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 					podRef := ResourceRef{Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name}
 					enrichRef(&podRef, dp)
 					rel.Pods = append(rel.Pods, podRef)
@@ -719,7 +733,7 @@ func GetRelationshipsWithObject(kind, namespace, name string, obj any, topo *Top
 		len(rel.StorageRefs) == 0 && len(rel.Dependencies) == 0 && len(rel.Dependents) == 0 &&
 		len(rel.PDBs) == 0 && len(rel.NetworkPolicies) == 0 &&
 		len(rel.Monitors) == 0 && len(rel.MonitorTargets) == 0 && len(rel.Backends) == 0 && len(rel.RoutedFrom) == 0 && len(rel.Protects) == 0 && len(rel.HealthChecks) == 0 && len(rel.StagedPolicies) == 0 && rel.ScaleTarget == nil && len(rel.Pods) == 0 &&
-		rel.ServiceAccount == nil && rel.Node == nil && len(rel.ResourceClaims) == 0 && len(rel.ManagedBy) == 0 {
+		rel.ServiceAccount == nil && rel.Node == nil && len(rel.ResourceClaims) == 0 && len(rel.ManagedBy) == 0 && !rel.PodPlacementObserved {
 		return nil
 	}
 

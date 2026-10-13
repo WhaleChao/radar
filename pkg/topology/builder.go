@@ -1176,6 +1176,8 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 	}
 
+	var kedaAuthenticationDependencies []declaredDependency
+
 	// 1i. Add KEDA ScaledObject and ScaledJob nodes (CRD - fetched via dynamic cache)
 	var scaledObjectGVR schema.GroupVersionResource
 	hasScaledObjects := false
@@ -1207,6 +1209,10 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 					"apiVersion": so.GetAPIVersion(),
 				},
 			})
+
+			for _, ref := range configrefs.KEDAAuthenticationReferences(so) {
+				kedaAuthenticationDependencies = append(kedaAuthenticationDependencies, declaredDependency{Source: resourceid.NewRef("keda.sh", "ScaledObject", ns, name), Target: ref, Label: "authentication", Configuration: true})
+			}
 
 			// ScaledObject → target workload edge (via spec.scaleTargetRef)
 			targetAPIVersion, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "apiVersion")
@@ -1269,6 +1275,10 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 					"apiVersion": sj.GetAPIVersion(),
 				},
 			})
+			for _, ref := range configrefs.KEDAAuthenticationReferences(sj) {
+				kedaAuthenticationDependencies = append(kedaAuthenticationDependencies, declaredDependency{Source: resourceid.NewRef("keda.sh", "ScaledJob", ns, name), Target: ref, Label: "authentication", Configuration: true})
+			}
+
 		}
 	}
 
@@ -3774,6 +3784,9 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 	}
 
+	nodes, edges, kedaAuthenticationWarnings := addObservedDependencyEdges(nodes, edges, kedaAuthenticationDependencies, dynamicCache, opts)
+	warnings = append(warnings, kedaAuthenticationWarnings...)
+
 	// 8. Add ConfigMap nodes (if enabled)
 	if opts.IncludeConfigMaps {
 		configmaps, cmErr := b.provider.ConfigMaps()
@@ -5121,38 +5134,8 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 	}
 
-	// 15c. Create cert-manager Certificate → Issuer/ClusterIssuer edges (via spec.issuerRef)
-	// Build a lookup of existing node IDs for matching
-	existingNodeIDs := make(map[string]bool, len(nodes))
-	for _, node := range nodes {
-		existingNodeIDs[node.ID] = true
-	}
-	for _, cert := range certificateResources {
-		ns := cert.GetNamespace()
-		certID := fmt.Sprintf("certificate/%s/%s", ns, cert.GetName())
-
-		issuerKind, _, _ := unstructured.NestedString(cert.Object, "spec", "issuerRef", "kind")
-		issuerName, _, _ := unstructured.NestedString(cert.Object, "spec", "issuerRef", "name")
-		if issuerKind == "" || issuerName == "" {
-			continue
-		}
-
-		var issuerID string
-		switch issuerKind {
-		case "ClusterIssuer":
-			issuerID = fmt.Sprintf("clusterissuer//%s", issuerName)
-		case "Issuer":
-			issuerID = fmt.Sprintf("issuer/%s/%s", ns, issuerName)
-		}
-		if issuerID != "" && existingNodeIDs[issuerID] {
-			edges = append(edges, Edge{
-				ID:     fmt.Sprintf("%s-to-%s", certID, issuerID),
-				Source: certID,
-				Target: issuerID,
-				Type:   EdgeUses,
-			})
-		}
-	}
+	nodes, edges, issuerWarnings := addCertificateIssuerEdges(nodes, edges, certificateResources, dynamicCache, opts)
+	warnings = append(warnings, issuerWarnings...)
 
 	// Build Certificate lookup by secretName (for IngressRoute → Certificate edges)
 	certBySecret := make(map[string]string) // "ns/secretName" → certificateID
@@ -8867,6 +8850,14 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 		}
 	}
 
+	type ownerPair struct{ source, target string }
+	existingOwnerEdges := make(map[ownerPair]bool)
+	for _, edge := range edges {
+		if edge.Type == EdgeManages {
+			existingOwnerEdges[ownerPair{edge.Source, edge.Target}] = true
+		}
+	}
+
 	processedTypes := make(map[string]bool)
 	for _, node := range nodes {
 		if node.Kind != KindNodeClass {
@@ -8888,6 +8879,7 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 		ownerRefs   []ResourceRef
 		resourceKey string
 		typeKey     string
+		existing    bool
 	}
 	var candidates []candidate
 
@@ -8956,14 +8948,12 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 
 			name := resource.GetName()
 			resourceKey := resourceid.ResourceKey(gvr.Group, kind, ns, name)
-			if _, exists := existingResourceIDs[resourceKey]; exists {
-				continue
-			}
-			nodeID := fmt.Sprintf("%s/%s/%s/%s", strings.ToLower(kind), ns, name, gvr.Group)
-
-			// Skip if already in topology
-			if existingIDs[nodeID] {
-				continue
+			nodeID, existing := existingResourceIDs[resourceKey]
+			if !existing {
+				nodeID = fmt.Sprintf("%s/%s/%s/%s", strings.ToLower(kind), ns, name, gvr.Group)
+				if existingIDs[nodeID] {
+					continue
+				}
 			}
 
 			var ownerResources []ResourceRef
@@ -8994,6 +8984,7 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 				ownerRefs:   ownerResources,
 				resourceKey: resourceKey,
 				typeKey:     typeKey,
+				existing:    existing,
 			})
 		}
 	}
@@ -9003,7 +8994,7 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 		added := 0
 		remaining := candidates[:0] // reuse slice
 		for _, c := range candidates {
-			if crdCounts[c.typeKey] >= maxPerKind {
+			if !c.existing && crdCounts[c.typeKey] >= maxPerKind {
 				continue // drop — kind at capacity
 			}
 
@@ -9024,11 +9015,19 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 			}
 
 			if len(ownerEdges) > 0 {
-				nodes = append(nodes, c.node)
-				edges = append(edges, ownerEdges...)
-				existingIDs[c.nodeID] = true
-				existingResourceIDs[c.resourceKey] = c.nodeID
-				crdCounts[c.typeKey]++
+				if !c.existing {
+					nodes = append(nodes, c.node)
+					existingIDs[c.nodeID] = true
+					existingResourceIDs[c.resourceKey] = c.nodeID
+					crdCounts[c.typeKey]++
+				}
+				for _, edge := range ownerEdges {
+					key := ownerPair{edge.Source, edge.Target}
+					if !existingOwnerEdges[key] {
+						edges = append(edges, edge)
+						existingOwnerEdges[key] = true
+					}
+				}
 				added++
 			} else {
 				remaining = append(remaining, c)
