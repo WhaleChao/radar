@@ -1338,7 +1338,7 @@ func (s *Server) getDashboardMetrics(ctx context.Context, allowedNamespaces []st
 	// treat usage as best-effort so a missing/slow metrics-server still leaves
 	// requests vs. capacity on the dashboard.
 	cache := k8s.GetResourceCache()
-	if cache == nil {
+	if cache == nil || cache.KindReadinessFor("pods") != k8s.KindReady || cache.KindReadinessFor("nodes") != k8s.KindReady {
 		return nil
 	}
 	nodeLister := cache.Nodes()

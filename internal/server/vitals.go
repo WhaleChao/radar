@@ -35,8 +35,8 @@ type VitalsResponse struct {
 	CPU    *MetricSummary `json:"cpu,omitempty"`
 	Memory *MetricSummary `json:"memory,omitempty"`
 	// True only when live usage came from metrics-server; requests/capacity
-	// are informer-derived and present regardless (same semantics as the
-	// dashboard's flag).
+	// are available independently of metrics-server once Pods and Nodes
+	// completed their initial lists (same semantics as the dashboard's flag).
 	MetricsServerAvailable bool               `json:"metricsServerAvailable"`
 	Completeness           VitalsCompleteness `json:"completeness"`
 }
@@ -252,7 +252,7 @@ func (s *Server) handleVitals(w http.ResponseWriter, r *http.Request) {
 	// canReadNodes branch; a caller denied node list must not learn cluster
 	// capacity here either). Requests/capacity are informer-derived; live
 	// usage is the metrics-server probe, memoized (see vitalsMetricsMemo).
-	if canReadNodes && cache.Nodes() != nil {
+	if canReadNodes && cache.Nodes() != nil && podsReadable && cache.KindReadinessFor("pods") == k8s.KindReady && cache.KindReadinessFor("nodes") == k8s.KindReady {
 		// Capacity + requests are informer-derived — computed FRESH on every
 		// call (memoizing them would freeze counts for the TTL). Only the
 		// live metrics-server probe is memoized, keyed by user (the probe
