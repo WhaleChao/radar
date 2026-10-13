@@ -396,13 +396,15 @@ export function ResourcesSidebar({
     let totalHiddenGroups = 0
 
     const withTotals = categories.map(category => {
-      // Coerce nulls (loading) to 0 for the category total — we still
-      // want to show *some* number on collapsed categories during
-      // load, just not "0" badges on every individual kind.
       const total = category.resources.reduce(
         (sum, resource) => sum + (counts[resource.group ? `${resource.group}/${resource.kind}` : resource.kind] ?? 0),
         0
       )
+      const complete = category.resources.every(resource => {
+        const key = resource.group ? `${resource.group}/${resource.kind}` : resource.kind
+        return counts[key] != null && resourceCoverage?.[key]?.status === 'complete'
+      })
+      const totalLabel = complete ? total.toLocaleString() : total === 0 ? '–' : `≥${total.toLocaleString()}`
 
       // Filter resources: hide only confirmed-empty kinds. Unknown counts stay
       // visible as a dash so count coverage gaps do not masquerade as emptiness.
@@ -417,7 +419,7 @@ export function ResourcesSidebar({
         return shouldShow
       })
 
-      return { ...category, total, visibleResources }
+      return { ...category, total, totalLabel, visibleResources }
     })
 
     // Sort: the category whose workspace is open first, then categories with
@@ -658,7 +660,7 @@ export function ResourcesSidebar({
                   <span className="flex-1 text-left truncate" title={rawGroupTitle}>{category.name}</span>
                   {!isExpanded && (
                     <span className={clsx('text-xs py-0.5 rounded bg-theme-elevated text-theme-text-secondary font-normal normal-case text-center font-mono', category.total < 1000 ? 'w-8' : 'w-9')}>
-                      {category.total}
+                      {category.totalLabel}
                     </span>
                   )}
                 </button>
