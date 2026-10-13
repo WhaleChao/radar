@@ -177,7 +177,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			markForbidden(kl.CountKey(), reasonRBACDenied)
 			continue
 		}
-		clusterScoped := k8s.IsClusterOnlyKind(kl.Kind())
+		clusterScoped, _, _ := k8s.ClassifyKindScope(kl.Kind(), "")
 		coverage, readNamespaces, scopeErr := typedReadCoverage(cache, informerKeyForKind(kl.Kind()), kindNamespaces, clusterScoped)
 		if scopeErr != nil {
 			markUnavailable(kl.CountKey())

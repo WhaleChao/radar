@@ -220,7 +220,7 @@ func TestResourceListCoverageContainsOnlyCallerVisibleNamespaces(t *testing.T) {
 	}
 	resp = env.authGet(t, "/api/resources/pods?namespace=hidden-collector-namespace&table=1", "reader", "")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, 403, "rbac_denied")
+	assertResourceReadError(t, resp, 403, "no_namespace_access")
 }
 
 func TestResourceCoverageNamespaceMetadataIsBounded(t *testing.T) {
@@ -446,7 +446,7 @@ func TestResourceCountsAllowExplicitClusterGrantWithoutNamespaceAccess(t *testin
 
 func TestResourceDynamicNamespaceCoverageDoesNotBorrowAnotherInformer(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"}
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{gvr: "WidgetList"})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{gvr: "WidgetList", {Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}: "EndpointSliceList"})
 	dyn.PrependReactor("list", "widgets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetNamespace() != "alpha" {
 			return true, nil, apierrors.NewForbidden(gvr.GroupResource(), "", fmt.Errorf("denied"))
