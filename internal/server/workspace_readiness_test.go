@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,8 +15,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
@@ -30,6 +33,18 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "postgresql.cnpg.io/v1", Kind: "Cluster", Name: "orders", UID: "orders-uid", Controller: &controller}},
 		}},
 	)
+	release := make(chan struct{})
+	client.PrependReactor("list", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		switch action.GetResource().Resource {
+		case "pods", "nodes", "deployments":
+			select {
+			case <-release:
+			default:
+				return true, nil, errors.New("initial list held until test release")
+			}
+		}
+		return false, nil, nil
+	})
 	t.Cleanup(func() {
 		k8s.ResetResourceCache()
 		if err := k8s.InitTestResourceCache(testFakeClient); err != nil {
@@ -37,8 +52,7 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 		}
 	})
 	k8s.ResetResourceCache()
-	if err := k8s.InitTestPromotedSyncingCache(client, 5*time.Second, time.Second,
-		map[string]time.Duration{"pods": 3 * time.Second, "nodes": 3 * time.Second, "deployments": 3 * time.Second}); err != nil {
+	if err := k8s.InitTestPromotedSyncingCache(client, 5*time.Second, 3*time.Second, nil); err != nil {
 		t.Fatal(err)
 	}
 	cache := k8s.GetResourceCache()
@@ -66,7 +80,10 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 		{"late ready", k8s.KindReady, capacityapi.CoverageAvailable, cnpgCoverageFull, 1},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
-			waitFor(t, 6*time.Second, func() bool {
+			if stage.readiness == k8s.KindReady {
+				close(release)
+			}
+			waitFor(t, 45*time.Second, func() bool {
 				return cache.KindReadinessFor("pods") == stage.readiness && cache.KindReadinessFor("nodes") == stage.readiness && cache.KindReadinessFor("deployments") == stage.readiness
 			})
 			meta := capacityapi.NewResponseMeta(time.Now())
