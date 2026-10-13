@@ -96,10 +96,12 @@ export type {
   OmnibarHandle,
   OmnibarRecent,
   OmnibarSearchResult,
+  OmnibarNote,
+  OmnibarNotePart,
 } from './components/ui/Omnibar';
 export { bestScore } from './components/ui/command-items';
 export type { CommandItem } from './components/ui/command-items';
-export type { SearchHit, SearchMatchedField } from './api/client';
+export type { SearchHit, SearchMatchedField, SearchCoverageEntry } from './api/client';
 
 export { fetchResourceList, type ResourceListOptions } from './api/client';
 export { normalizeResourceList, type ResourceListResult } from './api/resourceLists';

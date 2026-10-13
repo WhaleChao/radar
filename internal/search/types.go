@@ -2,6 +2,7 @@ package search
 
 import (
 	"github.com/skyhook-io/radar/internal/filter"
+	"github.com/skyhook-io/radar/pkg/readreason"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 )
 
@@ -24,8 +25,8 @@ type CELFilter = filter.Filter
 // before scoring.
 type Query struct {
 	Tokens      []string  // free tokens; each must match somewhere; sum of best per-site scores = total
-	KindFilter  []string  // kind:Foo modifiers, lowercased; matches Kind name (singular or plural)
-	NSFilter    []string  // ns:foo modifiers
+	KindFilter  []string  // kind:Foo modifiers as written; matches Kind name (singular or plural), case-insensitively
+	NSFilter    []string  // ns:foo modifiers; restrict namespaced kinds, and exclude cluster-scoped kinds unless a kind: names them
 	LabelFilter []LabelEq // label:k=v modifiers; AND'd
 	ImageFilter []string  // image:foo modifiers; substring match on container images
 	Cluster     string    // cluster: modifier — radar ignores; hub uses for routing
@@ -72,11 +73,42 @@ type MatchSnippet struct {
 	Snippet string `json:"snippet"`
 }
 
+// UnsearchedKind is one coverage entry. Kind-level entries name a kind; "*"
+// entries either stand for several kinds or carry Namespaces. Namespaces is set
+// only for namespace_excluded, namespace_scope_limited and
+// collector_scope_limited, and lists the namespaces the query named that were
+// not searched for that reason. Count is set only on a "*" entry that folds
+// kinds: how many it stands for.
+type UnsearchedKind struct {
+	Kind       string          `json:"kind"`
+	Group      string          `json:"group"`
+	Reason     readreason.Code `json:"reason"`
+	Namespaces []string        `json:"namespaces,omitempty"`
+	Count      int             `json:"count,omitempty"`
+	// RetryWithKind distinguishes a deferred watch-start failure from a stalled
+	// watch: only the former can be restarted by an explicit kind search.
+	RetryWithKind bool `json:"retryWithKind,omitempty"`
+}
+
+type FailedObject struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
 // Result is the full response shape for a search request.
 type Result struct {
-	Hits     []Hit `json:"hits"`
-	Total    int   `json:"total"`    // number of hits returned (after limit)
-	Searched int   `json:"searched"` // approx. number of objects scanned
+	// Partial: true means this result can't rule out a match for what you
+	// asked: something was loading or failed, or a kind or namespace you named
+	// couldn't be searched. false means no such problem was reported; it is
+	// not proof that nothing exists outside your access or Radar's collection.
+	// Result limits (Total vs TotalMatched) are separate.
+	Partial             bool             `json:"partial"`
+	Unsearched          []UnsearchedKind `json:"unsearched"`
+	FilterFailedObjects []FailedObject   `json:"filter_failed_objects,omitempty"`
+	Hits                []Hit            `json:"hits"`
+	Total               int              `json:"total"`    // number of hits returned (after limit)
+	Searched            int              `json:"searched"` // approx. number of objects scanned
 	// TotalMatched is the count of hits BEFORE truncation by Limit.
 	// Equals Total when no truncation occurred. Surfaced so callers
 	// (the hub's fleet aggregator, agents, the frontend) can report honest

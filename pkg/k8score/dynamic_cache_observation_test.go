@@ -138,7 +138,13 @@ func TestDynamicResourceObservationTracksOnDemandSyncAndExactGVR(t *testing.T) {
 	if watched.State != DynamicObservationSynced || watched.ReasonCode != "informer_synced" {
 		t.Fatalf("watched observation = %+v", watched)
 	}
+	if cache.IsStopped() {
+		t.Fatal("running cache reported stopped")
+	}
 	cache.Stop()
+	if !cache.IsStopped() {
+		t.Fatal("stopped cache reported running")
+	}
 	if got := cache.Observation(observed); got.State != DynamicObservationUnwatched || got.ReasonCode != "cache_stopped" {
 		t.Fatalf("stopped cache retained active observation: %+v", got)
 	}
