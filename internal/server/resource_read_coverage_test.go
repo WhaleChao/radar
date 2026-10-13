@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -668,14 +669,40 @@ func TestDirectResourceListFollowsSmallPagesWithinBudget(t *testing.T) {
 	}
 }
 
-func TestCollectionFailureKeepsUnsupportedAndTimeoutCauses(t *testing.T) {
-	for _, tc := range []struct {
-		err    error
-		reason readreason.Code
-	}{{fmt.Errorf("wrapped: %w", k8score.ErrCollectionNotSupported), readreason.CollectionNotSupported}, {context.DeadlineExceeded, readreason.ReadError}, {context.Canceled, readreason.ReadError}} {
-		failure := collectionFailure("widgets", tc.err)
-		if failure.status != 503 || failure.reason != tc.reason {
-			t.Fatalf("%v classified as %+v", tc.err, failure)
-		}
+func TestUnsupportedDynamicListKeepsItsCollectionCause(t *testing.T) {
+	useTestResourceCache(t, fake.NewClientset())
+	gvr := schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "summaries"}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{gvr: "SummaryList"})
+	if err := k8s.InitTestDynamicResourceCache(dyn, []k8s.APIResource{{Group: gvr.Group, Version: gvr.Version, Kind: "Summary", Name: gvr.Resource, Namespaced: true, Verbs: []string{"get", "list"}}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k8s.ResetTestDynamicState)
+	before := len(dyn.Actions())
+	resp := get(t, "/api/resources/summaries?group=example.com&namespace=alpha")
+	defer resp.Body.Close()
+	assertResourceReadError(t, resp, 503, "collection_not_supported")
+	if len(dyn.Actions()) != before {
+		t.Fatal("unsupported collection attempted a Kubernetes read")
+	}
+}
+
+func TestCancelledDirectNamespaceReadIsNotInformerLoading(t *testing.T) {
+	useTestResourceCache(t, fake.NewClientset())
+	gvr := schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{gvr: "LeaseList"})
+	if err := k8s.InitTestDynamicResourceCache(dyn, []k8s.APIResource{{Group: gvr.Group, Version: gvr.Version, Kind: "Lease", Name: gvr.Resource, Namespaced: true, Verbs: []string{"get", "list", "watch"}}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k8s.ResetTestDynamicState)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest("GET", "/api/resources/leases?namespace=alpha", nil).WithContext(ctx)
+	_, _, err := readDynamicResourceList(req, k8s.GetResourceCache(), "leases", gvr.Group, []string{"alpha"}, 10)
+	var failure *resourceReadFailure
+	if !errors.As(err, &failure) || failure.status != 503 || failure.reason != readreason.ReadError {
+		t.Fatalf("cancelled direct read = %v", err)
+	}
+	if len(dyn.Actions()) != 0 {
+		t.Fatal("cancelled read reached Kubernetes")
 	}
 }
