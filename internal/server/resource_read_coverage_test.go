@@ -706,3 +706,27 @@ func TestCancelledDirectNamespaceReadIsNotInformerLoading(t *testing.T) {
 		t.Fatal("cancelled read reached Kubernetes")
 	}
 }
+
+func TestResourceReadPreservesKnownExclusionBeforeInitialSync(t *testing.T) {
+	core, err := k8score.NewResourceCache(k8score.CacheConfig{Client: fake.NewClientset(), ResourceScopes: map[string]k8score.ResourceScope{"services": {Enabled: true}, "pods": {Enabled: true, Namespace: "alpha"}}, DeferredTypes: map[string]bool{"pods": true}, DebugSyncDelays: map[string]time.Duration{"pods": time.Hour}, DeferredSyncTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(core.Stop)
+	cache := &k8s.ResourceCache{ResourceCache: core}
+	for _, tc := range []struct {
+		namespaces []string
+		reason     readreason.Code
+	}{
+		{[]string{"beta"}, readreason.CollectorScopeLimited},
+		{[]string{"alpha"}, readreason.KindSyncPending},
+		{[]string{"alpha", "beta"}, readreason.KindSyncPending},
+		{nil, readreason.KindSyncPending},
+	} {
+		coverage, read, err := typedReadCoverage(cache, "pods", tc.namespaces, false)
+		var failure *resourceReadFailure
+		if !errors.As(err, &failure) || failure.reason != tc.reason || read != nil || coverage.Status != "" {
+			t.Fatalf("%v: coverage=%+v read=%v error=%v; want %s", tc.namespaces, coverage, read, err, tc.reason)
+		}
+	}
+}

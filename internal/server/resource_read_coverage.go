@@ -88,6 +88,9 @@ func (s *Server) writeCollectionFailure(w http.ResponseWriter, resource string, 
 
 func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []string, clusterScoped bool) (resourceapi.Coverage, []string, error) {
 	assessment := cache.AssessKindRead(resource, namespaces)
+	if len(namespaces) > 0 && len(assessment.Uncovered) == len(namespaces) {
+		return resourceapi.Coverage{}, nil, &resourceReadFailure{503, readreason.CollectorScopeLimited, fmt.Sprintf("Radar's collector does not cover the requested scope for %s", resource)}
+	}
 	switch assessment.Readiness {
 	case k8score.KindPending:
 		return resourceapi.Coverage{}, nil, &resourceReadFailure{503, readreason.KindSyncPending, fmt.Sprintf("%s are still loading, please retry shortly", resource)}
