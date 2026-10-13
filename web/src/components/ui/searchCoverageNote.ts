@@ -161,4 +161,3 @@ export function searchCoverageNote(unsearched: SearchCoverageEntry[] | undefined
   }
   return { text: shown.map((s) => s.text).join(' '), action: shown.find((s) => s.action)?.action }
 }
-
