@@ -188,7 +188,8 @@ describe('ResourcesSidebar category workspaces', () => {
 it('keeps a partial zero visible rather than hiding the kind as empty', () => {
   const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], total: 1, omitted: 0 } } } }} />)
   expect(html).toContain('HorizontalPodAutoscaler')
-  expect(html).toContain('≥0')
+  expect(html).toContain('–')
+  expect(html).not.toContain('≥0')
 })
 
 describe('sidebarDestinationsMatching', () => {

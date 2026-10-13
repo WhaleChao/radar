@@ -1515,11 +1515,16 @@ func (d *DynamicResourceCache) ListNamespaces(gvr schema.GroupVersionResource, n
 // doesn't cover starting a watch that isn't running yet, which can wait for
 // CRD discovery and scope probes.
 func (d *DynamicResourceCache) ListBlocking(gvr schema.GroupVersionResource, namespace string, timeout time.Duration) ([]*unstructured.Unstructured, error) {
+	return d.ListBlockingContext(context.Background(), gvr, namespace, timeout)
+}
+
+// ListBlockingContext bounds this caller without owning the shared watch lifetime.
+func (d *DynamicResourceCache) ListBlockingContext(ctx context.Context, gvr schema.GroupVersionResource, namespace string, timeout time.Duration) ([]*unstructured.Unstructured, error) {
 	if d == nil {
 		return nil, fmt.Errorf("dynamic resource cache not initialized")
 	}
 
-	if err := d.ensureWatching(gvr, namespace); err != nil {
+	if err := d.EnsureWatchingContext(ctx, gvr, namespace); err != nil {
 		return nil, err
 	}
 
@@ -1535,7 +1540,7 @@ func (d *DynamicResourceCache) ListBlocking(gvr schema.GroupVersionResource, nam
 		}
 	}
 	if len(pending) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		cache.WaitForCacheSync(ctx.Done(), pending...)
 		cancel()
 	}

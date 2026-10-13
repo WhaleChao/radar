@@ -22,7 +22,7 @@ export function resourceEmptyMessage(kind: string, coverage: ResourceCoverage | 
   if (hasRows) return `No ${kind} match the current filters`
   if (coverage?.status === 'complete') return `No ${kind} found in the requested scope`
   if (coverage?.status === 'partial') return `No ${kind} found in the namespaces Radar could read`
-  return `No ${kind} returned. This Radar does not report read coverage.`
+  return `No ${kind} returned. Update this cluster’s Radar to verify that the requested scope was fully read.`
 }
 
 export function isConfirmedEmpty(count: number | null | undefined, coverage: ResourceCoverage | undefined): boolean {
@@ -30,5 +30,6 @@ export function isConfirmedEmpty(count: number | null | undefined, coverage: Res
 }
 
 export function resourceCountLabel(count: number, coverage: ResourceCoverage | undefined): string {
+  if (count === 0 && coverage?.status === 'partial') return '–'
   return `${coverage?.status === 'partial' ? '≥' : ''}${count.toLocaleString()}`
 }

@@ -838,7 +838,7 @@ func TestProxyAuth_NamespaceFiltering_NoAccess(t *testing.T) {
 
 	resp := env.authGet(t, "/api/resources/pods", "nobody", "")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, http.StatusForbidden, "rbac_denied")
+	assertResourceReadError(t, resp, http.StatusForbidden, "no_namespace_access")
 }
 
 // --- handleAuthMe: noNamespaceAccess ---

@@ -24,11 +24,12 @@ describe('resource coverage presentation', () => {
   it('distinguishes complete, partial, unknown and filtered-empty results', () => {
     expect(resourceEmptyMessage('Pod', complete, false)).toBe('No Pod found in the requested scope')
     expect(resourceEmptyMessage('Pod', partial, false)).toContain('namespaces Radar could read')
-    expect(resourceEmptyMessage('Pod', { status: 'unknown' }, false)).toContain('does not report read coverage')
+    expect(resourceEmptyMessage('Pod', { status: 'unknown' }, false)).toContain('Update this cluster’s Radar')
     expect(resourceEmptyMessage('Pod', partial, true)).toContain('match the current filters')
   })
   it('retains partial numeric counts without treating zero as absence', () => {
     expect(resourceCountLabel(23, partial)).toBe('≥23')
+    expect(resourceCountLabel(0, partial)).toBe('–')
     expect(isConfirmedEmpty(0, partial)).toBe(false)
     expect(isConfirmedEmpty(0, undefined)).toBe(false)
     expect(isConfirmedEmpty(0, complete)).toBe(true)

@@ -245,7 +245,7 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 	var mu sync.Mutex
 	var read []string
 	failures := make(map[readreason.Code][]string)
-	var firstFailure error
+	failureByReason := make(map[readreason.Code]*resourceReadFailure)
 	var groupReads errgroup.Group
 	groupReads.SetLimit(8)
 	for _, namespace := range targets {
@@ -257,7 +257,7 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 			} else if direct {
 				items, readErr = dynamicCache.ListDirectBounded(ctx, gvr, namespace, limit)
 			} else {
-				items, readErr = dynamicCache.ListContext(ctx, gvr, namespace)
+				items, readErr = dynamicCache.ListBlockingContext(ctx, gvr, namespace, 3*time.Second)
 				if readErr == nil && !dynamicCache.IsNamespaceSynced(gvr, namespace) {
 					readErr = namespaceReadFailure(dynamicCache, gvr, namespace)
 				}
@@ -270,8 +270,8 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 					failure = collectionFailure(gvr.Resource, readErr)
 				}
 				failures[failure.reason] = append(failures[failure.reason], namespace)
-				if firstFailure == nil {
-					firstFailure = failure
+				if failureByReason[failure.reason] == nil {
+					failureByReason[failure.reason] = failure
 				}
 			} else {
 				read = append(read, namespace)
@@ -286,6 +286,9 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 		})
 	}
 	_ = groupReads.Wait()
+	if cache != k8s.GetResourceCache() || dynamicCache != k8s.GetDynamicResourceCache() {
+		return nil, resourceapi.Coverage{}, k8s.ErrDynamicNotReady
+	}
 	if rejected := failures[readreason.CollectorUnauthorized]; len(rejected) > 0 {
 		return nil, resourceapi.Coverage{}, &resourceReadFailure{503, readreason.CollectorUnauthorized, "Kubernetes rejected Radar's collector credentials"}
 	}
@@ -293,8 +296,10 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 		return nil, resourceapi.Coverage{}, &resourceReadFailure{400, "resource_list_too_large", "Too many resources to load; select fewer namespaces"}
 	}
 	if len(read) == 0 {
-		if firstFailure != nil {
-			return nil, resourceapi.Coverage{}, firstFailure
+		for _, reason := range []readreason.Code{readreason.CollectorAccessDenied, readreason.KindSyncFailed, readreason.CollectorScopeLimited, readreason.CollectionNotSupported, readreason.ReadError, readreason.KindSyncPending} {
+			if failure := failureByReason[reason]; failure != nil {
+				return nil, resourceapi.Coverage{}, failure
+			}
 		}
 		return nil, resourceapi.Coverage{}, &resourceReadFailure{503, readreason.CollectorScopeLimited, fmt.Sprintf("Radar has no readable scope for %s", kind)}
 	}
@@ -350,9 +355,19 @@ func readDynamicResourceGet(ctx context.Context, cache *k8s.ResourceCache, kind,
 		return nil, err
 	}
 	if k8s.ShouldBypassDynamicInformer(gvr) || (gvr.Group == "apiextensions.k8s.io" && gvr.Resource == "customresourcedefinitions") || (gvr.Group == "apiregistration.k8s.io" && gvr.Resource == "apiservices") {
-		return dynamicCache.GetDirect(ctx, gvr, namespace, name)
+		resource, err := dynamicCache.GetDirect(ctx, gvr, namespace, name)
+		if cache != k8s.GetResourceCache() || dynamicCache != k8s.GetDynamicResourceCache() {
+			return nil, k8s.ErrDynamicNotReady
+		}
+		return resource, err
 	}
 	resource, err := dynamicCache.Get(gvr, namespace, name)
+	if cache != k8s.GetResourceCache() || dynamicCache != k8s.GetDynamicResourceCache() {
+		return nil, k8s.ErrDynamicNotReady
+	}
+	if err == nil {
+		return resource, nil
+	}
 	if apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
 		return nil, err
 	}

@@ -72,6 +72,8 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dynamicCache := k8s.GetDynamicResourceCache()
+	discovery := k8s.GetResourceDiscovery()
 	counts := make(map[string]int)
 	countCoverage := make(map[string]resourceapi.Coverage)
 	var forbidden []string
@@ -123,7 +125,6 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 		if covered[endpointSliceCountKey] {
 			return
 		}
-		dynamicCache := k8s.GetDynamicResourceCache()
 		if dynamicCache == nil {
 			markUnavailable(endpointSliceCountKey)
 			return
@@ -193,8 +194,6 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Discovery-backed resources.
-	discovery := k8s.GetResourceDiscovery()
-	dynamicCache := k8s.GetDynamicResourceCache()
 	if discovery != nil && dynamicCache != nil {
 		resources, err := discovery.GetAPIResources()
 		if err != nil {
@@ -334,6 +333,11 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 	}
 	countEndpointSlices()
 
+	connectedCache, syncingCache := k8s.SnapshotCaches()
+	if (cache != connectedCache && cache != syncingCache) || dynamicCache != k8s.GetDynamicResourceCache() || discovery != k8s.GetResourceDiscovery() {
+		s.writeCollectionFailure(w, "resource counts", k8s.ErrDynamicNotReady)
+		return
+	}
 	boundCountCoverageDetails(countCoverage)
 	s.writeJSON(w, ResourceCountsResponse{
 		Counts:      counts,
