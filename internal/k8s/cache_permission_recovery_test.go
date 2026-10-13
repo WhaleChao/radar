@@ -7,6 +7,11 @@ import (
 
 	"github.com/skyhook-io/radar/pkg/k8score"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestBootstrapResourcePermissionsRetriesNamespace401BeforeWiring(t *testing.T) {
