@@ -970,31 +970,7 @@ func resolveProbeGVRs(p resourceProbe) []schema.GroupVersionResource {
 func CheckResourcePermissions(ctx context.Context) (*PermissionCheckResult, bool) {
 	resourcePermsMu.RLock()
 	if cachedPermResult != nil && time.Now().Before(resourcePermsExpiry) {
-		// Deep-copy so callers can't mutate the cached result.
-		permsCopy := *cachedPermResult.Perms
-		scopesCopy := make(map[string]k8score.ResourceScope, len(cachedPermResult.Scopes))
-		for k, v := range cachedPermResult.Scopes {
-			scopesCopy[k] = v
-		}
-		scopeNamespacesCopy := make(map[string][]string, len(cachedPermResult.ScopeNamespaces))
-		for k, v := range cachedPermResult.ScopeNamespaces {
-			scopeNamespacesCopy[k] = append([]string(nil), v...)
-		}
-		namespaceErrorsCopy := maps.Clone(cachedPermResult.NamespaceProbeErrors)
-		for kind, errors := range namespaceErrorsCopy {
-			namespaceErrorsCopy[kind] = maps.Clone(errors)
-		}
-		result := &PermissionCheckResult{
-			Perms:                    &permsCopy,
-			NamespaceScoped:          cachedPermResult.NamespaceScoped,
-			Namespace:                cachedPermResult.Namespace,
-			Scopes:                   scopesCopy,
-			ProbeErrors:              maps.Clone(cachedPermResult.ProbeErrors),
-			NamespaceProbeErrors:     namespaceErrorsCopy,
-			ScopeNamespaces:          scopeNamespacesCopy,
-			ScopeCandidates:          append([]string(nil), cachedPermResult.ScopeCandidates...),
-			ScopeCandidatesTruncated: cachedPermResult.ScopeCandidatesTruncated,
-		}
+		result := clonePermissionCheckResult(cachedPermResult)
 		resourcePermsMu.RUnlock()
 		return result, true
 	}
@@ -1456,33 +1432,7 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 func GetCachedPermissionResult() *PermissionCheckResult {
 	resourcePermsMu.RLock()
 	defer resourcePermsMu.RUnlock()
-	if cachedPermResult == nil {
-		return nil
-	}
-	permsCopy := *cachedPermResult.Perms
-	scopesCopy := make(map[string]k8score.ResourceScope, len(cachedPermResult.Scopes))
-	for k, v := range cachedPermResult.Scopes {
-		scopesCopy[k] = v
-	}
-	scopeNamespacesCopy := make(map[string][]string, len(cachedPermResult.ScopeNamespaces))
-	for k, v := range cachedPermResult.ScopeNamespaces {
-		scopeNamespacesCopy[k] = append([]string(nil), v...)
-	}
-	namespaceErrorsCopy := maps.Clone(cachedPermResult.NamespaceProbeErrors)
-	for kind, errors := range namespaceErrorsCopy {
-		namespaceErrorsCopy[kind] = maps.Clone(errors)
-	}
-	return &PermissionCheckResult{
-		Perms:                    &permsCopy,
-		NamespaceScoped:          cachedPermResult.NamespaceScoped,
-		Namespace:                cachedPermResult.Namespace,
-		Scopes:                   scopesCopy,
-		ProbeErrors:              maps.Clone(cachedPermResult.ProbeErrors),
-		NamespaceProbeErrors:     namespaceErrorsCopy,
-		ScopeNamespaces:          scopeNamespacesCopy,
-		ScopeCandidates:          append([]string(nil), cachedPermResult.ScopeCandidates...),
-		ScopeCandidatesTruncated: cachedPermResult.ScopeCandidatesTruncated,
-	}
+	return clonePermissionCheckResult(cachedPermResult)
 }
 
 // InvalidateResourcePermissionsCache forces the next CheckResourcePermissions call to refresh
@@ -1498,4 +1448,34 @@ func invalidateResourcePermissionsCacheLocked() {
 	cachedPermResult = nil
 	resourcePermsExpiry = time.Time{}
 	resourcePermsGen++
+}
+
+func clonePermissionCheckResult(result *PermissionCheckResult) *PermissionCheckResult {
+	if result == nil {
+		return nil
+	}
+	permsCopy := *result.Perms
+	scopesCopy := make(map[string]k8score.ResourceScope, len(result.Scopes))
+	for k, v := range result.Scopes {
+		scopesCopy[k] = v
+	}
+	scopeNamespacesCopy := make(map[string][]string, len(result.ScopeNamespaces))
+	for k, v := range result.ScopeNamespaces {
+		scopeNamespacesCopy[k] = append([]string(nil), v...)
+	}
+	namespaceErrorsCopy := maps.Clone(result.NamespaceProbeErrors)
+	for kind, errors := range namespaceErrorsCopy {
+		namespaceErrorsCopy[kind] = maps.Clone(errors)
+	}
+	return &PermissionCheckResult{
+		Perms:                    &permsCopy,
+		NamespaceScoped:          result.NamespaceScoped,
+		Namespace:                result.Namespace,
+		Scopes:                   scopesCopy,
+		ProbeErrors:              maps.Clone(result.ProbeErrors),
+		NamespaceProbeErrors:     namespaceErrorsCopy,
+		ScopeNamespaces:          scopeNamespacesCopy,
+		ScopeCandidates:          append([]string(nil), result.ScopeCandidates...),
+		ScopeCandidatesTruncated: result.ScopeCandidatesTruncated,
+	}
 }
