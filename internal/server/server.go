@@ -68,6 +68,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/perfstats"
 	"github.com/skyhook-io/radar/pkg/prom"
 	"github.com/skyhook-io/radar/pkg/rbac"
+	"github.com/skyhook-io/radar/pkg/readreason"
 	"github.com/skyhook-io/radar/pkg/resourceid"
 	topology "github.com/skyhook-io/radar/pkg/topology"
 )
@@ -1340,6 +1341,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.Deployment = k8s.DeploymentInfo{Mode: deploymentMode()}
 	caps.CloudConnect = s.cloudConnectCapability()
 	caps.Features = k8s.FeatureCapabilities{
+		ResourceReadCoverage:  true,
 		YAMLReview:            true,
 		YAMLSchemas:           true,
 		WorkloadImages:        true,
@@ -2211,20 +2213,14 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	// DiscoverNamespaces if needed). canRead below relies on it.
 	namespaces := s.parseNamespacesForUser(r)
 
-	// Most REST lists preserve the empty-list denial response. LimitRange
-	// lookups need an explicit denial so an unreadable namespace is not
-	// presented as having no admission rules.
+	requestedNamespaces := namespaces
 	finalNamespaces, status, msg, ok := s.preflightResourceList(r, kind, group, namespaces)
 	if !ok {
-		if kind == "limitranges" && group == "" {
-			s.writeError(w, status, msg)
-			return
+		reason := readreason.RBACDenied
+		if msg == "no namespace access" {
+			reason = readreason.NoNamespaceAccess
 		}
-		// Denied, not empty. writeResourceList resolves columns for an empty
-		// list, and that lookup runs as Radar's own identity — so routing a
-		// denial through it would answer a caller who cannot list the kind with
-		// its column metadata. Emit the envelope without a table.
-		s.writeEmptyResourceTable(w, tableMode, kind, group)
+		s.writeErrorCode(w, status, string(reason), msg)
 		return
 	}
 	namespaces = finalNamespaces
@@ -2234,6 +2230,40 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit, err := parseResourceListLimit(r, includeSummary)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	key := informerKeyForKind(kind)
+	if key == "" || (group != "" && !k8s.TypedKindOwnsGroup(kind, group)) {
+		items, coverage, readErr := readDynamicResourceList(r, cache, kind, group, namespaces, limit)
+		if readErr != nil {
+			s.writeCollectionFailure(w, kind, readErr)
+			return
+		}
+		coverage = withCallerScopeGaps(coverage, requestedNamespaces, namespaces)
+		if !s.checkResourceListSize(w, len(items), limit) {
+			return
+		}
+		var result any = items
+		if includeSummary {
+			result = applySummaryStrip(result)
+		}
+		s.writeResourceList(w, r, cache, tableMode, kind, group, result, coverage)
+		return
+	}
+	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+	coverage, readNamespaces, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
+	if err != nil {
+		s.writeCollectionFailure(w, kind, err)
+		return
+	}
+	coverage = withCallerScopeGaps(coverage, requestedNamespaces, namespaces)
+	namespaces = readNamespaces
+	if !s.checkResourceListSize(w, typedListCount(cache, key, namespaces), limit) {
+		return
+	}
 	var result any
 
 	// listPerNs is a helper that merges results across multiple namespaces.
@@ -2270,60 +2300,6 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		forbiddenMsg(resourceKind)
-	}
-
-	// A non-empty group routes to the dynamic/CRD cache so CRDs whose plural
-	// collides with a core kind (e.g. KNative "services" vs core "services")
-	// reach the right resource. Built-in workloads addressed by their real group
-	// (e.g. deployments?group=apps) live in the typed cache, so they must fall
-	// through to the typed switch below — TypedKindOwnsGroup keeps them off the
-	// dynamic path (which has no informer for built-ins). Cluster-scoped gating
-	// is already done at the top of this handler via k8s.ClassifyKindScope.
-	if group != "" && !k8s.TypedKindOwnsGroup(kind, group) {
-		if len(namespaces) > 0 {
-			var merged []any
-			for _, ns := range namespaces {
-				items, listErr := cache.ListDynamicWithGroup(r.Context(), kind, ns, group)
-				if listErr != nil {
-					if strings.Contains(listErr.Error(), "unknown resource kind") {
-						s.writeError(w, http.StatusBadRequest, listErr.Error())
-						return
-					}
-					if apierrors.IsForbidden(listErr) || apierrors.IsUnauthorized(listErr) {
-						forbiddenMsg(kind)
-						return
-					}
-					log.Printf("[resources] Failed to list %s in namespace %s (group=%s): %v", kind, ns, group, listErr)
-					s.writeError(w, http.StatusInternalServerError, listErr.Error())
-					return
-				}
-				for _, item := range items {
-					merged = append(merged, item)
-				}
-			}
-			result = merged
-		} else {
-			result, err = cache.ListDynamicWithGroup(r.Context(), kind, "", group)
-			if err != nil {
-				if strings.Contains(err.Error(), "unknown resource kind") {
-					s.writeError(w, http.StatusBadRequest, err.Error())
-					return
-				}
-				if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
-					forbiddenMsg(kind)
-					return
-				}
-				log.Printf("[resources] Failed to list %s (group=%s): %v", kind, group, err)
-				s.writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
-
-		if includeSummary {
-			result = applySummaryStrip(result)
-		}
-		s.writeResourceList(w, r, cache, tableMode, kind, group, result)
-		return
 	}
 
 	// Try typed cache for known resource types first. Canonicalize aliases
@@ -2564,16 +2540,6 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 			notReadyOrForbidden("limitranges")
 			return
 		}
-		scopes := namespaces
-		if scopes == nil {
-			scopes = []string{""}
-		}
-		for _, ns := range scopes {
-			if !cache.KindCoversNamespace("limitranges", ns) {
-				s.writeError(w, http.StatusForbidden, "Radar does not have LimitRange visibility for the requested namespace scope")
-				return
-			}
-		}
 		result, err = listPerNs(
 			func() (any, error) { return cache.LimitRanges().List(labels.Everything()) },
 			func(ns string) (any, error) {
@@ -2603,36 +2569,8 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 			},
 		)
 	default:
-		// Fall back to dynamic cache for CRDs and other unknown resources
-		if len(namespaces) > 0 {
-			var merged []any
-			for _, ns := range namespaces {
-				items, listErr := cache.ListDynamicWithGroup(r.Context(), kind, ns, group)
-				if listErr != nil {
-					if strings.Contains(listErr.Error(), "unknown resource kind") {
-						s.writeError(w, http.StatusBadRequest, listErr.Error())
-						return
-					}
-					log.Printf("[resources] Failed to list %s in namespace %s: %v", kind, ns, listErr)
-					s.writeError(w, http.StatusInternalServerError, listErr.Error())
-					return
-				}
-				for _, item := range items {
-					merged = append(merged, item)
-				}
-			}
-			result = merged
-		} else {
-			result, err = cache.ListDynamicWithGroup(r.Context(), kind, "", group)
-			if err != nil {
-				if strings.Contains(err.Error(), "unknown resource kind") {
-					s.writeError(w, http.StatusBadRequest, err.Error())
-					return
-				}
-				s.writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
+		s.writeError(w, http.StatusBadRequest, "Unknown typed resource kind")
+		return
 	}
 
 	if err != nil {
@@ -2640,11 +2578,14 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.checkResourceListSize(w, listSize(result), limit) {
+		return
+	}
 	if includeSummary {
 		result = summarizeTypedList(kind, result)
 		result = applySummaryStrip(result)
 	}
-	s.writeResourceList(w, r, cache, tableMode, kind, group, result)
+	s.writeResourceList(w, r, cache, tableMode, kind, group, result, coverage)
 }
 
 // normalizeKind converts K8s kind names to lowercase for case-insensitive matching
@@ -2657,6 +2598,7 @@ func normalizeKind(kind string) string {
 // aliases the list/get handlers accept — to its typed informer key. Returns
 // "" for kinds outside the typed informer set (CRDs, dynamic fallthrough).
 func informerKeyForKind(kind string) string {
+	kind = normalizeKind(kind)
 	switch kind {
 	case "pods", "pod":
 		return "pods"
@@ -2916,6 +2858,17 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
+		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+		target := []string{namespace}
+		if clusterScoped {
+			target = nil
+		}
+		if _, _, err := typedReadCoverage(cache, key, target, clusterScoped); err != nil {
+			s.writeCollectionFailure(w, kind, err)
+			return
+		}
+	}
 	var resource any
 	var err error
 
@@ -2943,18 +2896,18 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 	// "unknown resource kind: deployments (group: apps)". Cluster-scoped gating
 	// is already done at the top of this handler via k8s.ClassifyKindScope.
 	if group != "" && !k8s.TypedKindOwnsGroup(kind, group) {
-		resource, err = cache.GetDynamicWithGroup(r.Context(), kind, namespace, name, group)
+		resource, err = readDynamicResourceGet(r.Context(), cache, kind, group, namespace, name)
 		if err != nil {
-			if strings.Contains(err.Error(), "unknown resource kind") {
+			if errors.Is(err, k8s.ErrUnknownDynamicKind) {
 				s.writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			if strings.Contains(err.Error(), "not found") {
+			if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 				s.writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			log.Printf("[resources] Failed to get %s %s/%s (group=%s): %v", kind, namespace, name, group, err)
-			s.writeError(w, http.StatusInternalServerError, err.Error())
+			s.writeCollectionFailure(w, kind, err)
 			return
 		}
 		setTypeMeta(resource)
@@ -3159,23 +3112,27 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 	default:
 		// Fall back to dynamic cache for CRDs and other unknown resources
 		// Use group to disambiguate when multiple API groups have similar resource names
-		resource, err = cache.GetDynamicWithGroup(r.Context(), kind, namespace, name, group)
+		resource, err = readDynamicResourceGet(r.Context(), cache, kind, group, namespace, name)
 		if err != nil {
-			if strings.Contains(err.Error(), "unknown resource kind") {
+			if errors.Is(err, k8s.ErrUnknownDynamicKind) {
 				s.writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			if strings.Contains(err.Error(), "not found") {
+			if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 				s.writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
-			s.writeError(w, http.StatusInternalServerError, err.Error())
+			s.writeCollectionFailure(w, kind, err)
 			return
 		}
 	}
 
 	if err != nil {
-		s.writeError(w, http.StatusNotFound, err.Error())
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
+			s.writeError(w, http.StatusNotFound, err.Error())
+		} else {
+			s.writeCollectionFailure(w, kind, err)
+		}
 		return
 	}
 
@@ -4231,7 +4188,7 @@ func (s *Server) handleApplyResource(w http.ResponseWriter, r *http.Request) {
 				s.writeApplyResourceError(w, http.StatusForbidden, errMsg, results, i, len(docs))
 				return
 			}
-			if apierrors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 				s.writeApplyResourceError(w, http.StatusNotFound, errMsg, results, i, len(docs))
 				return
 			}
@@ -4303,7 +4260,7 @@ func (s *Server) handleUpdateResource(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -4348,7 +4305,7 @@ func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 		Force:     force,
 	}, client)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -4503,7 +4460,7 @@ func (s *Server) handleRestartWorkload(w http.ResponseWriter, r *http.Request) {
 			s.writeRolloutError(w, err, "restart", namespace, name)
 			return
 		}
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -4551,7 +4508,7 @@ func (s *Server) handleScaleWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 	err := k8s.ScaleWorkloadWithClient(r.Context(), kind, namespace, name, req.Replicas, client)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -4605,7 +4562,7 @@ func (s *Server) handleWorkloadRevisions(w http.ResponseWriter, r *http.Request)
 
 	revisions, err := k8s.ListWorkloadRevisionsWithClient(r.Context(), kind, namespace, name, client)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -4667,7 +4624,7 @@ func (s *Server) handleRollbackWorkload(w http.ResponseWriter, r *http.Request) 
 			s.writeRolloutError(w, err, "rollback", namespace, name)
 			return
 		}
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -4895,7 +4852,7 @@ func (s *Server) handleCAPIClusterKubeconfig(w http.ResponseWriter, r *http.Requ
 	secretName := name + "-kubeconfig"
 	secret, err := client.CoreV1().Secrets(ns).Get(r.Context(), secretName, metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, fmt.Sprintf("kubeconfig secret %q not found in namespace %q", secretName, ns))
 			return
 		}
@@ -4953,7 +4910,7 @@ func (s *Server) handleCAPIClusterConnect(w http.ResponseWriter, r *http.Request
 	secretName := name + "-kubeconfig"
 	secret, err := client.CoreV1().Secrets(ns).Get(r.Context(), secretName, metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, fmt.Sprintf("kubeconfig secret %q not found in namespace %q", secretName, ns))
 			return
 		}

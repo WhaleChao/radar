@@ -30,7 +30,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"net/http"
 	"sort"
 	"strings"
@@ -50,6 +52,7 @@ import (
 	aicontext "github.com/skyhook-io/radar/pkg/ai/context"
 	bpaudit "github.com/skyhook-io/radar/pkg/audit"
 	"github.com/skyhook-io/radar/pkg/executioninsight"
+	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/policyreports"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 	"github.com/skyhook-io/radar/pkg/schedulinginsight"
@@ -181,10 +184,23 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	}
 	namespaces = finalNamespaces
 
-	cache := k8s.GetResourceCache()
-	if cache == nil {
-		s.writeError(w, http.StatusServiceUnavailable, "Resource cache not available")
+	cache, ok := s.gateResourceRead(w, kind, group)
+	if !ok {
 		return
+	}
+	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
+		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+		coverage, _, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
+		if err != nil {
+			s.writeCollectionFailure(w, kind, err)
+			return
+		}
+		// This agent endpoint still returns a bare list; partial scope cannot be
+		// represented by that contract, so require its entire requested scope.
+		if coverage.Status != "complete" {
+			s.writeErrorCode(w, 503, "collector_scope_limited", "Radar cannot provide a complete list for the requested scope")
+			return
+		}
 	}
 
 	// When a group is specified, route to the dynamic cache so CRDs whose
@@ -259,32 +275,17 @@ func issueIndexNamespaces(namespaces []string, kind, group string) []string {
 
 // aiListDynamic handles the CRD/dynamic fallback for AI list.
 func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8s.ResourceCache, kind string, namespaces []string, group string, level aicontext.VerbosityLevel, skipContext bool) {
-	var allItems []*unstructured.Unstructured
-
-	if len(namespaces) > 0 {
-		for _, ns := range namespaces {
-			items, err := cache.ListDynamicWithGroup(r.Context(), kind, ns, group)
-			if err != nil {
-				if strings.Contains(err.Error(), "unknown resource kind") {
-					s.writeError(w, http.StatusBadRequest, err.Error())
-					return
-				}
-				s.writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			allItems = append(allItems, items...)
-		}
-	} else {
-		items, err := cache.ListDynamicWithGroup(r.Context(), kind, "", group)
-		if err != nil {
-			if strings.Contains(err.Error(), "unknown resource kind") {
-				s.writeError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		allItems = items
+	allItems, coverage, err := readDynamicResourceList(r, cache, kind, group, namespaces, resourceListHardLimit)
+	if err != nil {
+		s.writeCollectionFailure(w, kind, err)
+		return
+	}
+	if coverage.Status != "complete" {
+		s.writeErrorCode(w, 503, "collector_scope_limited", "Radar cannot provide a complete list for the requested scope")
+		return
+	}
+	if !s.checkResourceListSize(w, len(allItems), resourceListHardLimit) {
+		return
 	}
 
 	results := make([]any, 0, len(allItems))
@@ -346,10 +347,20 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cache := k8s.GetResourceCache()
-	if cache == nil {
-		s.writeError(w, http.StatusServiceUnavailable, "Resource cache not available")
+	cache, ok := s.gateResourceRead(w, kind, group)
+	if !ok {
 		return
+	}
+	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
+		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+		target := []string{namespace}
+		if clusterScoped {
+			target = nil
+		}
+		if _, _, err := typedReadCoverage(cache, key, target, clusterScoped); err != nil {
+			s.writeCollectionFailure(w, kind, err)
+			return
+		}
 	}
 
 	obj, isUnstructured, err := s.fetchAIResource(r.Context(), cache, kind, namespace, name, group)
@@ -393,7 +404,7 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 // the dynamic cache has no informer for built-ins. Mirrors handleGetResource.
 func (s *Server) fetchAIResource(ctx context.Context, cache *k8s.ResourceCache, kind, namespace, name, group string) (runtime.Object, bool, error) {
 	if group != "" && !k8s.TypedKindOwnsGroup(kind, group) {
-		u, err := cache.GetDynamicWithGroup(ctx, kind, namespace, name, group)
+		u, err := readDynamicResourceGet(ctx, cache, kind, group, namespace, name)
 		if err != nil {
 			return nil, false, err
 		}
@@ -406,7 +417,7 @@ func (s *Server) fetchAIResource(ctx context.Context, cache *k8s.ResourceCache, 
 	if err != k8s.ErrUnknownKind {
 		return nil, false, err
 	}
-	u, dynErr := cache.GetDynamicWithGroup(ctx, kind, namespace, name, group)
+	u, dynErr := readDynamicResourceGet(ctx, cache, kind, group, namespace, name)
 	if dynErr != nil {
 		return nil, false, dynErr
 	}
@@ -416,20 +427,17 @@ func (s *Server) fetchAIResource(ctx context.Context, cache *k8s.ResourceCache, 
 // writeAIFetchError maps fetch errors to HTTP status codes. Mirrors the
 // previous inline behavior so consumers don't see a status-code drift.
 func (s *Server) writeAIFetchError(w http.ResponseWriter, kind string, err error) {
-	msg := err.Error()
 	switch {
-	case strings.HasPrefix(msg, "forbidden:"):
-		s.writeError(w, http.StatusForbidden, fmt.Sprintf("insufficient permissions to access %s", kind))
-	case strings.Contains(msg, "unknown resource kind"):
-		s.writeError(w, http.StatusBadRequest, msg)
-	case strings.Contains(msg, "not found"):
-		s.writeError(w, http.StatusNotFound, msg)
+	case apierrors.IsNotFound(err), errors.Is(err, k8score.ErrResourceNotFound):
+		s.writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, k8s.ErrUnknownDynamicKind):
+		s.writeError(w, http.StatusBadRequest, err.Error())
+	case strings.HasPrefix(err.Error(), "forbidden:"):
+		s.writeErrorCode(w, 503, "collector_access_denied", fmt.Sprintf("Radar's collector cannot read %s", kind))
 	default:
-		// Unknown errors are server-side problems (e.g. "resource discovery
-		// not initialized", "dynamic resource cache not initialized") — surface
-		// as 500 so debugging upstream issues isn't masked by a misleading 404.
-		s.writeError(w, http.StatusInternalServerError, msg)
+		s.writeCollectionFailure(w, kind, err)
 	}
+
 }
 
 // minifyForAI dispatches to the right Minify variant based on whether the

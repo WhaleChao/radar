@@ -318,6 +318,15 @@ func (d *DynamicResourceCache) EnsureWatching(gvr schema.GroupVersionResource) e
 // This is what lets a namespace-restricted user read a CRD in the namespaces
 // they actually have access to, instead of being pinned to a single fallback.
 func (d *DynamicResourceCache) ensureWatching(gvr schema.GroupVersionResource, preferredNS string) error {
+	return d.EnsureWatchingContext(context.Background(), gvr, preferredNS)
+}
+
+// EnsureWatchingContext bounds the caller's wait; watches and shared probes
+// belong to the cache lifecycle and survive cancellation of one request.
+func (d *DynamicResourceCache) EnsureWatchingContext(ctx context.Context, gvr schema.GroupVersionResource, preferredNS string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if d == nil {
 		return fmt.Errorf("dynamic resource cache not initialized")
 	}
@@ -334,6 +343,8 @@ func (d *DynamicResourceCache) ensureWatching(gvr schema.GroupVersionResource, p
 	// If CRD discovery is in progress, wait for it to finish
 	if d.GetDiscoveryStatus() == CRDDiscoveryInProgress {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-d.discoveryDone:
 		case <-time.After(45 * time.Second):
 			log.Printf("[dynamic cache] Timeout waiting for CRD discovery, probing %s independently", gvr.Resource)
@@ -349,7 +360,7 @@ func (d *DynamicResourceCache) ensureWatching(gvr schema.GroupVersionResource, p
 	// parallel enrichment fan-out over many objects of one unwatched kind —
 	// share one probe fan-out + informer start instead of stampeding the
 	// apiserver with redundant limit=1 lists.
-	_, err, _ := d.watchStarts.Do(gvr.String()+"|"+preferredNS, func() (any, error) {
+	result := d.watchStarts.DoChan(gvr.String()+"|"+preferredNS, func() (any, error) {
 		if d.hasCoveringInformer(gvr, preferredNS) {
 			return nil, nil
 		}
@@ -384,7 +395,12 @@ func (d *DynamicResourceCache) ensureWatching(gvr schema.GroupVersionResource, p
 		}
 		return nil, nil
 	})
-	return err
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-result:
+		return result.Err
+	}
 }
 
 // hasCoveringInformer reports whether an existing informer already serves
@@ -1354,11 +1370,16 @@ func (d *DynamicResourceCache) countDirectProbeOne(ctx context.Context, gvr sche
 // List returns all resources of a given GVR, optionally filtered by namespace.
 // This is non-blocking — returns whatever data is available immediately.
 func (d *DynamicResourceCache) List(gvr schema.GroupVersionResource, namespace string) ([]*unstructured.Unstructured, error) {
+	return d.ListContext(context.Background(), gvr, namespace)
+}
+
+// ListContext keeps request cancellation separate from shared watch lifetime.
+func (d *DynamicResourceCache) ListContext(ctx context.Context, gvr schema.GroupVersionResource, namespace string) ([]*unstructured.Unstructured, error) {
 	if d == nil {
 		return nil, fmt.Errorf("dynamic resource cache not initialized")
 	}
 
-	if err := d.ensureWatching(gvr, namespace); err != nil {
+	if err := d.EnsureWatchingContext(ctx, gvr, namespace); err != nil {
 		return nil, err
 	}
 

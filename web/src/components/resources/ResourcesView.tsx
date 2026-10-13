@@ -1,11 +1,11 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ApiError, debugNamespaceLog, fetchJSON, isForbiddenError, isKindSyncFailed, isStillLoadingError, useCapabilities, useNamespaceCapabilities, useResources, useSecretCertExpiry, useTopPodMetrics, useTopNodeMetrics, useBulkDeleteResources, useBulkRestartWorkloads, useBulkScaleWorkloads, useAudit } from '../../api/client'
+import { ApiError, fetchResourceList, fetchJSON, isForbiddenError, isKindSyncFailed, isStillLoadingError, useCapabilities, useNamespaceCapabilities, useResources, useSecretCertExpiry, useTopPodMetrics, useTopNodeMetrics, useBulkDeleteResources, useBulkRestartWorkloads, useBulkScaleWorkloads, useAudit } from '../../api/client'
 import { isBadgeWorthy } from '../../utils/auditBadges'
 import type { AuditBadgeMessage } from '@skyhook-io/k8s-ui'
-import { apiUrl, getAuthHeaders, getCredentialsMode, stripBasename } from '../../api/config'
-import { readErrorBody } from '../../api/httpErrors'
+import { stripBasename } from '../../api/config'
+import type { ResourceListResult } from '../../api/resourceLists'
 import { useAPIResources } from '../../api/apiResources'
 import { useConnection } from '../../context/ConnectionContext'
 import { initNavigationMap, getSecretStoreProviderType } from '@skyhook-io/k8s-ui'
@@ -20,9 +20,8 @@ import {
   CORE_RESOURCES,
   intersectWorkloadWrites,
   hasCuratedColumns,
-  sanitizePrinterTable,
 } from '@skyhook-io/k8s-ui'
-import type { Capabilities, PrinterTable, ResourceQueryResult, WorkloadWritePermissions } from '@skyhook-io/k8s-ui'
+import type { Capabilities, ResourceQueryResult, WorkloadWritePermissions } from '@skyhook-io/k8s-ui'
 import type { SelectedResource } from '../../types'
 import { apiVersionToGroup, kindToPluralWithGroup, type NavigateToResource } from '../../utils/navigation'
 import { CreateResourceDialog } from '../shared/CreateResourceDialog'
@@ -75,7 +74,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const navigate = useNavigate()
   const { connection } = useConnection()
 
-  const { data: capabilities } = useCapabilities()
+  const { data: capabilities, isLoading: capabilitiesLoading, error: capabilitiesError } = useCapabilities()
   const namespaceForCapabilities = namespaces.length === 1 ? namespaces[0] : undefined
   const { data: namespaceCapabilities } = useNamespaceCapabilities(namespaceForCapabilities, capabilities)
   const namespaceCapabilityNames = useMemo(() => namespaces.length > 1 ? [...namespaces].sort() : [], [namespaces])
@@ -122,7 +121,6 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const canBulkScaleSelectedKind = useMemo(() => canBulkScaleKind(selectedKind, workloadWrites), [selectedKind, workloadWrites])
 
   // Lightweight resource counts for sidebar badges (~2KB instead of ~608MB)
-  const namespacesParam = namespaces.join(',')
   const { data: countsData, isError: countsIsError } = useResourceCounts(namespaces)
 
   // Determine if selected kind is a CRD (only CRDs should send ?group= to backend)
@@ -230,62 +228,21 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
 
   // Fetch full data only for the selected kind
   const selectedKindQuery = useQuery({
-    queryKey: ['resources', selectedKind?.name, isSelectedCrd ? selectedKind?.group : '', namespaces],
-    queryFn: async (): Promise<{ items: any[]; printerTable: PrinterTable | null }> => {
-      if (!selectedKind) return { items: [], printerTable: null }
-      const params = new URLSearchParams()
-      if (namespaces.length > 0) params.set('namespaces', namespacesParam)
-      if (isSelectedCrd && selectedKind.group) params.set('group', selectedKind.group)
-      if (selectedKindSummaryServed) params.set('include', 'summary')
-      // Only CRDs can declare printer columns, and a curated kind discards the
-      // result — so table mode is requested from exactly the kinds that can use
-      // it. Resolving a table costs the server a CRD read per request; doing
-      // that for a kind whose columns are hand-curated is pure waste.
-      const wantsTable = isSelectedCrd && !!selectedKind.group &&
-        !hasCuratedColumns(selectedKind.name, selectedKind.group)
-      if (wantsTable) params.set('table', '1')
-      const startedAt = performance.now()
-      debugNamespaceLog('resources:selected-kind-fetch-start', {
-        kind: selectedKind.name,
-        group: isSelectedCrd ? selectedKind.group : '',
-        namespaces,
-        params: params.toString(),
+    queryKey: ['resources', selectedKind?.name, isSelectedCrd ? selectedKind?.group : '', namespaces, capabilities?.features?.resourceReadCoverage === true],
+    queryFn: async ({ signal }): Promise<ResourceListResult<any>> => {
+      if (!selectedKind) return { items: [], coverage: { status: 'unknown' }, printerTable: null }
+      const wantsTable = isSelectedCrd && !!selectedKind.group && !hasCuratedColumns(selectedKind.name, selectedKind.group)
+      return fetchResourceList(selectedKind.name, {
+        supportsCoverage: capabilities?.features?.resourceReadCoverage === true,
+        namespaces, group: isSelectedCrd ? selectedKind.group : undefined,
+        summary: selectedKindSummaryServed, table: wantsTable, signal,
       })
-      const res = await fetch(apiUrl(`/resources/${selectedKind.name}?${params}`), {
-        credentials: getCredentialsMode(),
-        headers: getAuthHeaders(),
-      })
-      debugNamespaceLog('resources:selected-kind-fetch-response', {
-        kind: selectedKind.name,
-        group: isSelectedCrd ? selectedKind.group : '',
-        namespaces,
-        params: params.toString(),
-        status: res.status,
-        durationMs: Math.round(performance.now() - startedAt),
-      })
-      if (!res.ok) {
-        const errorData = await readErrorBody(res)
-        throw new ApiError(errorData.error || `Failed to fetch ${selectedKind.name}`, res.status, errorData)
-      }
-      const body = await res.json()
-      // Both branches are current shapes, not a guess at a legacy one: a Radar
-      // backend that predates `table` ignores the parameter and answers with
-      // the bare array. @skyhook-io/radar-app is versioned independently of the
-      // backend it points at, so a consumer can pair a new frontend with an
-      // older Radar — and reading that array as a missing envelope would render
-      // every CRD list empty. Items and columns still come from one response,
-      // so a row can never render against another fetch's cells.
-      if (!wantsTable || Array.isArray(body)) return { items: body as any[], printerTable: null }
-      return {
-        items: Array.isArray(body?.items) ? body.items as any[] : [],
-        printerTable: sanitizePrinterTable(body),
-      }
     },
-    enabled: !!selectedKind && !selectedKindQueryBlocked,
+    enabled: !!selectedKind && !selectedKindQueryBlocked && capabilities != null,
     staleTime: 30000,
     refetchInterval: 120000, // Safety net — SSE k8s_event drives near-real-time invalidation
     retry: (failureCount: number, error: Error) => {
-      if (isForbiddenError(error) || isKindSyncFailed(error)) return false
+      if (isForbiddenError(error) || isKindSyncFailed(error) || (error instanceof ApiError && error.data?.error_code === 'resource_list_too_large')) return false
       // Cluster still connecting, or this kind's informer still completing
       // its initial sync: keep the query in its loading state and retry —
       // the header's sync-progress label explains the wait.
@@ -302,13 +259,14 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     return {
       resourceName: selectedKind.name,
       group: selectedKind.group,
+      coverage: selectedKindQuery.data?.coverage,
       data: selectedKindQueryBlocked ? [] : selectedKindQuery.data?.items,
-      isLoading: waitingForGuardCount || selectedKindQuery.isLoading,
-      error: selectedKindQueryBlocked ? undefined : selectedKindQuery.error,
+      isLoading: waitingForGuardCount || selectedKindQuery.isLoading || capabilitiesLoading,
+      error: selectedKindQueryBlocked ? undefined : selectedKindQuery.error ?? capabilitiesError,
       refetch: selectedKindQuery.refetch,
       dataUpdatedAt: selectedKindQuery.dataUpdatedAt,
     }
-  }, [selectedKind, selectedKindQueryBlocked, waitingForGuardCount, selectedKindQuery.data?.items, selectedKindQuery.isLoading, selectedKindQuery.error, selectedKindQuery.refetch, selectedKindQuery.dataUpdatedAt])
+  }, [selectedKind, selectedKindQueryBlocked, waitingForGuardCount, selectedKindQuery.data?.items, selectedKindQuery.data?.coverage, selectedKindQuery.isLoading, selectedKindQuery.error, selectedKindQuery.refetch, selectedKindQuery.dataUpdatedAt, capabilitiesLoading, capabilitiesError])
 
   // Metrics
   const { data: topPodMetrics } = useTopPodMetrics({ enabled: topPodMetricsEnabled, namespaces })
@@ -399,13 +357,16 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       apiResources={apiResources}
       // Lightweight counts for sidebar (replaces 233 parallel queries)
       resourceCounts={countsData?.counts ?? EMPTY_RESOURCE_COUNTS}
+      resourceCoverage={countsData?.coverage}
       resourceForbidden={countsData?.forbidden}
       resourceReasons={countsData?.reasons}
       resourceUnavailable={countsData?.unavailable}
       selectedKindQuery={selectedKindQueryResult}
       printerTable={selectedKindQueryBlocked ? null : selectedKindQuery.data?.printerTable ?? null}
       connectionState={connection.state === 'connecting' && connection.syncStatus ? 'syncing' : connection.state}
-      largeListGuard={largeListGuard}
+      largeListGuard={selectedKindQuery.error && (selectedKindQuery.error as { data?: { error_code?: string } }).data?.error_code === 'resource_list_too_large' && selectedKind
+        ? { kind: selectedKind.name, reason: 'too-many', count: (selectedKindQuery.error as any).data.count, limit: selectedKindRowLimit, namespaces }
+        : largeListGuard}
       onSelectedKindChange={setSelectedKind}
       sidebarCategoryWorkspaces={cnpgSidebarWorkspace}
       topPodMetrics={topPodMetrics}

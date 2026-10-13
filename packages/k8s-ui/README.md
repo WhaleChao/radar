@@ -29,3 +29,9 @@ command remains pending for the next connection.
 `YamlEditor` and `YamlDiffEditor` bundle Monaco, its editor worker, and the YAML language worker into the consuming application. They make no runtime CDN or internet requests, so they work in air-gapped environments.
 
 Consumers must use a bundler that supports module workers created with `new Worker(new URL(..., import.meta.url), { type: 'module' })`. The source package is compatible with Vite and webpack 5. Monaco and `monaco-yaml` are intentionally pinned as a compatible pair because their worker-factory APIs must move together. The package declares that exact Monaco version as a peer so the host and YAML runtime share one Monaco instance.
+
+## Resource read coverage
+
+`ResourceReadCoverage` describes completeness of the authorized requested scope, the collector's actual read scope, and bounded namespace gaps. `ResourceCoverage` additionally permits `unknown` in UI adapters for older Radar instances. It does not describe object freshness or count truncation.
+
+Pass list coverage through `ResourceQueryResult.coverage`, and per-kind count coverage through `ResourcesView.resourceCoverage` / `ResourcesSidebar.resourceCoverage`. Counts stay useful for sizing; a partial count displays as a lower bound and a partial or unknown zero does not hide a kind as empty. Loaded list counts retain their coverage when cached. `GitOpsTableView` accepts aggregate `coverageStatus` and `countsPartial` keys; hosts must combine coverage across every cluster/source contributing to the view. Keep source-specific metadata in the host rather than repeating it on every row.

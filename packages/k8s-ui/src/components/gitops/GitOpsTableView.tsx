@@ -201,7 +201,9 @@ export interface GitOpsTableViewProps {
   // counts keyed "group/Kind" — e.g. "argoproj.io/Application" → 17. Drives
   // the Scope-section mode tabs and the empty-state check.
   counts: Record<string, number>
+  coverageStatus?: 'complete' | 'partial' | 'unknown'
   countsUnavailable?: string[]
+  countsPartial?: string[]
   // @deprecated Superseded by `freshnessSlot` — kept for source compatibility
   // with existing consumers; no longer drives any affordance here.
   onRefresh?: () => void
@@ -304,6 +306,8 @@ export function GitOpsTableView({
   error,
   counts,
   countsUnavailable,
+  countsPartial,
+  coverageStatus = 'unknown',
   freshnessSlot,
   onRowClick,
   rowHrefFor,
@@ -401,6 +405,13 @@ export function GitOpsTableView({
       + (counts['source.toolkit.fluxcd.io/HelmRepository'] ?? 0),
     projects: counts['argoproj.io/AppProject'] ?? 0,
     alerts: counts['notification.toolkit.fluxcd.io/Alert'] ?? 0,
+  }
+  const partialCountKeys = new Set(countsPartial ?? [])
+  const modeCountsPartial: Record<GitOpsMode, boolean> = {
+    applications: coverageStatus === 'partial',
+    sources: ['source.toolkit.fluxcd.io/GitRepository', 'source.toolkit.fluxcd.io/OCIRepository', 'source.toolkit.fluxcd.io/HelmRepository'].some(key => partialCountKeys.has(key)),
+    projects: partialCountKeys.has('argoproj.io/AppProject'),
+    alerts: partialCountKeys.has('notification.toolkit.fluxcd.io/Alert'),
   }
   const totalGitOps = Object.entries(counts).reduce(
     (sum, [key, n]) => sum + (isGitOpsCountKey(key) ? n : 0),
@@ -547,7 +558,7 @@ export function GitOpsTableView({
   // Also require zero actual rows: the cold-cache retry can populate `rows`
   // before the separate counts map catches up, and a populated table must not
   // be hidden behind a "nothing here" screen.
-  if (totalGitOps === 0 && allRowsInput.length === 0 && !loading && !hasGlobalNamespaceFilter && !hasUnavailableGitOpsCounts) {
+  if (totalGitOps === 0 && allRowsInput.length === 0 && !loading && !hasGlobalNamespaceFilter && !hasUnavailableGitOpsCounts && coverageStatus === 'complete') {
     return (
       <div className="flex h-full min-h-0 flex-1 items-start justify-center bg-theme-base px-4 pb-4 pt-[22vh]">
         <div className="rounded-lg border border-theme-border bg-theme-surface p-8 text-center">
@@ -579,7 +590,7 @@ export function GitOpsTableView({
   const summaryTiles: SummaryTileSpec[] = [
     {
       key: 'total',
-      label: 'Total Applications',
+      label: coverageStatus === 'complete' ? 'Total Applications' : 'Observed Applications',
       value: allRows.length,
       tone: 'neutral',
       active: noOtherFiltersActive(),
@@ -677,6 +688,7 @@ export function GitOpsTableView({
         mode={mode}
         onModeChange={setMode}
         modeCounts={modeCounts}
+        modeCountsPartial={modeCountsPartial}
         syncCounts={syncCounts}
         syncFilters={syncFilters}
         onToggleSync={(value) => filters.toggle('sync', value)}
@@ -789,6 +801,10 @@ export function GitOpsTableView({
           </div>
         </div>
 
+        {coverageStatus === 'partial' && (
+          <p role="status" className="px-4 py-2 text-xs text-warning-text border-b border-theme-border">Partial results. Some GitOps resources or sources could not be read.</p>
+        )}
+
         {/* pb-20 keeps the last row (and its three-dot menu) scrollable clear
             of the app's fixed bottom-right overlay buttons; without the slack
             the bottom row's action trigger sits under them and can't be clicked
@@ -805,7 +821,7 @@ export function GitOpsTableView({
             <div className="p-4 text-sm text-red-500">Failed to load GitOps applications: {error.message}</div>
           ) : filteredRows.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-theme-text-secondary">
-              <p>{allRows.length === 0 && !hasGlobalNamespaceFilter ? 'No applications found.' : 'No applications match the current filters.'}</p>
+              <p>{allRows.length > 0 ? 'No applications match the current filters.' : coverageStatus === 'complete' ? 'No applications found in the requested scope.' : coverageStatus === 'partial' ? 'No applications found in the namespaces Radar could read.' : 'No applications returned. Read coverage is unknown.'}</p>
               {hasGlobalNamespaceFilter && globalNamespaces && (
                 <p className="text-xs text-theme-text-tertiary">
                   Viewing {globalNamespaces.length === 1 ? `namespace: ${globalNamespaces[0]}` : `${globalNamespaces.length} namespaces`}
@@ -856,6 +872,7 @@ function GitOpsFilterSidebar({
   mode,
   onModeChange,
   modeCounts,
+  modeCountsPartial,
   syncCounts,
   syncFilters,
   onToggleSync,
@@ -883,6 +900,7 @@ function GitOpsFilterSidebar({
   mode: GitOpsMode
   onModeChange: (mode: GitOpsMode) => void
   modeCounts: Record<GitOpsMode, number>
+  modeCountsPartial: Record<GitOpsMode, boolean>
   syncCounts: Map<string, number>
   syncFilters: Set<string>
   onToggleSync: (value: string) => void
@@ -948,7 +966,7 @@ function GitOpsFilterSidebar({
                 }`}
               >
                 <div className="font-medium">{modeLabel(item)}</div>
-                <div className={mode === item ? 'text-white/70' : 'text-theme-text-tertiary'}>{modeCounts[item]}</div>
+                <div className={mode === item ? 'text-white/70' : 'text-theme-text-tertiary'}>{modeCountsPartial[item] ? '≥' : ''}{modeCounts[item]}</div>
               </button>
             ))}
           </div>

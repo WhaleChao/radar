@@ -54,9 +54,9 @@ func TestLimitRangeResourceAccess(t *testing.T) {
 					t.Fatalf("expected explicit error, got %v (%v)", body, err)
 				}
 			} else if tt.verb == "list" {
-				var items []corev1.LimitRange
-				if err := json.NewDecoder(resp.Body).Decode(&items); err != nil || len(items) != 1 || items[0].Name != "rules" {
-					t.Fatalf("expected rules, got %v (%v)", items, err)
+				var response testResourceListEnvelope
+				if err := json.NewDecoder(resp.Body).Decode(&response); err != nil || len(response.Items) != 1 || mustNested(t, response.Items[0], "metadata", "name") != "rules" {
+					t.Fatalf("expected rules list envelope, got %v (%v)", response, err)
 				}
 			}
 		})
@@ -83,10 +83,10 @@ func TestLimitRangeCacheCoverage(t *testing.T) {
 		want int
 	}{
 		{"/api/resources/limitranges?namespace=default", 200},
-		{"/api/resources/limitranges?namespace=other", 403},
-		{"/api/resources/limitranges?namespaces=default,other", 403},
-		{"/api/resources/limitranges", 403},
-		{"/api/resources/limitranges/other/unknown", 403},
+		{"/api/resources/limitranges?namespace=other", 503},
+		{"/api/resources/limitranges?namespaces=default,other", 200},
+		{"/api/resources/limitranges", 200},
+		{"/api/resources/limitranges/other/unknown", 503},
 		{"/api/resources/limitranges/default/unknown", 404},
 	} {
 		t.Run(tt.path, func(t *testing.T) {

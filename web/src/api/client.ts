@@ -1,3 +1,4 @@
+import { normalizeResourceList, type ResourceListResult } from './resourceLists'
 import { canonicalResourceGroup } from '@skyhook-io/k8s-ui/utils/api-resources'
 import { knownKindForPluralWithGroup, pluralToKind } from '@skyhook-io/k8s-ui/utils/navigation'
 import { useEffect, useRef } from 'react'
@@ -2689,6 +2690,26 @@ export function useResourceWithRelationships<T>(
   });
 }
 
+export interface ResourceListOptions {
+  supportsCoverage: boolean
+  namespaces?: string[]
+  group?: string
+  table?: boolean
+  summary?: boolean
+  signal?: AbortSignal
+}
+
+export async function fetchResourceList<T>(kind: string, options: ResourceListOptions): Promise<ResourceListResult<T>> {
+  const params = new URLSearchParams()
+  if (options.namespaces?.length) params.set('namespaces', options.namespaces.join(','))
+  if (options.group) params.set('group', options.group)
+  if (options.table) params.set('table', '1')
+  if (options.summary) params.set('include', 'summary')
+  if (options.supportsCoverage) params.set('maxItems', options.summary ? '50000' : '25000')
+  const body = await fetchJSON<Parameters<typeof normalizeResourceList<T>>[0]>(`/resources/${encodeURIComponent(kind)}?${params}`, options.signal)
+  return normalizeResourceList<T>(body, options.supportsCoverage, options.table === true)
+}
+
 // List resources - queryKey includes group for cache sharing with ResourcesView
 export function useResources<T>(
   kind: string,
@@ -2696,16 +2717,15 @@ export function useResources<T>(
   group?: string,
   options?: { enabled?: boolean; refetchInterval?: number | false },
 ) {
-  const params = new URLSearchParams();
-  if (namespace) params.set("namespace", namespace);
-  if (group) params.set("group", group);
-  const queryString = params.toString();
-
-  return useQuery<T[]>({
-    queryKey: ["resources", kind, group, namespace],
-    queryFn: () =>
-      fetchJSON(`/resources/${kind}${queryString ? `?${queryString}` : ""}`),
-    enabled: (options?.enabled ?? true) && Boolean(kind),
+  const capabilityQuery = useCapabilities();
+  const capabilities = capabilityQuery.data;
+  const query = useQuery<ResourceListResult<T>>({
+    queryKey: ["resources", kind, group, namespace, capabilities?.features?.resourceReadCoverage === true],
+    queryFn: ({ signal }) => fetchResourceList<T>(kind, {
+      supportsCoverage: capabilities?.features?.resourceReadCoverage === true,
+      namespaces: namespace ? [namespace] : [], group, signal,
+    }),
+    enabled: (options?.enabled ?? true) && Boolean(kind) && capabilities != null,
     staleTime: 30000, // 30 seconds - matches refetchInterval in ResourcesView
     refetchInterval: options?.refetchInterval,
     // Kind still completing its initial sync (progressive shell, or a
@@ -2713,12 +2733,13 @@ export function useResources<T>(
     // surfacing an error.
     retry: (failureCount, error) => {
       if (isStillLoadingError(error)) return true;
-      if (isKindSyncFailed(error)) return false;
+      if (isKindSyncFailed(error) || (error instanceof ApiError && error.data?.error_code === 'resource_list_too_large')) return false;
       return failureCount < 1; // one retry, 4xx included, unlike the QueryClient default
     },
     retryDelay: (failureCount, error) =>
       isStillLoadingError(error) ? 2000 : Math.min(1000 * 2 ** failureCount, 30000),
   });
+  return { ...query, data: query.data?.items, coverage: query.data?.coverage, isLoading: query.isLoading || capabilityQuery.isLoading, error: query.error ?? capabilityQuery.error };
 }
 
 // Timeline changes (unified view of changes + K8s events)

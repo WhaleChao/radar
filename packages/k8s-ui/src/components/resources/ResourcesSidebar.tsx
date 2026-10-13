@@ -1,3 +1,5 @@
+import type { ResourceCoverage } from '../../types/resource-coverage'
+import { isConfirmedEmpty, resourceCountLabel } from '../../utils/resource-coverage'
 import { useState, useMemo, useEffect, useRef, useCallback, useId, forwardRef, type ComponentType } from 'react'
 import {
   Search,
@@ -57,6 +59,7 @@ export interface ResourcesSidebarProps {
   onKindChange?: () => void
   apiResources?: APIResource[]
   resourceCounts?: Record<string, number | null>
+  resourceCoverage?: Record<string, ResourceCoverage>
   resourceUnavailable?: string[]
   resourceForbidden?: string[]
   pinned?: PinnedItem[]
@@ -122,6 +125,7 @@ interface ResourceTypeButtonProps {
   /** `null` means "count not loaded yet" — rendered as a placeholder so
    *  the badge doesn't flicker to "0" while the API call is in flight. */
   count: number | null
+  coverage?: ResourceCoverage
   isSelected: boolean
   /** Keyboard-highlight state (arrow nav in the filter input). */
   isHighlighted?: boolean
@@ -133,7 +137,7 @@ interface ResourceTypeButtonProps {
 }
 
 const ResourceTypeButton = forwardRef<HTMLButtonElement, ResourceTypeButtonProps>(
-  function ResourceTypeButton({ resource, count, isSelected, isHighlighted, isForbidden: forbidden, isPinned, onTogglePin, onClick, indent }, ref) {
+  function ResourceTypeButton({ resource, count, coverage, isSelected, isHighlighted, isForbidden: forbidden, isPinned, onTogglePin, onClick, indent }, ref) {
     const Icon = getResourceIcon(resource.kind, resource.group)
     return (
       <button
@@ -193,13 +197,13 @@ const ResourceTypeButton = forwardRef<HTMLButtonElement, ResourceTypeButtonProps
               </span>
             </Tooltip>
           ) : (
-            <span className={clsx(
+            <Tooltip content={coverage?.status === 'partial' ? 'Count in the namespaces Radar could read; more may exist outside them.' : coverage?.status === 'complete' ? 'Count in the requested scope.' : 'Observed count; this Radar does not report coverage.'} position="left"><span className={clsx(
               'text-xs py-0.5 rounded text-center font-mono',
               isSelected ? 'bg-skyhook-500/30 selection-text' : 'bg-theme-elevated',
               count < 1000 ? 'w-8' : 'w-9',
             )}>
-              {count}
-            </span>
+              {resourceCountLabel(count, coverage)}
+            </span></Tooltip>
           )}
         </div>
       </button>
@@ -213,6 +217,7 @@ export function ResourcesSidebar({
   onKindChange,
   apiResources,
   resourceCounts,
+  resourceCoverage,
   resourceUnavailable,
   resourceForbidden,
   pinned = [],
@@ -388,7 +393,8 @@ export function ResourcesSidebar({
         const isSelectedResource =
           (effectiveSelectedKind.name === resource.name && effectiveSelectedKind.group === resource.group) ||
           (effectiveSelectedKind.kind.toLowerCase() === resource.kind.toLowerCase() && effectiveSelectedKind.group === resource.group)
-        const shouldShow = isSelectedResource || count === null || (count ?? 0) > 0 || showEmptyKinds
+        const key = resource.group ? `${resource.group}/${resource.kind}` : resource.kind
+        const shouldShow = isSelectedResource || !isConfirmedEmpty(count, resourceCoverage?.[key]) || showEmptyKinds
         if (!shouldShow) totalHiddenKinds++
         return shouldShow
       })
@@ -414,7 +420,7 @@ export function ResourcesSidebar({
     })
 
     return { sortedCategories: visibleCategories, hiddenKindsCount: totalHiddenKinds, hiddenGroupsCount: totalHiddenGroups }
-  }, [categories, counts, showEmptyKinds, effectiveSelectedKind.name, effectiveSelectedKind.kind, effectiveSelectedKind.group, categoryWorkspaces, activeDestinationCategory])
+  }, [categories, counts, resourceCoverage, showEmptyKinds, effectiveSelectedKind.name, effectiveSelectedKind.kind, effectiveSelectedKind.group, categoryWorkspaces, activeDestinationCategory])
 
   // Filter sidebar categories/kinds by the kind search term
   const filteredCategories = useMemo(() => {
@@ -598,6 +604,7 @@ export function ResourcesSidebar({
                       ref={highlighted ? highlightedRef : (isResourceSelected ? selectedSidebarRef : null)}
                       resource={{ name: p.name, kind: p.kind, group: p.group, version: '', namespaced: true, isCrd: false, verbs: [] }}
                       count={counts[p.group ? `${p.group}/${p.kind}` : p.kind] ?? null}
+                      coverage={resourceCoverage?.[p.group ? `${p.group}/${p.kind}` : p.kind]}
                       isSelected={isResourceSelected}
                       isHighlighted={highlighted}
                       isForbidden={forbiddenKinds.has(p.group ? `${p.group}/${p.kind}` : p.kind)}
@@ -663,6 +670,7 @@ export function ResourcesSidebar({
                         ref={highlighted ? highlightedRef : (isResourceSelected ? selectedSidebarRef : null)}
                         resource={resource}
                         count={counts[resource.group ? `${resource.group}/${resource.kind}` : resource.kind] ?? null}
+                        coverage={resourceCoverage?.[resource.group ? `${resource.group}/${resource.kind}` : resource.kind]}
                         isSelected={showSelected}
                         isHighlighted={highlighted}
                         isForbidden={forbiddenKinds.has(resource.group ? `${resource.group}/${resource.kind}` : resource.kind)}
@@ -723,7 +731,7 @@ export function ResourcesSidebar({
                     'badge font-mono',
                     isSelected ? 'bg-skyhook-500/30 selection-text' : 'bg-theme-elevated',
                   )}>
-                    {count}
+                    {resourceCountLabel(count, resourceCoverage?.[kindKey])}
                   </span>
                 )}
               </button>

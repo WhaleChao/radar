@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useId } from 'react'
+import { useEffect, useMemo, useRef, useState, useId, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { GitCompare, Search, X } from 'lucide-react'
 import { DialogPortal } from '../ui/DialogPortal'
@@ -18,6 +18,7 @@ export interface CompareResourcePickerProps {
   sourceSide?: CompareSide
   /** Candidate resources — same kind as source. Source is filtered out automatically. */
   candidates: CompareResourceRef[]
+  coverageNote?: ReactNode
   loading?: boolean
   error?: unknown
   onPick: (r: CompareResourceRef) => void
@@ -30,6 +31,7 @@ export function CompareResourcePicker({
   sourceSide = 'a',
   candidates,
   loading,
+  coverageNote,
   error,
   onPick,
 }: CompareResourcePickerProps) {
@@ -133,6 +135,7 @@ export function CompareResourcePicker({
         </div>
       </div>
 
+      {coverageNote && <div role="status" className="px-4 py-2 text-xs text-warning-text border-b border-theme-border">{coverageNote}</div>}
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && (
           <div className="flex items-center justify-center py-8 text-theme-text-secondary text-sm">

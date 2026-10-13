@@ -68,6 +68,7 @@ describe('ResourcesSidebar count visibility', () => {
         onSelectedKindChange={() => {}}
         apiResources={[horizontalPodAutoscaler]}
         resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }}
+        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
       />
     )
 
@@ -82,6 +83,7 @@ describe('ResourcesSidebar count visibility', () => {
         onSelectedKindChange={() => {}}
         apiResources={[horizontalPodAutoscaler]}
         resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }}
+        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
       />
     )
 
@@ -96,6 +98,7 @@ describe('ResourcesSidebar count visibility', () => {
         onSelectedKindChange={() => {}}
         apiResources={[horizontalPodAutoscaler]}
         resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }}
+        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
         pinned={[{ name: 'horizontalpodautoscalers', kind: 'HorizontalPodAutoscaler', group: 'autoscaling' }]}
         isPinned={(name, group) => name === 'horizontalpodautoscalers' && group === 'autoscaling'}
       />
@@ -180,4 +183,10 @@ describe('ResourcesSidebar category workspaces', () => {
     expect(html).toContain('postgresql.cnpg.io')
     expect(html).toContain('barmancloud.cnpg.io')
   })
+})
+
+it('keeps a partial zero visible rather than hiding the kind as empty', () => {
+  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], total: 1, omitted: 0 } } } }} />)
+  expect(html).toContain('HorizontalPodAutoscaler')
+  expect(html).toContain('≥0')
 })

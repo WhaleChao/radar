@@ -66,3 +66,9 @@ Host apps can override Radar's runtime behavior without passing props:
 - `setCredentialsMode(mode)` — fetch credentials mode (`same-origin` | `include` | `omit`).
 
 Call these before mounting `<RadarApp>`.
+
+## Resource list responses
+
+New Radar instances advertise `features.resourceReadCoverage` and return `{items, coverage, kind, group}` for resource lists, with `columns`/`cells` when table mode is requested. `coverage` describes the authorized requested scope and what the collector read; namespace previews are bounded and include `total`/`omitted` counts.
+
+Hosts making their own requests can call `normalizeResourceList(body, capabilities.features?.resourceReadCoverage === true, tableRequested)` from this package. Fetch capabilities once per cluster, and keep the flag with that cluster's data. The adapter returns `{items, coverage, printerTable}`. An older instance's documented array/table response produces `coverage.status: 'unknown'`; an empty old response cannot establish absence. `fetchResourceList(kind, options)` uses Radar's configured API base/authentication and applies a server list budget. Its `supportsCoverage` option must come from the connected instance's capabilities.
