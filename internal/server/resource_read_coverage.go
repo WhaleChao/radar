@@ -286,17 +286,17 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 		})
 	}
 	_ = groupReads.Wait()
-	if len(read) == 0 {
-		if firstFailure != nil {
-			return nil, resourceapi.Coverage{}, firstFailure
-		}
-		return nil, resourceapi.Coverage{}, &resourceReadFailure{503, readreason.CollectorScopeLimited, fmt.Sprintf("Radar has no readable scope for %s", kind)}
-	}
 	if rejected := failures[readreason.CollectorUnauthorized]; len(rejected) > 0 {
 		return nil, resourceapi.Coverage{}, &resourceReadFailure{503, readreason.CollectorUnauthorized, "Kubernetes rejected Radar's collector credentials"}
 	}
 	if tooLarge, exists := failures["resource_list_too_large"]; exists && len(tooLarge) > 0 {
 		return nil, resourceapi.Coverage{}, &resourceReadFailure{400, "resource_list_too_large", "Too many resources to load; select fewer namespaces"}
+	}
+	if len(read) == 0 {
+		if firstFailure != nil {
+			return nil, resourceapi.Coverage{}, firstFailure
+		}
+		return nil, resourceapi.Coverage{}, &resourceReadFailure{503, readreason.CollectorScopeLimited, fmt.Sprintf("Radar has no readable scope for %s", kind)}
 	}
 	var gaps []resourceapi.Gap
 	if residualUnknown {

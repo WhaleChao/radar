@@ -174,8 +174,7 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	// then enforces the same RBAC gates as the REST list path (cluster-scoped
 	// SAR for cluster-only kinds, list-namespaces SAR for `kind=namespaces`,
 	// per-namespace and/or cluster-wide list-secrets SAR for `kind=secrets`).
-	// AI callers get an explicit 403 on deny instead of the empty-list shape
-	// the REST handler returns for backward compat.
+	// Caller denials stay explicit before reading or shaping any rows.
 	namespaces := s.parseNamespacesForUser(r)
 	finalNamespaces, status, msg, ok := s.preflightResourceList(r, kind, group, namespaces)
 	if !ok {
@@ -232,6 +231,9 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.checkResourceListSize(w, listSize(objs), resourceListHardLimit) {
+		return
+	}
 	results, err := aicontext.MinifyList(objs, level)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
