@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { renderToString } from 'react-dom/server'
 import type { APIResource } from '../../types'
-import { rawCRDGroupTitle, resourceMatchesSidebarFilter, ResourcesSidebar } from './ResourcesSidebar'
+import { rawCRDGroupTitle, resourceMatchesSidebarFilter, ResourcesSidebar, sidebarDestinationsMatching } from './ResourcesSidebar'
 
 const sqlInstance: APIResource = {
   group: 'sql.cnrm.cloud.google.com',
@@ -147,7 +147,7 @@ describe('ResourcesSidebar category workspaces', () => {
         }}
       />
     )
-    expect(html).toContain('Workspace')
+    expect(html).toContain('Views')
     expect(html).toContain('Overview')
     expect(html).toContain('pg-orders')
     expect(html).toContain('Counts for namespace payments')
@@ -189,4 +189,23 @@ it('keeps a partial zero visible rather than hiding the kind as empty', () => {
   const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], total: 1, omitted: 0 } } } }} />)
   expect(html).toContain('HorizontalPodAutoscaler')
   expect(html).toContain('≥0')
+})
+
+describe('sidebarDestinationsMatching', () => {
+  const views = ['Clusters', 'Backups', 'Declarations', 'Pooling', 'Operator'].map((label) => ({ id: label, label, onSelect: () => {} }))
+  const resources = [{ group: 'postgresql.cnpg.io' }, { group: 'barmancloud.cnpg.io' }]
+  const labels = (term: string) => sidebarDestinationsMatching('CloudNativePG', resources, views, term).map((d) => d.label)
+
+  it('keeps every view when the term names the category or one of its API groups', () => {
+    expect(labels('cloud')).toEqual(['Clusters', 'Backups', 'Declarations', 'Pooling', 'Operator'])
+    expect(labels('cnpg')).toEqual(['Clusters', 'Backups', 'Declarations', 'Pooling', 'Operator'])
+  })
+  it('keeps the views whose label matches otherwise', () => {
+    expect(labels('backup')).toEqual(['Backups'])
+    expect(labels('declar')).toEqual(['Declarations'])
+    expect(labels('deployment')).toEqual([])
+  })
+  it('keeps every view without a term', () => {
+    expect(labels('  ')).toHaveLength(5)
+  })
 })

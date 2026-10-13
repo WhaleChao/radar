@@ -41,6 +41,7 @@ const (
 	KindHTTPRoute                      NodeKind = "HTTPRoute"
 	KindGRPCRoute                      NodeKind = "GRPCRoute"
 	KindTCPRoute                       NodeKind = "TCPRoute"
+	KindUDPRoute                       NodeKind = "UDPRoute"
 	KindTLSRoute                       NodeKind = "TLSRoute"
 	KindService                        NodeKind = "Service"
 	KindDeployment                     NodeKind = "Deployment"
@@ -424,16 +425,21 @@ type ReflectionRelationships struct {
 
 // Relationships holds computed relationships for a resource
 type Relationships struct {
+	// PodPlacementObserved and PodPlacementUnavailable carry in-process lookup
+	// state for context builders. They are not transport fields or cached counts.
+	PodPlacementObserved    bool `json:"-"`
+	PodPlacementUnavailable bool `json:"-"`
+
 	// Reflection distinguishes reflection links also retained in ConfigRefs/Consumers.
 	Reflection *ReflectionRelationships `json:"reflection,omitempty"`
 
 	Owner           *ResourceRef  `json:"owner,omitempty"`      // Parent via ownerReference (manages edge)
 	Deployment      *ResourceRef  `json:"deployment,omitempty"` // Grandparent Deployment (for Pods owned by ReplicaSets)
 	Children        []ResourceRef `json:"children,omitempty"`   // Resources this owns (manages edge)
-	Services        []ResourceRef `json:"services,omitempty"`   // Services selecting/exposing this
+	Services        []ResourceRef `json:"services,omitempty"`   // Core Services selecting/exposing this
 	Ingresses       []ResourceRef `json:"ingresses,omitempty"`  // Ingresses routing to this
-	Gateways        []ResourceRef `json:"gateways,omitempty"`   // Gateways routing to this (via routes)
-	Routes          []ResourceRef `json:"routes,omitempty"`     // Routes attached to this Gateway
+	Gateways        []ResourceRef `json:"gateways,omitempty"`   // Gateway API Gateways routing to this
+	Routes          []ResourceRef `json:"routes,omitempty"`     // Recognized upstream routes routing to this
 	ConfigRefs      []ResourceRef `json:"configRefs,omitempty"` // ConfigMaps/Secrets used by this
 	Consumers       []ResourceRef `json:"consumers,omitempty"`  // For ConfigMap/Secret: workloads that reference this
 	Dependencies    []ResourceRef `json:"dependencies,omitempty"`
@@ -443,7 +449,28 @@ type Relationships struct {
 	ScaleTarget     *ResourceRef  `json:"scaleTarget,omitempty"`     // For HPA/ScaledObject: what it scales
 	PDBs            []ResourceRef `json:"pdbs,omitempty"`            // PodDisruptionBudgets protecting this workload
 	NetworkPolicies []ResourceRef `json:"networkPolicies,omitempty"` // NetworkPolicy / CiliumNetworkPolicy / ClusterNetworkPolicy / CiliumClusterwideNetworkPolicy selecting this workload
-	Pods            []ResourceRef `json:"pods,omitempty"`            // For Service: pods it routes to
+	Pods            []ResourceRef `json:"pods,omitempty"`            // Core Pods routed to, or reached through Deployment/Node shortcuts
+
+	// Monitors are Prometheus Operator resources scraping this target.
+	Monitors []ResourceRef `json:"monitors,omitempty"`
+
+	// MonitorTargets are the resources this Prometheus Operator monitor scrapes.
+	MonitorTargets []ResourceRef `json:"monitorTargets,omitempty"`
+
+	// Backends are non-Pod targets this resource routes to or exposes.
+	Backends []ResourceRef `json:"backends,omitempty"`
+
+	// RoutedFrom are upstream exposing resources other than core Services and recognized routes.
+	RoutedFrom []ResourceRef `json:"routedFrom,omitempty"`
+
+	// Protects are the resources selected by this disruption budget or network policy.
+	Protects []ResourceRef `json:"protects,omitempty"`
+
+	// HealthChecks are Cluster API MachineHealthChecks associated with this Cluster.
+	HealthChecks []ResourceRef `json:"healthChecks,omitempty"`
+
+	// StagedPolicies select this resource without enforcing policy.
+	StagedPolicies []ResourceRef `json:"stagedPolicies,omitempty"`
 
 	// ServiceAccount is the ServiceAccount selected by this Pod or workload.
 	ServiceAccount *ResourceRef `json:"serviceAccount,omitempty"`

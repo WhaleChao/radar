@@ -17,7 +17,7 @@ import { AlertBanner, EmptyState, PaneLoader, FreshnessControl } from '@skyhook-
 import { useConnection } from '../../context/ConnectionContext'
 import { Tooltip } from '../ui/Tooltip'
 import { SEVERITY_TEXT } from '@skyhook-io/k8s-ui/utils/badge-colors'
-import { matchesStatusRanges, bucketsFromCounts, bucketsFromStatus, isRateBasedSource, keepAvailable, effectiveThreshold, volumeUnit, type VolumeUnit, isExternalKind, mergeFlowVolume, coverageLabel, type GraphFlow, endpointPair, graphEndpoint, graphEndpointId, mergeRawPairs, pairKey, selectionRawPairs, selectionMatch, graphSize, GRAPH_DRAW_BUDGET, GRAPH_DRAW_CEILING, parseFocus, focusParam, focusId, focusNeighborhood, touchesFocus, endpointSummaries, namespaceSummaries, type TrafficFocus } from './trafficFilters'
+import { matchesStatusRanges, bucketsFromCounts, bucketsFromStatus, isRateBasedSource, keepAvailable, effectiveThreshold, volumeUnit, type VolumeUnit, isExternalKind, mergeFlowVolume, coverageLabel, type GraphFlow, endpointPair, graphEndpoint, graphEndpointId, mergeRawPairs, mergedEdgePort, selectedEdgeMatcher, selectionRawPairs, selectionMatch, graphSize, GRAPH_DRAW_BUDGET, GRAPH_DRAW_CEILING, parseFocus, focusParam, focusId, focusNeighborhood, touchesFocus, endpointSummaries, namespaceSummaries, type TrafficFocus } from './trafficFilters'
 
 // Consecutive 2s retries of an empty result that came with a transient warning.
 const MAX_EMPTY_RETRIES = 5
@@ -390,7 +390,19 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
   const [aggregateExternal, setAggregateExternal] = useState(true)
   const [detectServices, setDetectServices] = useState(true)
   const [collapseInternet, setCollapseInternet] = useState(true)
-  const [groupByWorkload, setGroupByWorkload] = useState(true)
+  // Focus and grouping live in the URL so a link carries both: a pod focus
+  // matches only while pods are drawn. A focus is a history entry; switching
+  // the grouping replaces the current one.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const groupByWorkload = searchParams.get('groupBy') !== 'pod'
+  const setGroupByWorkload = useCallback((on: boolean) => {
+    setSearchParams(prev => {
+      const params = new URLSearchParams(prev)
+      if (on) params.delete('groupBy')
+      else params.set('groupBy', 'pod')
+      return params
+    }, { replace: true })
+  }, [setSearchParams])
   // A record's endpoint as the graph draws it in the chosen grouping.
   const drawnEndpoint = useCallback(
     (e: TrafficFlow['source']) => (groupByWorkload ? graphEndpoint(e) : e),
@@ -404,8 +416,6 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
   const dock = useDock()
   const graphPaneRef = useRef<HTMLDivElement>(null)
 
-  // Focus lives in the URL so Back leaves it and a link can carry it.
-  const [searchParams, setSearchParams] = useSearchParams()
   const focusValue = searchParams.get('focus')
   const focus = useMemo(() => parseFocus(focusValue), [focusValue])
   const focusKey = focus ? focusId(focus) : undefined
@@ -848,6 +858,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
       if (existing) {
         mergeFlowVolume(existing, flow)
         mergeRawPairs(existing, flow)
+        existing.port = mergedEdgePort(existing.port, flow.port)
         // Everything merged here shares the key's direction-known state, so the
         // flag is already correct on the entry that was created first.
       } else {
@@ -1096,10 +1107,16 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
     setGraphSelection(prev => (prev?.type === 'node' && prev.nodeId === focusKey ? prev : null))
   }, [tooLargeToDraw, focusKey])
 
+  // Namespaces hidden in the sidebar are dropped at the source too, when the
+  // request has room, so their traffic can't fill the records limit. Only
+  // here: the flows query keeps them, since the sidebar lists them from its
+  // data to be shown again.
+  const hiddenNamespaceList = useMemo(() => [...hiddenNamespaces].sort(), [hiddenNamespaces])
   const records = useTrafficRecords({
     namespaces,
     since: timeRange,
     excludeNamespaces: hideSystem ? SYSTEM_NAMESPACE_LIST : undefined,
+    optionalExcludeNamespaces: hiddenNamespaceList,
     excludeHost: hideSystem,
     match: recordsMatch,
     enabled: wizardState === 'ready' && !isConnecting && !connectionError,
@@ -1109,17 +1126,19 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
   const recordsEligible = recordsMatch !== null && records.supported && !records.tooLarge
   const useRecords = recordsEligible && !records.isError
 
-  const selectionPairKeys = useMemo(
-    () => selectionPairs && new Set(selectionPairs.map(p => pairKey(p.source, p.destination, p.port, p.directionUnknown))),
-    [selectionPairs])
-  const onSelectedEdge = useCallback(
-    (f: TrafficFlow) => !selectionPairKeys ||
-      selectionPairKeys.has(pairKey(drawnEndpoint(f.source), drawnEndpoint(f.destination), f.port, f.directionUnknown)),
-    [selectionPairKeys, drawnEndpoint])
+  const responsesCallerOriented = flowsData?.l7ResponsesCallerOriented === true
+  const onSelectedEdge = useMemo(
+    () => selectedEdgeMatcher(selectionPairs, responsesCallerOriented, drawnEndpoint),
+    [selectionPairs, responsesCallerOriented, drawnEndpoint])
   // An endpoint lookup answers with all of its edges, including ones the view
   // hides (below the connection threshold), so they are dropped here.
   const filteredRecords = useMemo(
     () => (records.data?.flows ?? []).filter(f => rawFlowPasses(f) && onSelectedEdge(f)),
+    [records.data?.flows, rawFlowPasses, onSelectedEdge])
+  // Only the records the view's filters drop: an endpoint lookup also returns
+  // edges the graph doesn't draw (outside a focus, or past the flows cap).
+  const recordsHiddenByFilters = useMemo(
+    () => (records.data?.flows ?? []).filter(f => onSelectedEdge(f) && !rawFlowPasses(f)).length,
     [records.data?.flows, rawFlowPasses, onSelectedEdge])
 
   const sampleSelection = useMemo(() => {
@@ -1127,7 +1146,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
     if (focusSelected && focus && !selection) {
       return filteredRawFlows.filter(f => touchesFocus(f.source, focus) || touchesFocus(f.destination, focus))
     }
-    if (selectionPairKeys) return filteredRawFlows.filter(onSelectedEdge)
+    if (selectionPairs) return filteredRawFlows.filter(onSelectedEdge)
     if (listSelection.type === 'node' && listSelection.nodeId) {
       const id = listSelection.nodeId
       return filteredRawFlows.filter(f => {
@@ -1146,7 +1165,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
       })
     }
     return filteredRawFlows
-  }, [filteredRawFlows, listSelection, selectionPairKeys, onSelectedEdge, drawnEndpoint, focusSelected, focus, selection])
+  }, [filteredRawFlows, listSelection, selectionPairs, onSelectedEdge, drawnEndpoint, focusSelected, focus, selection])
 
   const listFlows = useRecords ? filteredRecords : sampleSelection
 
@@ -1163,6 +1182,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
       if (data.matched > data.flows.length) {
         parts.push(`Newest ${data.flows.length.toLocaleString()} of ${data.matched.toLocaleString()} records for this selection`)
       }
+      if (recordsHiddenByFilters > 0) parts.push(`${recordsHiddenByFilters.toLocaleString()} record${recordsHiddenByFilters === 1 ? '' : 's'} hidden by the view's filters`)
       const covered = coverageLabel(data.coveredSince, data.timestamp)
       if (covered) parts.push(`Records cover the ${covered} of ${timeRange}`)
       return parts.length > 0 ? parts.join(' · ') : undefined
@@ -1173,7 +1193,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
     if (records.tooLarge) return `This selection is too large to look up on its own; showing its flows among the ${sample}`
     if (records.isError) return `Couldn't load this selection's records (${records.error?.message}); showing its flows among the ${sample}`
     return `Showing this selection's flows among the ${sample}`
-  }, [useRecords, records.data, records.tooLarge, records.isError, records.error, sampleTotal, sampleSize, listSelection, timeRange])
+  }, [useRecords, records.data, recordsHiddenByFilters, records.tooLarge, records.isError, records.error, sampleTotal, sampleSize, listSelection, timeRange])
 
   // Stats for display
   const flowStats = useMemo(() => {

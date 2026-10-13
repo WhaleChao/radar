@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type { TrafficSourcesResponse, TrafficFlowsResponse, TrafficRecordsResponse } from '../types'
 import { fetchJSON as fetchApiJSON, useRadarFeature } from './client'
@@ -158,9 +158,26 @@ const MAX_TRAFFIC_MATCH_CHARS = 6_000
  *  endpoint it is, which every one of its edges has at an end. */
 export type TrafficMatch = { pairs: TrafficEndpointPair[] } | { endpoints: TrafficEndpointRef[] }
 
+// Every pair encodes to more than this many characters, so a selection with
+// more pairs than the request can hold is rejected without serializing it.
+const MIN_MATCH_PAIR_CHARS = 40
+
+/** The whole query string's limit: the selection plus the scope beside it,
+ *  under the 8 KiB request line proxies commonly allow. */
+const MAX_TRAFFIC_QUERY_CHARS = 7_000
+
+function encodedMatch(match: TrafficMatch): string | null {
+  if ('pairs' in match && match.pairs.length * MIN_MATCH_PAIR_CHARS > MAX_TRAFFIC_MATCH_CHARS) return null
+  const json = JSON.stringify(match)
+  return encodeURIComponent(json).length > MAX_TRAFFIC_MATCH_CHARS ? null : json
+}
+
 export interface UseTrafficRecordsOptions extends TrafficScope {
   /** The selection, or null for no selection. */
   match: TrafficMatch | null
+  /** Namespaces also excluded when the request has room for them; the list
+   *  filters them out anyway. */
+  optionalExcludeNamespaces?: readonly string[]
   enabled?: boolean
 }
 
@@ -170,16 +187,34 @@ export interface UseTrafficRecordsOptions extends TrafficScope {
 export function useTrafficRecords(options: UseTrafficRecordsOptions) {
   const { enabled = true } = options
   const { guard, gatedKey, support } = useRadarFeature('trafficRecords')
-  const match = options.match ? JSON.stringify(options.match) : null
-  const tooLarge = match !== null && encodeURIComponent(match).length > MAX_TRAFFIC_MATCH_CHARS
-  const params = trafficScopeParams(options)
-  if (match && !tooLarge) params.set('match', match)
+  // Serialized when the selection changes (each refresh), not on every
+  // render: a merged edge can carry tens of thousands of pairs.
+  const match = useMemo(() => (options.match ? encodedMatch(options.match) : null), [options.match])
+  const optional = options.optionalExcludeNamespaces ?? []
+  let scope: TrafficScope = optional.length > 0
+    ? { ...options, excludeNamespaces: [...(options.excludeNamespaces ?? []), ...optional] }
+    : options
+  let params = trafficScopeParams(scope)
+  if (match) params.set('match', match)
+  if (optional.length > 0 && params.toString().length > MAX_TRAFFIC_QUERY_CHARS) {
+    scope = options
+    params = trafficScopeParams(scope)
+    if (match) params.set('match', match)
+  }
+  const tooLarge = options.match !== null && (match === null || params.toString().length > MAX_TRAFFIC_QUERY_CHARS)
+  // The view this answers, apart from the optional exclusions.
+  const view = JSON.stringify([...trafficScopeKey(options), match])
 
   const query = useQuery<TrafficRecordsResponse>({
-    queryKey: ['traffic-flows', 'records', ...trafficScopeKey(options), match, ...gatedKey],
+    queryKey: ['traffic-flows', 'records', ...trafficScopeKey(scope), match, ...gatedKey],
     queryFn: () => guard(() => fetchApiJSON<TrafficRecordsResponse>(`/traffic/flows/records?${params.toString()}`)),
     staleTime: 5000,
     enabled: enabled && match !== null && !tooLarge && support !== 'unsupported',
+    meta: { view },
+    // Kept while only the optional exclusions change (a namespace hidden in
+    // the sidebar, which the list filters out anyway). Not across another
+    // selection, window or scope: those records would show under this one.
+    placeholderData: (prev, prevQuery) => (prevQuery?.meta?.view === view ? prev : undefined),
     retry: shouldRetryRadarQuery,
   })
   return { ...query, tooLarge, supported: support !== 'unsupported' }

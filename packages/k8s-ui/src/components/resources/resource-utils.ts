@@ -2,7 +2,7 @@
 
 import { getNodeLifecycle } from '../../utils/node-lifecycle'
 import { effectivePolicyTypeNames } from '../../utils/network-policy'
-import { formatCPUString, formatMemoryString, formatBytes } from '../../utils/format'
+import { formatCPUString, formatMemoryString, formatBytes, formatCompactAge } from '../../utils/format'
 import { pluralize } from '../../utils/pluralize'
 import type { WorkloadPodInfo } from '../../types/core'
 import { getArgoRolloutStepNumber, getObservedGeneration, getWorkloadRolloutActivity, isArgoRolloutResource, isRolloutActivityVisible, rolloutActivityBadge, type WorkloadRolloutActivity } from '../../utils/workload-rollout'
@@ -86,12 +86,57 @@ export interface PodProblem {
  * misses. Presentation-only; the backend `scheduling` issue source does the
  * structured decomposition + node-label resolution (e.g. naming arm64).
  */
-export function summarizeSchedulerMessage(message?: string): string {
+export function summarizeSchedulerMessage(message?: string, options: { plain?: boolean } = {}): string {
   if (!message) return ''
   let m = message.split('. preemption:')[0].split(' preemption:')[0].trim()
-  const colon = m.indexOf(':')
-  if (colon >= 0) m = m.slice(colon + 1).trim()
-  return m.replace(/\.\s*$/, '').trim()
+  if (options.plain) {
+    m = m.replace(/^(?:Pod cannot be scheduled:\s*)?(?:Unschedulable:\s*)?(?:0\/\d+ nodes are available:\s*)?/i, '')
+    // Schedulers with dynamic resource allocation append this after the node reasons.
+    m = m.replace(/no new claims to deallocate,?/i, '').trim()
+  } else {
+    const colon = m.indexOf(':')
+    if (colon >= 0) m = m.slice(colon + 1).trim()
+  }
+  m = m.replace(/\.\s*$/, '').trim()
+  if (!options.plain) return m
+  const total = /0\/(\d+) nodes (?:are )?available/.exec(message)?.[1]
+  const causes: [RegExp, string][] = [
+    [/^(\d+) (?:Too many pods|(?:node\(s\) )?insufficient pods)(?: \(0\/\d+ nodes available\))?$/i, 'have reached their Pod limit'],
+    [/^(\d+) (?:node\(s\) )?Insufficient cpu(?: \(0\/\d+ nodes available\))?$/i, 'do not have enough CPU'],
+    [/^(\d+) (?:node\(s\) )?Insufficient memory(?: \(0\/\d+ nodes available\))?$/i, 'do not have enough memory'],
+    [/^(\d+) node\(s\) (?:didn.t match Pod.s node affinity\/selector|node affinity\/selector mismatch)(?: \(0\/\d+ nodes available\))?$/i, 'do not match the Pod’s node affinity or selector'],
+    [/^(\d+) node\(s\) (?:had )?untolerated taint(?:\(s\))?(?: \{[^}]*\}| [^\s]+)?(?: \(0\/\d+ nodes available\))?$/i, 'have taints the Pod does not tolerate'],
+    [/^(\d+) node\(s\) (?:had )?volume node[- ]affinity conflict(?: \(0\/\d+ nodes available\))?$/i, 'do not match the volume’s node affinity'],
+  ]
+  return splitSchedulerClauses(m).filter((part) => part.trim()).map((part) => {
+    const clause = part.trim()
+    for (const [pattern, cause] of causes) {
+      const count = pattern.exec(clause)?.[1]
+      if (count) return `${count === '1' ? '1 node' : count === total && count === '2' ? 'both nodes' : count === total ? 'all nodes' : `${count} nodes`} ${count === '1' ? cause.replace(/^have /, 'has ').replace(/^do /, 'does ') : cause}`
+    }
+    if (/^(?:pod has )?unbound (?:immediate )?PersistentVolumeClaims?(?:\s*\(0\/\d+ nodes available\))?$/i.test(clause)) return 'a required volume claim is not bound'
+    return clause
+  }).join('; ')
+}
+
+// Splits on commas and semicolons, except where the next bracket ahead closes:
+// scheduler taints and resolved node labels can contain comma-separated values.
+// One pass from the end keeps long messages linear.
+function splitSchedulerClauses(m: string): string[] {
+  const parts: string[] = []
+  let end = m.length
+  let insideBrackets = false
+  for (let i = m.length - 1; i >= 0; i--) {
+    const c = m[i]
+    if (c === ']' || c === '}') insideBrackets = true
+    else if (c === '[' || c === '{') insideBrackets = false
+    else if ((c === ',' || c === ';') && !insideBrackets) {
+      parts.push(m.slice(i + 1, end))
+      end = i
+    }
+  }
+  parts.push(m.slice(0, end))
+  return parts.reverse()
 }
 
 /** Tailwind classes for severity dot indicators (used in tooltips and alert banners) */
@@ -1403,11 +1448,7 @@ export function getNodeVersion(node: any): string {
 // ============================================================================
 
 export function formatAge(timestamp: string): string {
-  if (!timestamp) return '-'
-  const created = new Date(timestamp)
-  const now = new Date()
-  const diffMs = now.getTime() - created.getTime()
-  return formatDuration(diffMs)
+  return formatCompactAge(timestamp) || '-'
 }
 
 export function formatDuration(ms: number, detailed: boolean = false): string {
@@ -1858,7 +1899,7 @@ export function getGatewayClassDescription(gc: any): string {
 }
 
 // ============================================================================
-// GATEWAY API ROUTE UTILITIES (shared by HTTPRoute, GRPCRoute, TCPRoute, TLSRoute)
+// GATEWAY API ROUTE UTILITIES (shared by HTTPRoute, GRPCRoute, TCPRoute, TLSRoute, UDPRoute)
 // ============================================================================
 
 const GATEWAY_API_GROUP = 'gateway.networking.k8s.io'
@@ -2346,7 +2387,7 @@ export function getCellFilterValue(resource: any, column: string, kind: string):
       if (kindLower === 'hpas' || kindLower === 'horizontalpodautoscalers') return getHPAStatus(resource).text
       if (kindLower === 'gateways') return getGatewayStatus(resource).text
       if (kindLower === 'gatewayclasses') return getGatewayClassStatus(resource).text
-      if (['httproutes', 'grpcroutes', 'tcproutes', 'tlsroutes'].includes(kindLower)) return getRouteStatus(resource).text
+      if (['httproutes', 'grpcroutes', 'tcproutes', 'tlsroutes', 'udproutes'].includes(kindLower)) return getRouteStatus(resource).text
       if (kindLower === 'sealedsecrets') return getSealedSecretStatus(resource).text
       if (kindLower === 'poddisruptionbudgets') return getPDBStatus(resource).text
       if (kindLower === 'applications') return getArgoApplicationStatus(resource).text
@@ -2680,7 +2721,6 @@ export {
   getScaledObjectTriggers,
   getScaledObjectTriggerCount,
   getScaledObjectHpaName,
-  getScaledObjectLastActiveTime,
   getScaledObjectPollingInterval,
   getScaledObjectCooldownPeriod,
   getScaledJobStatus,

@@ -140,6 +140,7 @@ After `make <name>-demo`, run `kubectl config use-context kind-radar-<name>-demo
 - Helm: `/api/helm/releases/...`
 - Workloads: `/api/workloads/{kind}/{ns}/{name}/...` (logs, restart, scale, revisions, rollback, images, history). `revisions`/`rollback` accept Deployment, StatefulSet, DaemonSet and **Rollout**, gated by `rollbackableWorkloadKinds` in `server.go`; `images` accepts the same four through a separate map, `workloadImageRoots` in `pkg/k8score/workload_images.go` (a new kind needs both), uses compare-and-swap JSON Patch, and follows a Rollout's `workloadRef`. `history` is the workload's own timeline and never includes sibling workloads — scope rules live in `workload_history.go` and `pkg/timeline`'s `ResourceScope`
 - Argo Rollouts: `/api/rollouts/{ns}/{name}/{abort,retry,promote,promote-full,skip-step}` (POST) + `/capabilities` (GET); rollback/history deliberately live on the `/workloads` routes. The status verbs patch the `rollouts/status` subresource, so capabilities SAR `rollouts` **and** `rollouts/status` separately — `patch rollouts` does not imply `patch rollouts/status`. Promotion waits for the controller to observe the current pod template, so `promote-full` can return **503** (`ErrControllerNotCaughtUp`) and is safe to retry; for a `workloadRef` Rollout the caller must be able to `get` the referenced workload. Engine `pkg/rollouts`, handlers `internal/server/rollouts_handlers.go`
+- GitOps write evidence: `POST /api/gitops/write-evidence` `{kind, group, namespace, name, paths[], owner?}` reads the target (and its GitOps owner) as the caller and returns, per field path, whether it is in last-applied, which field managers own it and whether an ignore rule covers it, plus the owner's sync policy — never raw managedFields/last-applied. Classification is the pure `evaluateGitOpsWriteGuard` in k8s-ui (`utils/gitops-write-guard.ts`); Set image and Diagnose Apply show it via `GitOpsWriteWarning` + `web/src/hooks/useGitOpsWriteGuard.ts`. Copy never promises a change won't be reverted. See docs/gitops.md
 - GitOps controller actions: `/api/argo/applications/...` (sync, refresh, terminate, suspend, resume, rollback, selective-sync), `/api/flux/{kind}/...` (reconcile, suspend, resume, sync-with-source)
 - Argo CD API integration: `PUT /api/integrations/argocd` (non-local config only — local mode uses `/api/integrations/connections`; URL/token, probe-before-persist, token preserved across GET-redaction round-trips); `/api/argo/applications/{ns}/{name}/resource-diff` (Git-rendered desired vs live via argocd-server managed-resources; dual RBAC gate + structural Secret redaction; see docs/gitops.md)
 - GitOps detail data: `/api/gitops/{tree,insights,destination}/{kind}/{ns}/{name}`. `destination` says where a remote Application or `spec.kubeConfig` Flux object deploys; the object and any kubeconfig Secret are read as the caller, and full server URLs never leave the server
@@ -202,7 +203,7 @@ Stateless HTTP at `/mcp` (JSON-RPC). Read tools use `readOnlyHint`, write tools 
 
 Handlers emit `{"error": "..."}` via `s.writeError(w, status, msg)`. Status conventions:
 - **400** invalid input (missing params, bad YAML, unknown kind)
-- **403** RBAC denied (nil lister or apiserver Forbidden)
+- **403** RBAC denied (nil lister or apiserver Forbidden), or a request a browser started from another site. `requireSameOrigin` covers every method under `/api` except OPTIONS, so handlers need no origin check of their own: writes go through `browserOriginAllowed`, reads through `browserReadAllowed`, which refuses only a `Sec-Fetch-Site` of `cross-site` or `same-site`. The pod exec and local-terminal WebSockets keep their own `browserOriginAllowed` check during the upgrade. Do not remove it on the strength of the middleware
 - **404** resource doesn't exist — check via `apierrors.IsNotFound(err)`
 - **409** operation already in progress (sync running, etc.)
 - **413** request body over the route's cap — the body is bounded *before* it is read (`readBoundedTextBody` for raw YAML, `decodeBoundedJSONBody` for JSON), so nothing has parsed it yet and 400 would wrongly blame the content. Reserve 400 for input that was read and found invalid — including caps counted after parsing, like the YAML document limit
@@ -214,6 +215,13 @@ Namespace filters accept both `?namespace=X` (single) and `?namespaces=X,Y` (pre
 ### Version skew (newer UI, older Radar)
 
 Radar Hub embeds the newest `@skyhook-io/radar-app` against whatever Radar each cluster runs, so a frontend call to a new endpoint can hit a Radar that predates it. When adding an endpoint the UI calls: advertise a flag for it in `FeatureCapabilities` (`internal/k8s/capabilities.go`) in the same PR, add an entry with that flag and `flagShippedWithEndpoint: true` to `web/src/api/radarFeatures.ts`, and guard the hook with `useRadarFeature`. An older Radar then gets a "needs a newer Radar" note instead of a red error. `TestFeatureFlagsHaveFrontendGates` fails if the flag and the entry drift apart.
+
+### Review checklist: the three ways Radar runs
+
+Every review of server or UI behavior considers all three:
+- **Local:** one user, auth off, UI and server ship together.
+- **In-cluster shared:** auth on, many users on one process. Anything process-wide (managers, caches, connections, detections) is shared across users, and per-user namespace RBAC must hold for derived data too (counts, coverage, timings).
+- **Radar Hub:** the newest `radar-app` against whatever Radar each cluster runs, through a GET-only proxy.
 
 ### Error Handling (Frontend)
 

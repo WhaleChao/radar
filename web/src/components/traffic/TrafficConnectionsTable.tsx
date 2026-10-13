@@ -7,8 +7,8 @@ import { SEVERITY_TEXT } from '@skyhook-io/k8s-ui/utils/badge-colors'
 import { Tooltip } from '../ui/Tooltip'
 import type { TrafficGraphSelection } from './TrafficGraph'
 import {
-  connectionRows, displayVolume, flowDrops, flowErrors, formatRate, graphEndpointId, hasStatusData, isExternalKind,
-  type TrafficFocus,
+  connectionRows, displayVolume, edgesOnPort, flowDrops, flowErrors, formatRate, graphEndpointId, hasStatusData, isExternalKind,
+  type GraphFlow, type TrafficFocus,
 } from './trafficFilters'
 
 interface TrafficConnectionsTableProps {
@@ -36,9 +36,12 @@ function rowSelection(flow: AggregatedFlow): TrafficGraphSelection {
   }
 }
 
-function sameEdge(a: TrafficGraphSelection, b: TrafficGraphSelection | null): boolean {
-  return !!b && b.type === 'edge' && a.sourceId === b.sourceId && a.destId === b.destId &&
-    a.port === b.port && !!a.directionUnknown === !!b.directionUnknown
+function selectedRows(rows: GraphFlow[], selection: TrafficGraphSelection | null): Set<GraphFlow> {
+  if (selection?.type !== 'edge' || selection.port === undefined) return new Set()
+  const between = rows.filter(flow =>
+    graphEndpointId(flow.source) === selection.sourceId && graphEndpointId(flow.destination) === selection.destId &&
+    !!flow.directionUnknown === !!selection.directionUnknown)
+  return new Set(edgesOnPort(between, f => f, selection.port))
 }
 
 /**
@@ -48,6 +51,7 @@ function sameEdge(a: TrafficGraphSelection, b: TrafficGraphSelection | null): bo
  */
 export function TrafficConnectionsTable({ flows, isRateBased, selection, onSelect, onFocus, focusedId }: TrafficConnectionsTableProps) {
   const rows = useMemo(() => connectionRows(flows), [flows])
+  const selected = useMemo(() => selectedRows(rows, selection), [rows, selection])
   const showStatus = useMemo(() => flows.some(hasStatusData), [flows])
   const grid = showStatus ? GRID : GRID_NO_STATUS
 
@@ -94,18 +98,18 @@ export function TrafficConnectionsTable({ flows, isRateBased, selection, onSelec
         computeItemKey={(_, flow) => `${graphEndpointId(flow.source)}->${graphEndpointId(flow.destination)}:${flow.port}${flow.directionUnknown ? ':u' : ''}`}
         itemContent={(_, flow) => {
           const sel = rowSelection(flow)
-          const selected = sameEdge(sel, selection)
+          const isSelected = selected.has(flow)
           const errors = flowErrors(flow)
           const drops = flowDrops(flow)
           return (
             <div
               role="row"
-              aria-selected={selected}
-              onClick={() => onSelect(selected ? null : sel)}
+              aria-selected={isSelected}
+              onClick={() => onSelect(isSelected ? null : sel)}
               className={clsx(
                 grid,
                 'cursor-pointer px-3 py-1.5 text-xs border-b border-theme-border/50 transition-colors',
-                selected ? 'bg-theme-elevated' : 'hover:bg-theme-hover',
+                isSelected ? 'bg-theme-elevated' : 'hover:bg-theme-hover',
               )}
             >
               {endpoint(flow.source)}

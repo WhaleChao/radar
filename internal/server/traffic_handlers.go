@@ -111,6 +111,9 @@ func (s *Server) handleGetTrafficSources(w http.ResponseWriter, r *http.Request)
 		response, err = manager.DetectSources(ctx)
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return // the client left
+		}
 		log.Printf("[traffic] Error detecting sources: %v", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to detect traffic sources")
 		return

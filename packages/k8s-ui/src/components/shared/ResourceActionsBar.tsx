@@ -29,11 +29,12 @@ import type { SelectedResource, WorkloadRevision } from '../../types'
 import type { RadarUpgradeRequirement } from '../../types/fetch-error'
 import { displayKindName } from '../ui/drawer-components'
 import { getDefaultContainerName } from '../resources/resource-utils'
-import { SetImageDialog, type ManagedImageSource } from './SetImageDialog'
+import { SetImageDialog, type SetImageOwnership } from './SetImageDialog'
 import { DrainPlanDialog, DEFAULT_DRAIN_DIALOG_OPTIONS, type DrainDialogOptions, type DrainPlan } from './DrainPlanDialog'
 import type { WorkloadImageInventory, WorkloadImageUpdate } from '../../types/core'
 import { isArgoRolloutResource } from '../../utils/workload-rollout'
 import { isCoreBatchJob } from '../../utils/api-resources'
+import { formatRelativeAgeTime } from '../../utils/format'
 
 // ============================================================================
 // ACTIONS BAR - Interactive buttons that change based on resource kind
@@ -41,6 +42,7 @@ import { isCoreBatchJob } from '../../utils/api-resources'
 
 interface ResourceActionsBarProps {
   resource: SelectedResource
+  leadingActions?: React.ReactNode
   data: any
   onClose?: () => void
   hideLogs?: boolean
@@ -87,7 +89,7 @@ interface ResourceActionsBarProps {
   onLoadImages?: (params: { kind: string; namespace: string; name: string }) => Promise<WorkloadImageInventory>
   onSetImages?: (params: { kind: string; namespace: string; name: string; updates: WorkloadImageUpdate[] }) => Promise<unknown>
   isSettingImages?: boolean
-  managedImageSources?: ManagedImageSource[]
+  imageOwnership?: SetImageOwnership
 
   // Rollback
   revisions?: WorkloadRevision[]
@@ -154,7 +156,7 @@ interface ResourceActionsBarProps {
 }
 
 export function ResourceActionsBar({
-  resource, data, onClose, hideLogs, showYaml, onToggleYaml,
+  resource, data, leadingActions, onClose, hideLogs, showYaml, onToggleYaml,
   onCompareTo,
   onCompareAcrossClusters,
   canExec, canViewLogs, canPortForward,
@@ -162,7 +164,7 @@ export function ResourceActionsBar({
   renderPortForward,
   onDelete, isDeleting, cascadeDependents, cascadeLoading, cascadeRootResolved,
   onRestart, isRestarting,
-  onLoadImages, onSetImages, isSettingImages, managedImageSources,
+  onLoadImages, onSetImages, isSettingImages, imageOwnership,
   revisions: revisionsList, revisionsLoading, revisionsError, onRollback, isRollingBack,
   onRolloutPromoteFull,
   onTriggerCronJob, isTriggeringCronJob,
@@ -290,6 +292,8 @@ export function ResourceActionsBar({
 
   return (
     <div className="flex items-center gap-1.5 px-4 py-2 flex-wrap">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5 empty:hidden" data-action-group="object">
+      {leadingActions}
       {/* Kind-specific actions (left) */}
       {kind === 'pods' && (
         <>
@@ -585,8 +589,8 @@ export function ResourceActionsBar({
         </button>
       )}
 
-      {/* Spacer pushes universal actions to the right */}
-      <div className="flex-1" />
+      </div>
+      <div className="ml-auto flex flex-wrap items-center gap-1.5" data-action-group="utility">
 
       {/* Universal actions (right-aligned). The AI/Diagnose action is NOT here — it
           lives in the detail header chrome (see WorkloadView), set apart from these
@@ -672,6 +676,8 @@ export function ResourceActionsBar({
         </Tooltip>
       )}
 
+      </div>
+
       <ForceDeleteConfirmDialog
         open={showDeleteConfirm}
         onClose={() => setShowDeleteConfirm(false)}
@@ -691,7 +697,7 @@ export function ResourceActionsBar({
           workloadLabel={`${displayKindName(resource.kind, data?.kind)} ${resource.namespace}/${resource.name}`}
           workloadName={resource.name}
           workloadResource={resource.kind}
-          managedSources={managedImageSources}
+          ownership={imageOwnership}
           pending={isSettingImages}
           onClose={() => setShowSetImage(false)}
           onLoad={() => onLoadImages({ kind: resource.kind, namespace: resource.namespace, name: resource.name })}
@@ -1128,19 +1134,6 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
     setPromoteError(outcome.error ?? { message: 'The promotion did not go through.', controllerLagging: false })
   }
 
-  function formatTimeAgo(dateStr: string): string {
-    const date = new Date(dateStr)
-    const now = new Date()
-    const seconds = Math.floor((now.getTime() - date.getTime()) / 1000)
-    if (seconds < 60) return `${seconds}s ago`
-    const minutes = Math.floor(seconds / 60)
-    if (minutes < 60) return `${minutes}m ago`
-    const hours = Math.floor(minutes / 60)
-    if (hours < 24) return `${hours}h ago`
-    const days = Math.floor(hours / 24)
-    return `${days}d ago`
-  }
-
   function getImageTag(image: string): string {
     if (!image) return '-'
     const parts = image.split(':')
@@ -1232,7 +1225,7 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
                       <RevisionImage image={rev.image} displayImage={getImageTag(rev.image)} />
                     </td>
                     <td className="py-2 pr-3 text-theme-text-secondary whitespace-nowrap">
-                      {formatTimeAgo(rev.createdAt)}
+                      {formatRelativeAgeTime(rev.createdAt)}
                     </td>
                     <td className="py-2 text-right">
                       <div className="flex items-center gap-1 justify-end">

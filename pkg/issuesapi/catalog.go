@@ -139,7 +139,7 @@ var categoryDescription = map[Category]string{
 	CategoryCertificateNotReady:  "A cert-manager Certificate isn't issued — issuance is failing or still pending.",
 	CategoryPodSecurityViolation: "Pod Security admission is rejecting pods — they violate the namespace's enforced Pod Security Standard.",
 	// Control plane
-	CategoryTerminationStuck:      "A resource is stuck Terminating past the cleanup window — a finalizer's owning controller is unhealthy.",
+	CategoryTerminationStuck:      "A resource is stuck Terminating past the cleanup window — a finalizer hasn't been released, often because its controller is down, missing, or failing its cleanup.",
 	CategoryNodeNotReady:          "A node is NotReady — its kubelet isn't reporting healthy, putting the pods on it at risk.",
 	CategoryAPIServiceUnavailable: "An aggregated APIService is unavailable — its backing extension API server isn't responding.",
 	CategoryNodeProvisioningFail:  "Node provisioning failed — the autoscaler or Karpenter couldn't bring up a node.",
@@ -152,7 +152,7 @@ var categoryDescription = map[Category]string{
 	CategoryGitOpsOutOfSync:       "Live state has drifted from Git — the GitOps app is OutOfSync.",
 	CategoryGitOpsHealthDegraded:  "A GitOps app's managed resources are unhealthy or missing.",
 	CategoryGitOpsStale:           "A GitOps app's sync/drift verdict is frozen — the application-controller is down or backed up re-comparing.",
-	CategoryHelmReleaseFailed:     "A native Helm release is failed or stuck pending — its latest install, upgrade, or rollback did not complete cleanly.",
+	CategoryHelmReleaseFailed:     "A native Helm release is failed or stuck — its latest install, upgrade, rollback, or uninstall did not complete cleanly.",
 	CategoryWebhookBackendDown:    "An admission webhook points at a backend Service that doesn't exist — matching requests are blocked (failurePolicy=Fail) or silently bypassed (Ignore).",
 	CategoryControlPlaneNotReady:  "A managed control plane (Cluster API) isn't ready — the cluster's control plane is unhealthy or still provisioning.",
 	CategoryMachineNotReady:       "A Cluster API Machine isn't ready — the underlying instance failed to join or is unhealthy.",

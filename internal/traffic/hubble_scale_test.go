@@ -10,7 +10,15 @@ import (
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	observerpb "github.com/cilium/cilium/api/v1/observer"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 )
 
 // statusObserver reports a connected-node count, as Relay does.
@@ -112,7 +120,7 @@ func TestHubbleMatchWhitelist(t *testing.T) {
 		}
 	})
 
-	t.Run("a selection replaces the namespace whitelist", func(t *testing.T) {
+	t.Run("a selection inside the view replaces the namespace whitelist", func(t *testing.T) {
 		req := hubbleFlowsRequest(FlowOptions{Namespaces: []string{"a"}, Match: &FlowMatch{Pairs: []EndpointPair{{Source: pod("a", "web-1"), Destination: pod("a", "db-0")}}}}, false)
 		if wl := req.GetWhitelist(); len(wl) != 2 || !slices.Equal(wl[0].GetSourcePod(), []string{"a/web-1"}) {
 			t.Errorf("whitelist = %v, want the selection's pods", wl)
@@ -152,6 +160,101 @@ func TestHubbleGetFlows_SplitsTheBudgetAcrossNodes(t *testing.T) {
 	}
 	if got := obs.got.GetNumber(); got != 250 {
 		t.Errorf("Number = %d, want the budget split over 200 nodes", got)
+	}
+}
+
+// failingStatusObserver is a Relay waiting on an unreachable node: its
+// ServerStatus fails while flows from the other nodes still arrive.
+type failingStatusObserver struct {
+	scriptedObserver
+}
+
+func (s *failingStatusObserver) ServerStatus(context.Context, *observerpb.ServerStatusRequest) (*observerpb.ServerStatusResponse, error) {
+	return nil, status.Error(codes.DeadlineExceeded, "a node did not answer")
+}
+
+func TestHubbleGetFlows_SplitsANarrowedViewOverEveryNode(t *testing.T) {
+	// A namespace's flows are recorded on its peers' nodes too, so only the
+	// cluster's node count bounds what a narrowed fetch transfers.
+	for name, opts := range map[string]FlowOptions{
+		"namespaces": {Namespaces: []string{"a"}},
+		"selection":  {Namespaces: []string{"a"}, Match: &FlowMatch{Endpoints: []EndpointRef{{Namespace: "a", Name: "web-1", Kind: EndpointKindPod}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			obs := &statusObserver{nodes: 200, scriptedObserver: scriptedObserver{responses: []*observerpb.GetFlowsResponse{flowResponse("a", "b")}}}
+			h := connectedHubble(t, obs)
+			if _, err := h.GetFlows(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			if got := obs.got.GetNumber(); got != 250 {
+				t.Errorf("Number = %d, want the budget split over all 200 nodes", got)
+			}
+		})
+	}
+}
+
+func TestHubbleGetFlows_KeepsTheBudgetSplitWhenStatusFails(t *testing.T) {
+	t.Run("the last count is kept", func(t *testing.T) {
+		obs := &failingStatusObserver{scriptedObserver{responses: []*observerpb.GetFlowsResponse{flowResponse("a", "b")}}}
+		h := connectedHubble(t, obs)
+		h.nodeCount, h.nodeCountAt = 200, time.Now().Add(-2*hubbleNodeCountTTL)
+		if _, err := h.GetFlows(context.Background(), DefaultFlowOptions()); err != nil {
+			t.Fatal(err)
+		}
+		if got := obs.got.GetNumber(); got != 250 {
+			t.Errorf("Number = %d, want the budget still split over the 200 nodes last reported", got)
+		}
+	})
+
+	// The API server answers a one-item page with the count it left out.
+	pagedNodes := func(t *testing.T, remaining *int64, cont string) *fake.Clientset {
+		client := fake.NewSimpleClientset()
+		client.PrependReactor("list", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			if limit := action.(k8stesting.ListActionImpl).GetListOptions().Limit; limit != 1 {
+				t.Errorf("node list Limit = %d, want a one-item page", limit)
+			}
+			return true, &corev1.NodeList{
+				ListMeta: metav1.ListMeta{RemainingItemCount: remaining, Continue: cont},
+				Items:    []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}}},
+			}, nil
+		})
+		return client
+	}
+
+	t.Run("the cluster's nodes are counted, and win over a stale count", func(t *testing.T) {
+		obs := &failingStatusObserver{scriptedObserver{responses: []*observerpb.GetFlowsResponse{flowResponse("a", "b")}}}
+		h := connectedHubble(t, obs)
+		h.nodeCount, h.nodeCountAt = 20, time.Now().Add(-2*hubbleNodeCountTTL)
+		h.k8sClient = pagedNodes(t, ptr.To[int64](99), "more")
+		if _, err := h.GetFlows(context.Background(), DefaultFlowOptions()); err != nil {
+			t.Fatal(err)
+		}
+		if got := obs.got.GetNumber(); got != 500 {
+			t.Errorf("Number = %d, want the budget split over the cluster's 100 nodes", got)
+		}
+	})
+
+	t.Run("a page without a remaining count is not a count", func(t *testing.T) {
+		obs := &failingStatusObserver{scriptedObserver{responses: []*observerpb.GetFlowsResponse{flowResponse("a", "b")}}}
+		h := connectedHubble(t, obs)
+		h.nodeCount, h.nodeCountAt = 200, time.Now().Add(-2*hubbleNodeCountTTL)
+		h.k8sClient = pagedNodes(t, nil, "more")
+		if _, err := h.GetFlows(context.Background(), DefaultFlowOptions()); err != nil {
+			t.Fatal(err)
+		}
+		if got := obs.got.GetNumber(); got != 250 {
+			t.Errorf("Number = %d, want the last count (200 nodes) kept, not a count of 1", got)
+		}
+	})
+}
+
+func TestConnectedNodesStoresNothingForACancelledRequest(t *testing.T) {
+	h := connectedHubble(t, &failingStatusObserver{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.connectedNodes(ctx, h.observerClient)
+	if !h.nodeCountAt.IsZero() {
+		t.Errorf("stored a count of %d: a cancelled request's lookups would set every user's split for the next minute", h.nodeCount)
 	}
 }
 
@@ -234,4 +337,105 @@ func TestConvertEndpointTakesCiliumsWorkload(t *testing.T) {
 	if bare.Workload != "" {
 		t.Errorf("workload = %q, want none: an app label is not an owner, and two Deployments can share one", bare.Workload)
 	}
+}
+
+func TestConvertEndpointNamesARolloutCiliumStoppedAt(t *testing.T) {
+	rs := func(name string, labels ...string) Endpoint {
+		return convertEndpoint(&flowpb.Endpoint{
+			Namespace: "shop", PodName: name + "-x2k4q", Labels: labels,
+			Workloads: []*flowpb.Workload{{Name: name, Kind: "ReplicaSet"}},
+		}, "")
+	}
+	if ep := rs("checkout-6b8f9c", "k8s:app=checkout", "k8s:rollouts-pod-template-hash=6b8f9c"); ep.Workload != "checkout" || ep.WorkloadKind != "Rollout" {
+		t.Errorf("workload = %q/%q, want the Rollout checkout", ep.Workload, ep.WorkloadKind)
+	}
+	if ep := rs("batch-6b8f9c", "k8s:app=batch"); ep.Workload != "batch-6b8f9c" || ep.WorkloadKind != "ReplicaSet" {
+		t.Errorf("workload = %q/%q, want a ReplicaSet without the Rollout label left as Cilium named it", ep.Workload, ep.WorkloadKind)
+	}
+	if ep := rs("other", "k8s:rollouts-pod-template-hash=6b8f9c"); ep.Workload != "other" || ep.WorkloadKind != "ReplicaSet" {
+		t.Errorf("workload = %q/%q, want a name not ending in the hash left alone", ep.Workload, ep.WorkloadKind)
+	}
+}
+
+func TestHubbleFlowsRequest_TiesASelectionToTheNamespacesInView(t *testing.T) {
+	pod := func(ns, name string) EndpointRef {
+		return EndpointRef{Namespace: ns, Name: name, Kind: EndpointKindPod}
+	}
+	view := []string{"shop"}
+
+	t.Run("an endpoint outside the view keeps only its traffic with the view", func(t *testing.T) {
+		req := hubbleFlowsRequest(FlowOptions{Namespaces: view, Match: &FlowMatch{Endpoints: []EndpointRef{pod("kube-system", "coredns-1")}}}, false)
+		wl := req.GetWhitelist()
+		if len(wl) != 2 ||
+			!slices.Equal(wl[0].GetSourcePod(), []string{"kube-system/coredns-1"}) || !slices.Equal(wl[0].GetDestinationPod(), []string{"shop/"}) ||
+			!slices.Equal(wl[1].GetSourcePod(), []string{"shop/"}) || !slices.Equal(wl[1].GetDestinationPod(), []string{"kube-system/coredns-1"}) {
+			t.Errorf("whitelist = %v, want coredns paired with the view's namespace on the other end", wl)
+		}
+	})
+
+	t.Run("an endpoint inside the view is sent as it is", func(t *testing.T) {
+		req := hubbleFlowsRequest(FlowOptions{Namespaces: view, Match: &FlowMatch{Endpoints: []EndpointRef{pod("shop", "web-1")}}}, false)
+		wl := req.GetWhitelist()
+		if len(wl) != 2 || !slices.Equal(wl[0].GetSourcePod(), []string{"shop/web-1"}) || len(wl[0].GetDestinationPod()) != 0 {
+			t.Errorf("whitelist = %v, want the pod on either side, unchanged", wl)
+		}
+	})
+
+	t.Run("a pair keeps its port, and a pair wholly outside is dropped", func(t *testing.T) {
+		req := hubbleFlowsRequest(FlowOptions{Namespaces: view, Match: &FlowMatch{Pairs: []EndpointPair{
+			{Source: pod("shop", "web-1"), Destination: pod("pay", "api-1"), Port: 8080},
+			{Source: pod("pay", "api-1"), Destination: pod("pay", "db-0"), Port: 5432},
+		}}}, false)
+		wl := req.GetWhitelist()
+		if len(wl) != 2 || !slices.Equal(wl[0].GetDestinationPort(), []string{"8080"}) || !slices.Equal(wl[1].GetSourcePort(), []string{"8080"}) {
+			t.Errorf("whitelist = %v, want only the shop pair, both ways, with its port", wl)
+		}
+	})
+
+	t.Run("a selection wholly outside falls back to the namespaces", func(t *testing.T) {
+		req := hubbleFlowsRequest(FlowOptions{Namespaces: view, Match: &FlowMatch{Pairs: []EndpointPair{
+			{Source: pod("pay", "api-1"), Destination: pod("pay", "db-0")},
+		}}}, false)
+		wl := req.GetWhitelist()
+		if len(wl) != 2 || !slices.Equal(wl[0].GetSourcePod(), []string{"shop/"}) || !slices.Equal(wl[1].GetDestinationPod(), []string{"shop/"}) {
+			t.Errorf("whitelist = %v, want the view's namespaces", wl)
+		}
+	})
+
+	t.Run("a long namespace list falls back to the namespaces", func(t *testing.T) {
+		many := make([]string, 300)
+		for i := range many {
+			many[i] = fmt.Sprintf("team-%d", i)
+		}
+		var outside []EndpointRef
+		for i := range 20 {
+			outside = append(outside, pod("kube-system", fmt.Sprintf("agent-%d", i)))
+		}
+		req := hubbleFlowsRequest(FlowOptions{Namespaces: many, Match: &FlowMatch{Endpoints: outside}}, false)
+		if wl := req.GetWhitelist(); len(wl) != 2 || len(wl[0].GetSourcePod()) != 300 || len(wl[0].GetDestinationPod()) != 0 {
+			t.Errorf("whitelist has %d filters, want the 300 namespaces on either side instead of 40 filters with 300 prefixes each", len(wl))
+		}
+	})
+
+	t.Run("pairs inside a long namespace list are sent as they are", func(t *testing.T) {
+		many := make([]string, 25)
+		for i := range many {
+			many[i] = fmt.Sprintf("team-%d", i)
+		}
+		var pairs []EndpointPair
+		for i := range 45 {
+			pairs = append(pairs, EndpointPair{Source: pod("team-1", fmt.Sprintf("web-%d", i)), Destination: pod("team-2", "db-0"), Port: 5432})
+		}
+		req := hubbleFlowsRequest(FlowOptions{Namespaces: many, Match: &FlowMatch{Pairs: pairs}}, false)
+		if wl := req.GetWhitelist(); len(wl) != 90 {
+			t.Errorf("whitelist has %d filters, want the 45 pairs both ways: nothing needs tying", len(wl))
+		}
+	})
+
+	t.Run("with every namespace in view the selection is sent as it is", func(t *testing.T) {
+		req := hubbleFlowsRequest(FlowOptions{Match: &FlowMatch{Endpoints: []EndpointRef{pod("kube-system", "coredns-1")}}}, false)
+		if wl := req.GetWhitelist(); len(wl) != 2 || len(wl[0].GetDestinationPod()) != 0 {
+			t.Errorf("whitelist = %v, want coredns on either side, unconstrained", wl)
+		}
+	})
 }

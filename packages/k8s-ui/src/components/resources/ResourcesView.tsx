@@ -152,7 +152,7 @@ import {
 import { SEVERITY_BADGE, SEVERITY_TEXT, healthToSeverity, EVENT_TYPE_COLORS } from '../../utils/badge-colors'
 import { pluralize } from '../../utils/pluralize'
 import { getPodGpuCount, getNodeGpuCount } from '../../utils/extended-resources'
-import { parseQuantityToNumber } from '../../utils/format'
+import { formatRelativeAgeTime, parseQuantityToNumber } from '../../utils/format'
 import { type CustomColumnDef, type CustomColumnSource, customColumnKey, readCustomColumnValue, sanitizeCustomColumnDefs } from '../../utils/custom-columns'
 import { isRolloutActivityVisible } from '../../utils/workload-rollout'
 import { FreshnessControl, type FreshnessConnection } from '../ui/FreshnessControl'
@@ -205,7 +205,7 @@ import { GCPManagedControlPlaneCell, GCPManagedMachinePoolCell, GCPMachineCell, 
 import { AzureManagedControlPlaneCell, AzureManagedMachinePoolCell, AzureMachineCell, AzureMachineTemplateCell, AzureManagedClusterCell } from './renderers/azure-capi-cells'
 import { CalicoInfraCell, CalicoPolicyCell } from './renderers/calico-cells'
 import { isCalicoPolicyResource, isCoreNetworkPolicyKind } from './resource-utils-calico'
-import { useRegisterShortcut, useRegisterShortcuts } from '../../hooks/useKeyboardShortcuts'
+import { useRegisterShortcut, useRegisterShortcuts, type KeyboardShortcut } from '../../hooks/useKeyboardShortcuts'
 import { ResourcesSidebar } from './ResourcesSidebar'
 import type { SelectedKindInfo, SidebarCategoryWorkspace } from './ResourcesSidebar'
 import { CompareTray, togglePick, pickIndex, refToParam, SIDE_TONES, type CompareTrayPick, type NamespacedRef } from '../compare'
@@ -1454,6 +1454,15 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   tcproutes: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-48' },
+    { key: 'status', label: 'Status', width: 'w-28', tooltip: 'Accepted = controllers accepted this route and confirmed it can use the backends and other objects it names. Traffic has not been tested. Degraded or Not Accepted: open the route to see which Gateway or backend failed. Pending or Unknown: check the named Gateways or Services and their controllers.' },
+    { key: 'parents', label: 'Gateways', width: 'w-36' },
+    { key: 'backends', label: 'Backends', width: 'w-48', tooltip: 'Backend services receiving traffic' },
+    { key: 'rules', label: 'Rules', width: 'w-20' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  udproutes: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'status', label: 'Status', width: 'w-28', tooltip: 'Accepted = controllers accepted this route and confirmed it can use the backends and other objects it names. Traffic has not been tested. Degraded or Not Accepted: open the route to see which Gateway or backend failed. Pending or Unknown: check the named Gateways or Services and their controllers.' },
@@ -2886,6 +2895,7 @@ const CURATED_COLUMN_GROUPS: Record<string, readonly string[]> = {
   grpcroutes: ['gateway.networking.k8s.io'],
   httproutes: ['gateway.networking.k8s.io'],
   tcproutes: ['gateway.networking.k8s.io'],
+  udproutes: ['gateway.networking.k8s.io'],
   tlsroutes: ['gateway.networking.k8s.io'],
   helmreleases: ['helm.toolkit.fluxcd.io'],
   awsmachines: ['infrastructure.cluster.x-k8s.io'],
@@ -3419,6 +3429,11 @@ interface ResourcesViewProps {
   sidebarCategoryWorkspaces?: Record<string, SidebarCategoryWorkspace>
   /** Callback when the [+] create button is clicked. Receives the currently selected kind info. */
   onCreateResource?: (kind: { name: string; kind: string; group: string } | null) => void
+  /** A kind's own view, rendered in place of the table: the sidebar, kind
+   *  selection and the drawer (`?resource=`) stay; the table, its toolbar and
+   *  its row/search/bulk shortcuts do not run. Sidebar kind navigation stays.
+   *  Return null or false to keep the table. */
+  renderKindView?: (kind: SelectedKindInfo) => React.ReactNode | null
   /** Default kind when the URL does not include one. */
   defaultKind?: SelectedKindInfo
   /** Columns prepended to KNOWN_COLUMNS for every kind. For example, a
@@ -3679,6 +3694,7 @@ export function ResourcesView({
   hideSidebar = false,
   sidebarCategoryWorkspaces,
   onCreateResource,
+  renderKindView,
   defaultKind = DEFAULT_KIND_INFO,
   extraLeadingColumns,
   printerTable,
@@ -3707,16 +3723,23 @@ export function ResourcesView({
       kindFromURL.name !== prev.name || kindFromURL.group !== prev.group ? kindFromURL : prev,
     )
   }, [basePath, defaultKind, locationPathname, locationSearch])
+  const contributedKindView = renderKindView?.(selectedKind)
+  const kindView = contributedKindView === false ? null : contributedKindView ?? null
+  const tableActive = kindView === null
+
   // Notify parent of selected kind changes (including initial mount)
   useEffect(() => {
     onSelectedKindChange?.(selectedKind)
+  }, [selectedKind.name, selectedKind.group]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     setBulkMode(false)
     setCheckedResources(new Set())
     setShowBulkDeleteConfirm(false)
     setShowBulkRestartConfirm(false)
     setShowBulkScaleDialog(false)
     setBulkForceDelete(false)
-  }, [selectedKind.name, selectedKind.group]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedKind.name, selectedKind.group, tableActive])
   const [searchTerm, setSearchTerm] = useState(initialFilters.search)
   // Typing must never wait on the list or the router. The input renders raw
   // searchTerm; filtering consumes the deferred copy (React yields to keep
@@ -3957,6 +3980,8 @@ export function ResourcesView({
   // depends on visibleColumns) and instantly reverts the user's hide.
   const gpuAutoShownKinds = useRef<Set<string>>(new Set())
   useEffect(() => {
+    // The table's own settings: nothing to load (or clear) while a kind view replaces it.
+    if (!tableActive) return
     // Re-arm the skip-initial-save guard per kind. This effect repopulates
     // visible/widths/custom for the new kind via async setState, so the save
     // effect (also keyed to selectedKind) that runs in this same commit still
@@ -4041,10 +4066,11 @@ export function ResourcesView({
     // identity on every refetch, and re-running this effect would reset the
     // user's in-session column choices each time the list polls. The key only
     // changes when the kind changes or an operator upgrade changes the CRD.
-  }, [selectedKind.name, selectedKind.group, extraLeadingColumns, printerColumnsKey])
+  }, [selectedKind.name, selectedKind.group, extraLeadingColumns, printerColumnsKey, tableActive])
 
   // Save column settings when they change (skip the initial load of each kind)
   useEffect(() => {
+    if (!tableActive) return
     if (visibleColumns.size === 0) return // not loaded yet
     for (const k of allColumnKeys) knownColumnKeys.current.add(k)
     if (!isColumnSettingsLoaded.current) {
@@ -4061,7 +4087,7 @@ export function ResourcesView({
     // as across sessions, so a later data refresh can't override user choices.
     hadSavedColumnSettings.current = true
     // allColumnKeysSig, not allColumnKeys: see the memo above.
-  }, [visibleColumns, columnWidths, customColumns, selectedKind.name, selectedKind.group, allColumnKeysSig])
+  }, [visibleColumns, columnWidths, customColumns, selectedKind.name, selectedKind.group, allColumnKeysSig, tableActive])
 
   // Close column picker on outside click or Escape
   useEffect(() => {
@@ -4230,6 +4256,7 @@ export function ResourcesView({
     category: 'Search',
     scope: 'resources',
     handler: () => searchInputRef.current?.focus(),
+    enabled: tableActive,
   })
 
   // Keyboard navigation: highlighted row state
@@ -4249,7 +4276,7 @@ export function ResourcesView({
   useEffect(() => {
     setComparePicks([])
     setCompareMode(false)
-  }, [selectedKind.name, selectedKind.group])
+  }, [selectedKind.name, selectedKind.group, tableActive])
 
   const exitCompareMode = useCallback(() => {
     setCompareMode(false)
@@ -4297,6 +4324,15 @@ export function ResourcesView({
     }
   }, [highlightedIndex])
 
+  useEffect(() => {
+    if (tableActive) return
+    setHighlightedIndex(-1)
+    setShowColumnPicker(false)
+    setOpenColumnFilter(null)
+    setShowProblemsDropdown(false)
+    setShowLabelsDropdown(false)
+  }, [tableActive])
+
   // Open logs for pod / workload resources — provided via props
   const openLogs = onOpenLogs
   const openWorkloadLogs = onOpenWorkloadLogs
@@ -4329,8 +4365,7 @@ export function ResourcesView({
     onResourceClick?.(isSelected ? null : stripped)
   }, [onRowSelect, onResourceClick, selectedKind.name, selectedKind.group])
 
-  // Register navigation shortcuts
-  useRegisterShortcuts([
+  useRegisterShortcuts(([
     {
       id: 'resources-nav-down',
       keys: 'j',
@@ -4506,7 +4541,7 @@ export function ResourcesView({
         else searchInputRef.current?.blur()
       },
     },
-  ])
+  ] as KeyboardShortcut[]).map((sc) => ({ ...sc, enabled: tableActive && (sc.enabled ?? true) })))
 
   // Refs for accessing filteredResources inside shortcuts (computed later in component)
   const filteredResourceCountRef = useRef(0)
@@ -5306,7 +5341,7 @@ export function ResourcesView({
 
   // Filter resources by search term, status, problems, and sort
   const filteredResources = useMemo(() => {
-    if (!resources) return []
+    if (!tableActive || !resources) return []
 
     let result = resources
 
@@ -5492,7 +5527,7 @@ export function ResourcesView({
     }
 
     return result
-  }, [resources, deferredSearchTerm, regexMode, searchRegex, columnFilters, columnFilterExcludes, problemFilters, showInactiveReplicaSets, labelSelector, ownerKind, ownerName, selectedKind.name, effectiveSortColumn, sortDirection, getSortValue, extraColumnsByKey, podMatchesProblemFilter])
+  }, [tableActive, resources, deferredSearchTerm, regexMode, searchRegex, columnFilters, columnFilterExcludes, problemFilters, showInactiveReplicaSets, labelSelector, ownerKind, ownerName, selectedKind.name, effectiveSortColumn, sortDirection, getSortValue, extraColumnsByKey, podMatchesProblemFilter])
 
   // For nodes table: compute the majority minor version so outliers can be highlighted
   const majorityNodeMinorVersion = useMemo(() => {
@@ -5688,7 +5723,7 @@ export function ResourcesView({
 
   // Calculate filter options with counts based on current resources (before filtering)
   const filterOptions = useMemo(() => {
-    if (!resources || resources.length === 0) return null
+    if (!tableActive || !resources || resources.length === 0) return null
 
     const kindLower = normalizeKindToPlural(selectedKind.name, selectedKind.group)
     const cellFilterKind = getCellFilterKind(selectedKind.name, selectedKind.group)
@@ -5801,7 +5836,7 @@ export function ResourcesView({
 
     if (filterableColumns.length === 0 && !problems && labelValues.length === 0) return null
     return { columns: filterableColumns, problems, labels: labelValues }
-  }, [resources, selectedKind.name, selectedKind.group, allColumns])
+  }, [tableActive, resources, selectedKind.name, selectedKind.group, allColumns])
 
   // Map filterable columns by key for O(1) lookup in header rendering
   const filterableColumnMap = useMemo(() => {
@@ -5908,7 +5943,9 @@ export function ResourcesView({
         />
       )}
 
-      {/* Main Content - Resource Table */}
+      {kindView !== null ? (
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0 bg-theme-surface">{kindView}</div>
+      ) : (
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 bg-theme-surface">
         {/* Toolbar */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-theme-border bg-theme-base shrink-0">
@@ -6812,11 +6849,12 @@ export function ResourcesView({
           />
         )}
       </div>
+      )}
     </div>
 
     {/* Bulk delete confirmation */}
     <ConfirmDialog
-      open={showBulkDeleteConfirm}
+      open={tableActive && showBulkDeleteConfirm}
       onClose={() => { setShowBulkDeleteConfirm(false); setBulkForceDelete(false) }}
       onConfirm={() => {
         onBulkDelete?.(checkedBulkItems, {
@@ -6847,7 +6885,7 @@ export function ResourcesView({
       </label>
     </ConfirmDialog>
     <ConfirmDialog
-      open={showBulkRestartConfirm}
+      open={tableActive && showBulkRestartConfirm}
       onClose={() => setShowBulkRestartConfirm(false)}
       onConfirm={() => {
         onBulkRestart?.(checkedBulkItems, {
@@ -6866,7 +6904,7 @@ export function ResourcesView({
       isClosable
     />
     <ConfirmDialog
-      open={showBulkScaleDialog}
+      open={tableActive && showBulkScaleDialog}
       onClose={() => setShowBulkScaleDialog(false)}
       onConfirm={() => {
         onBulkScale?.(checkedBulkItems, bulkScaleReplicas, {
@@ -7272,6 +7310,7 @@ function CellContent({ resource, kind, column, group, majorityNodeMinorVersion, 
     case 'grpcroutes':
     case 'tcproutes':
     case 'tlsroutes':
+    case 'udproutes':
       return <RouteCell resource={resource} column={column} />
     case 'gatewayclasses':
       return <GatewayClassCell resource={resource} column={column} />
@@ -9167,7 +9206,7 @@ function GatewayClassCell({ resource, column }: { resource: any; column: string 
   }
 }
 
-// Shared cell renderer for all Gateway API route types (HTTPRoute, GRPCRoute, TCPRoute, TLSRoute)
+// Shared cell renderer for all Gateway API route types (HTTPRoute, GRPCRoute, TCPRoute, TLSRoute, UDPRoute)
 function RouteCell({ resource, column }: { resource: any; column: string }) {
   switch (column) {
     case 'status': {
@@ -9356,9 +9395,7 @@ function LeaseCell({ resource, column }: { resource: any; column: string }) {
       const elapsed = (Date.now() - new Date(renewTime).getTime()) / 1000
       const duration = resource.spec?.leaseDurationSeconds || 0
       const isStale = duration > 0 && elapsed > duration
-      const diff = Date.now() - new Date(renewTime).getTime()
-      const seconds = Math.floor(diff / 1000)
-      const label = seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h ago` : `${Math.floor(seconds / 86400)}d ago`
+      const label = formatRelativeAgeTime(renewTime)
       return <span className={clsx('text-sm', isStale ? 'text-red-400' : 'text-green-400')} title={new Date(renewTime).toLocaleString()}>{label}</span>
     }
     default:

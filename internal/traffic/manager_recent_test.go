@@ -97,3 +97,41 @@ func TestRecentSources_KeepsAnEmptyDetectionAList(t *testing.T) {
 		t.Fatalf("detected should be an empty list, got %s", body)
 	}
 }
+
+// cancellingSource cancels the detection's context while it runs, as a client
+// leaving the page does, and then fails the way a probe does when cancelled.
+type cancellingSource struct {
+	stubSource
+	cancel context.CancelFunc
+}
+
+func (s *cancellingSource) Detect(ctx context.Context) (*DetectionResult, error) {
+	s.cancel()
+	return nil, ctx.Err()
+}
+
+func TestDetectSources_ACancelledDetectionChangesNothing(t *testing.T) {
+	hubble := &countingSource{stubSource: stubSource{name: "hubble", result: &DetectionResult{Available: true}}}
+	m := &Manager{k8sClient: fake.NewSimpleClientset(), sources: map[string]TrafficSource{"hubble": hubble}}
+	if _, err := m.DetectSources(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.sources["hubble"] = &cancellingSource{stubSource: stubSource{name: "hubble"}, cancel: cancel}
+	if _, err := m.DetectSources(ctx); err == nil {
+		t.Fatal("a cancelled detection should return its context error")
+	}
+
+	if m.GetActiveSourceName() != "hubble" {
+		t.Errorf("active source = %q, want hubble kept: one cancelled request must not switch traffic off for every user", m.GetActiveSourceName())
+	}
+	m.sources["hubble"] = hubble
+	recent, err := m.RecentSources(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hubble.detections != 1 || len(recent.Detected) != 1 || recent.Detected[0].Status != "available" {
+		t.Errorf("recent detection = %v after %d probes, want the earlier available answer, not the cancelled one", recent.Detected, hubble.detections)
+	}
+}

@@ -35,6 +35,7 @@ var (
 	refDisruptions     = Reference{Label: "K8s: Pod Disruption Budgets", URL: "https://kubernetes.io/docs/concepts/workloads/pods/disruptions/"}
 	refTopologySpread  = Reference{Label: "K8s: Topology Spread Constraints", URL: "https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/"}
 	refAffinity        = Reference{Label: "K8s: Affinity and Anti-affinity", URL: "https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity"}
+	refGKEDiskTypes    = Reference{Label: "Compute Engine: Machine series disk support", URL: "https://cloud.google.com/compute/docs/disks/persistent-disks"}
 	refSAToken         = Reference{Label: "K8s: Configure Service Accounts for Pods", URL: "https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/"}
 	refSecrets         = Reference{Label: "K8s: Secrets", URL: "https://kubernetes.io/docs/concepts/configuration/secret/"}
 	refConfigMaps      = Reference{Label: "K8s: ConfigMaps", URL: "https://kubernetes.io/docs/concepts/configuration/configmap/"}
@@ -49,6 +50,8 @@ var (
 	refArgoCD          = Reference{Label: "Argo CD: Declarative GitOps", URL: "https://argo-cd.readthedocs.io/en/stable/"}
 	refHelm            = Reference{Label: "Helm: Charts", URL: "https://helm.sh/docs/topics/charts/"}
 	refCNPGBackup      = Reference{Label: "CloudNativePG: Backup", URL: "https://cloudnative-pg.io/documentation/current/backup/"}
+	refPV              = Reference{Label: "K8s: Persistent Volumes", URL: "https://kubernetes.io/docs/concepts/storage/persistent-volumes/"}
+	refStorageClass    = Reference{Label: "K8s: Storage Classes", URL: "https://kubernetes.io/docs/concepts/storage/storage-classes/"}
 )
 
 // CheckRegistry maps checkID → metadata for all built-in checks.
@@ -236,6 +239,14 @@ var CheckRegistry = map[string]CheckMeta{
 		Remediation: rolloutdiag.Remediation,
 		References:  []Reference{refDeployments},
 	},
+	checkPDVolumeHyperdiskOnlyNode: {
+		ID:          checkPDVolumeHyperdiskOnlyNode,
+		Title:       "Persistent Disk volume can land on a Hyperdisk-only node",
+		Category:    CategoryReliability,
+		Description: "The workload mounts a GCE Persistent Disk volume (pd-standard, pd-balanced, pd-ssd or pd-extreme), and the cluster has nodes from a machine series that attaches only Hyperdisk (such as N4, N4D, C4 or C4A). The workload's node selector, required node affinity and tolerations don't keep its pods off those nodes. When a pod is rescheduled onto one — after a node pool resize, upgrade or drain — Compute Engine rejects the attach and the pod never starts.",
+		Remediation: "Pin the workload to a node pool whose machine type supports its disk type: add a nodeSelector or required node affinity on node.kubernetes.io/instance-type or cloud.google.com/machine-family, or taint the Hyperdisk-only pool. Alternatively, move the data to a Hyperdisk StorageClass whose type every node pool the workload can run on supports — Hyperdisk support also varies by machine series.",
+		References:  []Reference{refGKEDiskTypes, refAffinity},
+	},
 	"missingPDB": {
 		ID:          "missingPDB",
 		Title:       "Missing PodDisruptionBudget",
@@ -305,6 +316,30 @@ var CheckRegistry = map[string]CheckMeta{
 		Description: "No workload, Ingress, or supported controller configuration references this ConfigMap or Secret. Radar checks the reference kinds it understands; a consumer that reads it by name from code or from an unsupported controller would not be seen.",
 		Remediation: "Confirm nothing outside Radar's view still uses it, then either add the missing reference from the workload, Ingress, or controller that should consume it, or delete it. Keep a copy of a Secret before deleting it - its contents cannot be recovered.",
 		References:  []Reference{refConfigMaps, refSecrets},
+	},
+	"pvcNoConsumer": {
+		ID:          "pvcNoConsumer",
+		Title:       "PVC with no consumer observed",
+		Category:    CategoryEfficiency,
+		Description: "A Bound claim without a controller owner has no reference from the Pods, built-in workload templates, or Pending clones Radar can see. Where Kubernetes reports the claim's Unused condition (1.37+), the 24 hours count from when it became unused, and a claim it reports in use is never flagged. StatefulSet generated claims count even at zero replicas. CRD consumers, snapshot operations, and intentional retained data may still need this storage.",
+		Remediation: "Confirm whether an operator, virtual machine, snapshot, external consumer, or recovery plan still needs the data, and check the bound volume's reclaim policy and backups. If nothing needs it, delete the claim; if its PV is Retain, reclaim that too.",
+		References:  []Reference{refPV},
+	},
+	"pvcLongPending": {
+		ID:          "pvcLongPending",
+		Title:       "Long-Pending PVC",
+		Category:    CategoryEfficiency,
+		Description: "A claim without a controller owner has been Pending since creation, more than 24 hours ago, and no Pod, built-in workload template, or Pending clone references it. WaitForFirstConsumer claims without a consumer are included. CRD consumers or snapshot operations may still reference this claim.",
+		Remediation: "Check whether a workload still needs the claim. For WaitForFirstConsumer, provisioning waits for a consuming Pod to be scheduled; otherwise inspect provisioning events, the StorageClass, and storage quota.",
+		References:  []Reference{refPV, refStorageClass},
+	},
+	"releasedPV": {
+		ID:          "releasedPV",
+		Title:       "Released or Failed persistent volume",
+		Category:    CategoryEfficiency,
+		Description: "A Released volume has been retained for more than 24 hours after claim deletion, deletion has not completed after one hour with reclaim policy Delete, or a recent VolumeFailedDelete warning shows deletion is failing. Without a phase-transition time, release duration is unknown: Retain volumes are reported with PV age, and Delete volumes without a recent warning are not evaluated. A Failed volume, whose deletion or recycling failed after claim deletion, is reported immediately. Capacity is provisioned storage, not a cost estimate.",
+		Remediation: "For Retain, confirm the data retention and recovery plan first. Deleting a Retain PV keeps its disk: to reclaim a dynamically provisioned volume, set its reclaim policy to Delete; otherwise delete the PV, then the disk in your cloud provider. For Delete failures and Failed volumes, inspect the latest warning or status message, storage controller, and provider permissions. Do not remove finalizers without understanding the cleanup they protect.",
+		References:  []Reference{refPV},
 	},
 
 	// ── Cross-resource / lifecycle (emit under Reliability) ────────────
@@ -380,7 +415,7 @@ var CheckRegistry = map[string]CheckMeta{
 		Title:       "Stuck terminating resource",
 		Category:    CategoryReliability,
 		Description: "This resource has metadata.deletionTimestamp set but is still alive past the cleanup window. Most controllers finish cleanup within seconds; minutes-long delays usually mean a finalizer's owning controller is unhealthy or unable to reach a dependent service. Common causes: the controller pod is CrashLoopBackOff, DNS resolution is broken, the finalizer logic depends on a webhook or external API that's unavailable.",
-		Remediation: "Check the controller responsible for each finalizer key (kubectl describe will show finalizers under metadata). For Argo CD, look at argocd-application-controller in the argocd namespace. For Flux, look at the matching controller (kustomize-controller, helm-controller, source-controller) in flux-system. Once the controller is healthy, deletion will resume automatically. If you must remove a stuck resource and accept the orphaned cleanup, manually clear the finalizers field — but only as a last resort.",
+		Remediation: "Check the controller responsible for each finalizer key (kubectl describe will show finalizers under metadata). For Argo CD, look at argocd-application-controller in the argocd namespace. For Flux, look at the matching controller (kustomize-controller, helm-controller, source-controller) in flux-system. Once the controller is healthy, deletion will resume automatically. If you must remove a stuck resource and accept the orphaned cleanup, manually clear the finalizers field — but only as a last resort. Never clear storage finalizers by hand: kubernetes.io/pvc-protection and kubernetes.io/pv-protection hold deletion while data is in use, and CSI provisioner finalizers guard deletion of the backing disk.",
 		References:  []Reference{refFinalizers},
 	},
 	"crossplaneStuck": {
