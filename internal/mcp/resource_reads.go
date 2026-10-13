@@ -200,6 +200,10 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 		}
 	}
 	assessment := cache.AssessKindRead(gvr.Resource, namespaces)
+	if namespaces != nil && len(assessment.Uncovered) > 0 {
+		err := namespaceCoverageError(ctx, collectorTarget{resource: gvr.Resource, group: gvr.Group}, false, 0, assessment.Uncovered, cache.KindNamespaces(gvr.Resource), nil)
+		return nil, nil, err
+	}
 	switch assessment.Readiness {
 	case k8s.KindPending:
 		return nil, nil, readErrorf(readreason.KindSyncPending, "%s are still loading, please retry shortly", gvr.Resource)
