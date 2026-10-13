@@ -502,9 +502,10 @@ Radar can read the kind only in some namespaces:
 ```json
 {
   "coverage": {
-    "complete": false,
-    "reason": "collector_scope_limited",
-    "namespaces": ["alpha", "gamma"],
+    "status": "partial",
+    "requested": {"type": "all_namespaces"},
+    "read": {"type": "namespaces", "namespaces": {"names": ["alpha", "gamma"], "total": 2, "omitted": 0}},
+    "gaps": [{"reason": "collector_scope_limited"}],
     "note": "Radar read services only in namespaces \"alpha,gamma\"; objects in other namespaces were not read, so this result cannot show they don't exist."
   },
   "items": [{"kind": "Service", "name": "api", "namespace": "alpha"}]
@@ -512,19 +513,23 @@ Radar can read the kind only in some namespaces:
 ```
 
 `items` contains the usual rows, or `[]` when the namespaces read hold nothing.
-`coverage.namespaces` lists the namespaces actually read, sorted;
+`coverage.read.namespaces` previews up to eight sorted names, with the known
+`total` and the number `omitted` from the preview. Omission abbreviates metadata;
+it does not mean those namespaces were unread. Gaps without namespace details
+mean the broader unread set is unknown.
 `coverage.note` explains that missing rows cannot establish absence elsewhere.
 The result is one text block without `structuredContent`. Coverage comes first
 so it survives truncation that retains only the head of a long result.
 
-For partial lists, `coverage.reason` is `collector_scope_limited` for informer
+For partial lists, `coverage.gaps[].reason` is `collector_scope_limited` for informer
 coverage, or `collector_access_denied` when a direct read of Endpoints,
 EndpointSlices or Leases was refused cluster-wide and fell back to namespace
 reads. Complete lists remain bare arrays. Clients must handle both shapes.
 
 Findings shows a coverage caveat, including for empty partial results. A placed
 story card distinguishes an unread subject namespace from a missing object in
-a namespace that was read.
+a namespace that was read. When the namespace preview is abbreviated, an
+unlisted namespace stays unknown rather than being called unread.
 
 ### Namespace scope
 

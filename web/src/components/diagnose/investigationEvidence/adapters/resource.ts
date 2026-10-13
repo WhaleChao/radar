@@ -232,24 +232,48 @@ export function adaptListNamespaces(
 function listedRows(
   payload: unknown,
 ):
-  | { rows: unknown[]; coverage?: { namespacesRead: string[]; note: string } }
+  | {
+      rows: unknown[];
+      coverage?: {
+        namespacesRead: string[];
+        namespacesTotal: number;
+        namespacesOmitted: number;
+        note: string;
+      };
+    }
   | undefined {
   if (Array.isArray(payload)) return { rows: payload };
   const value = record(payload);
   const coverage = record(value?.coverage);
-  const namespacesRead = stringArray(coverage?.namespaces);
+  const read = record(coverage?.read);
+  const namespaceSet = record(read?.namespaces);
+  const namespacesRead = stringArray(namespaceSet?.names);
+  const total = namespaceSet?.total;
+  const omitted = namespaceSet?.omitted;
   if (
     !value ||
     !Array.isArray(value.items) ||
-    coverage?.complete !== false ||
+    coverage?.status !== "partial" ||
+    read?.type !== "namespaces" ||
     !namespacesRead?.length ||
+    typeof total !== "number" ||
+    !Number.isInteger(total) ||
+    typeof omitted !== "number" ||
+    !Number.isInteger(omitted) ||
+    omitted < 0 ||
+    total !== namespacesRead.length + omitted ||
     !nonEmptyString(coverage.note)
   ) {
     return undefined;
   }
   return {
     rows: value.items,
-    coverage: { namespacesRead, note: coverage.note },
+    coverage: {
+      namespacesRead,
+      namespacesTotal: total,
+      namespacesOmitted: omitted,
+      note: coverage.note,
+    },
   };
 }
 
@@ -326,13 +350,19 @@ export function adaptListResources(
         `${resources.length} returned`,
         nonEmptyString(args?.group) ? args.group : undefined,
         namespacesRead
-          ? `only ${namespacesRead.length > 2 ? `${namespacesRead.length} namespaces` : namespacesRead.join(", ")} read`
+          ? `only ${coverage!.namespacesTotal > 2 ? `${coverage!.namespacesTotal} namespaces` : namespacesRead.join(", ")} read`
           : undefined,
       ]
         .filter(Boolean)
         .join(" · "),
       data: namespacesRead
-        ? { type: "inventory", resources, scope, namespacesRead }
+        ? {
+            type: "inventory",
+            resources,
+            scope,
+            namespacesRead,
+            namespacesReadOmitted: coverage!.namespacesOmitted,
+          }
         : { type: "inventory", resources, scope },
     },
   );

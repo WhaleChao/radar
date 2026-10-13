@@ -15,6 +15,7 @@ import (
 	pkgauth "github.com/skyhook-io/radar/pkg/auth"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -58,14 +59,12 @@ func readErrorResult(err error) (*mcp.CallToolResult, bool) {
 }
 
 // listCoverage says a list_resources read did not cover the cluster: Radar's
-// collector could read the kind only in Namespaces, so the rows cannot
+// collector could read the kind only in a finite namespace set, so rows cannot
 // establish that an object is absent anywhere else. A complete read carries
 // none and stays a bare array.
 type listCoverage struct {
-	Complete   bool            `json:"complete"`
-	Reason     readreason.Code `json:"reason"`
-	Namespaces []string        `json:"namespaces"`
-	Note       string          `json:"note"`
+	resourceapi.Coverage
+	Note string `json:"note"`
 }
 
 // partialList is a partial read's result, sent as the result's only text
@@ -87,9 +86,13 @@ func collectorLimitedCoverage(resource string, reason readreason.Code, read []st
 		where = fmt.Sprintf("namespaces %q", namespaceForError(read))
 	}
 	return &listCoverage{
-		Reason:     reason,
-		Namespaces: read,
-		Note:       fmt.Sprintf("Radar read %s only in %s; objects in other namespaces were not read, so this result cannot show they don't exist.", resource, where),
+		Coverage: resourceapi.Coverage{
+			Status:    resourceapi.CoveragePartial,
+			Requested: resourceapi.Scope{Type: resourceapi.ScopeAllNamespaces},
+			Read:      resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.NamespacePreview(read, resourceapi.MCPNamespacePreview)},
+			Gaps:      []resourceapi.Gap{{Reason: reason}},
+		},
+		Note: fmt.Sprintf("Radar read %s only in %s; objects in other namespaces were not read, so this result cannot show they don't exist.", resource, where),
 	}
 }
 
@@ -174,7 +177,7 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 	if cache == nil {
 		return nil, nil, errNotConnected()
 	}
-	result := k8s.GetCachedPermissionResult()
+	result := cache.PermissionResult()
 	if result != nil {
 		for ns, probeErr := range result.NamespaceProbeErrors[gvr.Resource] {
 			if namespaces != nil && !slices.Contains(namespaces, ns) {
@@ -201,20 +204,16 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 		}
 		return nil, nil, readErrorf(readreason.KindNotWatched, "Radar is not watching resource %q in API group %q; check Radar's collector list/watch permissions and collection configuration", gvr.Resource, gvr.Group)
 	}
-	covered := cache.KindNamespaces(gvr.Resource)
-	if covered == nil {
+	assessment := cache.AssessKindRead(gvr.Resource, namespaces)
+	covered := assessment.Read
+	if assessment.AllNamespaces {
 		return cache, namespaces, nil
 	}
 	if namespaces == nil {
 		return cache, covered, nil
 	}
-	var uncovered []string
-	for _, ns := range namespaces {
-		if !cache.KindCoversNamespace(gvr.Resource, ns) {
-			uncovered = append(uncovered, ns)
-		}
-	}
-	if err := namespaceCoverageError(ctx, collectorTarget{resource: gvr.Resource, group: gvr.Group}, false, 0, uncovered, covered, nil); err != nil {
+	uncovered := assessment.Uncovered
+	if err := namespaceCoverageError(ctx, collectorTarget{resource: gvr.Resource, group: gvr.Group}, false, 0, uncovered, cache.KindNamespaces(gvr.Resource), nil); err != nil {
 		return nil, nil, err
 	}
 	return cache, namespaces, nil

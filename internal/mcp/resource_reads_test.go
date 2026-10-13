@@ -37,6 +37,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/investigation"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"github.com/skyhook-io/radar/pkg/resourceid"
 )
 
@@ -552,7 +553,7 @@ type wireCoverage struct {
 // partialListBody decodes a partial list_resources result, failing unless it
 // is the documented shape: one text block and nothing else, holding exactly
 // {"coverage", "items"} with coverage first, and coverage holding exactly
-// {"complete": false, "reason", "namespaces", "note"}.
+// the shared scope coverage plus its concise note.
 func partialListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
 	t.Helper()
 	if result == nil || result.IsError || len(result.Content) != 1 || result.StructuredContent != nil {
@@ -571,23 +572,13 @@ func partialListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]
 	if err := json.Unmarshal(top["items"], &rows); err != nil || rows == nil {
 		t.Fatalf("items must be an array, got %s", top["items"])
 	}
-	var coverage map[string]json.RawMessage
-	if err := json.Unmarshal(top["coverage"], &coverage); err != nil || len(coverage) != 4 || string(coverage["complete"]) != "false" {
-		t.Fatalf("coverage must be {\"complete\": false, \"reason\", \"namespaces\", \"note\"}, got %s", top["coverage"])
+	var coverage listCoverage
+	if err := json.Unmarshal(top["coverage"], &coverage); err != nil || coverage.Status != resourceapi.CoveragePartial || coverage.Read.Namespaces == nil || len(coverage.Gaps) != 1 {
+		t.Fatalf("invalid partial coverage: %s", top["coverage"])
 	}
-	var out wireCoverage
-	for key, into := range map[string]any{"reason": &out.Reason, "namespaces": &out.Namespaces, "note": &out.Note} {
-		if err := json.Unmarshal(coverage[key], into); err != nil {
-			t.Fatalf("coverage.%s: %v in %s", key, err, top["coverage"])
-		}
-	}
+	out := wireCoverage{Reason: string(coverage.Gaps[0].Reason), Namespaces: coverage.Read.Namespaces.Names, Note: coverage.Note}
 	if len(out.Namespaces) == 0 || !slices.IsSorted(out.Namespaces) {
-		t.Fatalf("coverage must name the namespaces read, sorted: %v", out.Namespaces)
-	}
-	for _, ns := range out.Namespaces {
-		if !strings.Contains(out.Note, ns) {
-			t.Fatalf("note must name namespace %s: %q", ns, out.Note)
-		}
+		t.Fatalf("coverage preview must be sorted: %v", out.Namespaces)
 	}
 	if !strings.Contains(out.Note, "cannot show they don't exist") {
 		t.Fatalf("note must say the result cannot establish absence elsewhere: %q", out.Note)
@@ -882,7 +873,7 @@ func setupListCoverageFixture(t *testing.T, class coverageClass, limited bool, o
 }
 
 func TestCollectorLimitedCoverageBoundsNamespaceProse(t *testing.T) {
-	for _, count := range []int{1, 3, 4, 40} {
+	for _, count := range []int{1, 3, 4, 40, 1000} {
 		for _, reason := range []readreason.Code{readreason.CollectorScopeLimited, readreason.CollectorAccessDenied} {
 			t.Run(fmt.Sprintf("%s/%d", reason, count), func(t *testing.T) {
 				read := make([]string, count)
@@ -893,8 +884,11 @@ func TestCollectorLimitedCoverageBoundsNamespaceProse(t *testing.T) {
 				coverage := collectorLimitedCoverage("services", reason, read)
 				expected := slices.Clone(read)
 				slices.Sort(expected)
-				if !slices.Equal(read, original) || !slices.Equal(coverage.Namespaces, expected) {
-					t.Fatalf("namespace data changed: input %v, coverage %v", read, coverage.Namespaces)
+				if !slices.Equal(read, original) || !slices.Equal(coverage.Read.Namespaces.Names, expected[:min(count, resourceapi.MCPNamespacePreview)]) {
+					t.Fatalf("namespace data changed: input %v, coverage %v", read, coverage.Read.Namespaces)
+				}
+				if coverage.Read.Namespaces.Total != count || coverage.Read.Namespaces.Omitted != max(0, count-resourceapi.MCPNamespacePreview) {
+					t.Fatalf("metadata omission lost: %+v", coverage.Read.Namespaces)
 				}
 				where := fmt.Sprintf("namespace %q", expected[0])
 				if count > 1 {
@@ -905,7 +899,7 @@ func TestCollectorLimitedCoverageBoundsNamespaceProse(t *testing.T) {
 					where = fmt.Sprintf("namespaces %q", listed)
 				}
 				want := fmt.Sprintf("Radar read services only in %s; objects in other namespaces were not read, so this result cannot show they don't exist.", where)
-				if coverage.Note != want || coverage.Reason != reason || coverage.Complete {
+				if coverage.Note != want || coverage.Gaps[0].Reason != reason || coverage.Status != resourceapi.CoveragePartial {
 					t.Fatalf("coverage = %+v, want reason %s and note %q", coverage, reason, want)
 				}
 			})

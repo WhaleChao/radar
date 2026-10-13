@@ -18,7 +18,9 @@ import type { MetricsChangeCoverage } from "./investigationMetrics";
 // A name a partial listing lacks is unknown where the listing did not look,
 // not absent.
 const unread = (entry: NamedInventoryRow) =>
-  entry.notRead !== undefined || entry.readOnlyIn !== undefined;
+  entry.notRead !== undefined ||
+  entry.readOnlyIn !== undefined ||
+  entry.coverageUnknown === true;
 
 /** The inline slice of a placed card, rendered from Radar's record. */
 export function StoryExcerpt({
@@ -80,13 +82,15 @@ export function StoryExcerpt({
                     index > 0 && "border-t border-theme-border/60",
                   )}
                 >
-                  {entry.notRead
-                    ? `${entry.label}: ${entry.notRead} was not read`
-                    : entry.readOnlyIn
-                      ? `${entry.label}: not in the namespaces read (${entry.readOnlyIn.slice(0, 3).join(", ")}${entry.readOnlyIn.length > 3 ? ` and ${entry.readOnlyIn.length - 3} more` : ""})`
-                      : entry.matches === 0
-                        ? `Not in this listing: ${entry.label}`
-                        : `${entry.label}: ${entry.matches} entries match in this listing`}
+                  {entry.coverageUnknown
+                    ? `${entry.label}: read coverage is unknown for this namespace; namespace details were abbreviated`
+                    : entry.notRead
+                      ? `${entry.label}: ${entry.notRead} was not read`
+                      : entry.readOnlyIn
+                        ? `${entry.label}: not in the namespaces read (${entry.readOnlyIn.slice(0, 3).join(", ")}${entry.readOnlyIn.length > 3 ? ` and ${entry.readOnlyIn.length - 3} more` : ""})`
+                        : entry.matches === 0
+                          ? `Not in this listing: ${entry.label}`
+                          : `${entry.label}: ${entry.matches} entries match in this listing`}
                 </p>
               ),
             )}

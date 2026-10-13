@@ -72,6 +72,7 @@ export function storyExcerpt(
         items,
         options.scopeNamespace,
         data.namespacesRead,
+        data.namespacesReadOmitted,
       );
       return entries.length > 0 ? { kind: "rows", entries } : undefined;
     }

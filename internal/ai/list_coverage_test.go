@@ -2,6 +2,7 @@ package ai
 
 import (
 	"encoding/json"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"io"
 	"os"
 	"strings"
@@ -54,13 +55,10 @@ func TestPartialListCoverageSurvivesEveryAgentBackend(t *testing.T) {
 		}
 		payload := strings.Join(blocks, "")
 		var list struct {
-			Items    []json.RawMessage `json:"items"`
-			Coverage *struct {
-				Complete   *bool    `json:"complete"`
-				Namespaces []string `json:"namespaces"`
-			} `json:"coverage"`
+			Items    []json.RawMessage     `json:"items"`
+			Coverage *resourceapi.Coverage `json:"coverage"`
 		}
-		if err := json.Unmarshal([]byte(payload), &list); err != nil || list.Items == nil || list.Coverage == nil || list.Coverage.Complete == nil || *list.Coverage.Complete || len(list.Coverage.Namespaces) == 0 {
+		if err := json.Unmarshal([]byte(payload), &list); err != nil || list.Items == nil || list.Coverage == nil || list.Coverage.Status != resourceapi.CoveragePartial || list.Coverage.Read.Namespaces == nil || len(list.Coverage.Read.Namespaces.Names) == 0 {
 			t.Fatalf("%s: the fixture must hold a partial list, got %s", tc.Name, payload)
 		}
 

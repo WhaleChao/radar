@@ -110,14 +110,19 @@ describe("a list Radar's collector read only in some namespaces", () => {
     );
   });
 
-  it("bounds namespace prose while retaining the complete set for citations", () => {
+  it("keeps omitted namespace details unknown in citations", () => {
     const namespaces = Array.from(
       { length: 40 },
       (_, index) => `team-${String(index + 1).padStart(2, "0")}`,
     );
     const coverage = {
-      complete: false,
-      namespaces,
+      status: "partial",
+      requested: { type: "all_namespaces" },
+      read: {
+        type: "namespaces",
+        namespaces: { names: namespaces.slice(0, 8), total: 40, omitted: 32 },
+      },
+      gaps: [{ reason: "collector_scope_limited" }],
       note: 'Radar read services only in namespaces "team-01,team-02,team-03 and 37 more"; objects in other namespaces were not read, so this result cannot show they don\'t exist.',
     };
     const rows = [
@@ -138,7 +143,8 @@ describe("a list Radar's collector read only in some namespaces", () => {
       throw new Error("expected an inventory card");
     }
     const data = inventory.latest.data;
-    expect(data.namespacesRead).toEqual(namespaces);
+    expect(data.namespacesRead).toEqual(namespaces.slice(0, 8));
+    expect(data.namespacesReadOmitted).toBe(32);
     expect(inventory.latest.summary).toBe(
       "1 returned · only 40 namespaces read",
     );
@@ -151,8 +157,12 @@ describe("a list Radar's collector read only in some namespaces", () => {
       ],
       undefined,
       data.namespacesRead,
+      data.namespacesReadOmitted,
     );
-    expect(entries[0].readOnlyIn).toEqual(namespaces);
+    expect(entries[0].coverageUnknown).toBe(true);
+    expect(entries[1].coverageUnknown).toBe(true);
+    expect(entries[2].coverageUnknown).toBe(true);
+    expect(entries[2].notRead).toBeUndefined();
     const html = renderToStaticMarkup(
       createElement(StoryExcerpt, {
         excerpt: { kind: "rows", entries },
@@ -163,11 +173,12 @@ describe("a list Radar's collector read only in some namespaces", () => {
       }),
     );
     expect(html).toContain(
-      "api: not in the namespaces read (team-01, team-02, team-03 and 37 more)",
+      "api: read coverage is unknown for this namespace; namespace details were abbreviated",
     );
     expect(html).not.toContain("team-04");
-    expect(html).toContain("Not in this listing: team-40/api");
-    expect(html).toContain("unread/api: unread was not read");
+    expect(html).not.toContain("Not in this listing: team-40/api");
+    expect(html).not.toContain("unread/api: unread was not read");
+    expect(html).toContain("unread/api: read coverage is unknown");
     const empty = project([
       tool("empty", "list_resources", { coverage, items: [] }),
     ]);

@@ -1,7 +1,7 @@
 // Package readreason names why Radar could not give a complete answer to a
 // resource read or a search. The values are wire contracts: MCP list_resources
 // and get_resource errors carry one as structuredContent.reason, a partial
-// list_resources result as coverage.reason, and search coverage gaps as
+// list_resources result as coverage.gaps[].reason, and search coverage gaps as
 // unsearched[].reason on REST and MCP. Clients
 // branch on them, so a value never changes its spelling. Codes that name the
 // caller (rbac_denied) and codes that name Radar's collector (collector_*)

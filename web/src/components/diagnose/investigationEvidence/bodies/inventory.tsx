@@ -23,6 +23,7 @@ export interface NamedInventoryRow {
   row?: InvestigationResourceSummary;
   /** No row matches, and the subject's namespace is one the listing did not read. */
   notRead?: string;
+  coverageUnknown?: boolean;
   /**
    * No row matches a subject that names no namespace, on a listing that read
    * only these namespaces.
@@ -40,6 +41,7 @@ export function namedInventoryRows(
   scopeNamespace?: string,
   /** Set when Radar's collector read the listed kind only in these namespaces. */
   namespacesRead?: readonly string[],
+  namespacesReadOmitted = 0,
 ): NamedInventoryRow[] {
   const seen = new Set<string>();
   const out: NamedInventoryRow[] = [];
@@ -78,10 +80,21 @@ export function namedInventoryRows(
       matches: matches.length,
       row: matches.length === 1 ? matches[0] : undefined,
       notRead:
-        unread && namespace && !namespacesRead.includes(namespace)
+        unread &&
+        namespace &&
+        namespacesReadOmitted === 0 &&
+        !namespacesRead.includes(namespace)
           ? namespace
           : undefined,
-      readOnlyIn: unread && !namespace ? namespacesRead : undefined,
+      readOnlyIn:
+        unread && !namespace && namespacesReadOmitted === 0
+          ? namespacesRead
+          : undefined,
+      coverageUnknown: Boolean(
+        unread &&
+        namespacesReadOmitted > 0 &&
+        (!namespace || !namespacesRead.includes(namespace)),
+      ),
     });
   }
   return out;
