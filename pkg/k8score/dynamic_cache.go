@@ -25,6 +25,7 @@ import (
 
 var ErrResourceNotFound = errors.New("resource not found")
 var ErrResourceCountUnavailable = errors.New("resource count unavailable")
+var ErrCollectionNotSupported = errors.New("collection is not supported")
 
 const directCountProbeLimit int64 = 2
 
@@ -371,7 +372,7 @@ func (d *DynamicResourceCache) EnsureWatchingContext(ctx context.Context, gvr sc
 
 	// Check if resource supports list/watch before attempting to watch
 	if d.config.Discovery != nil && !d.config.Discovery.SupportsWatchGVR(gvr) {
-		return fmt.Errorf("resource %s.%s/%s does not support list/watch", gvr.Resource, gvr.Group, gvr.Version)
+		return fmt.Errorf("%w: resource %s.%s/%s does not support list/watch", ErrCollectionNotSupported, gvr.Resource, gvr.Group, gvr.Version)
 	}
 
 	if d.hasCoveringInformer(gvr, preferredNS) {
