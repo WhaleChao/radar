@@ -138,7 +138,7 @@ type CloudConnectCapability struct {
 type FeatureCapabilities struct {
 	SearchCoverage        bool `json:"searchCoverage"`
 	ResourceIssueCoverage bool `json:"resourceIssueCoverage"`
-	GitOpsWriteEvidence   bool `json:"gitOpsWriteEvidence"`
+	GitOpsWriteEvidence   bool `json:"gitopsWriteEvidence"`
 	YAMLReview            bool `json:"yamlReview"`
 	YAMLSchemas           bool `json:"yamlSchemas"`
 	WorkloadImages        bool `json:"workloadImages"`
