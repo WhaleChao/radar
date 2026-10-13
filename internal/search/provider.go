@@ -114,6 +114,9 @@ func (p *CacheProvider) DynamicResources() ([]schema.GroupVersionResource, error
 func (p *CacheProvider) TypedCoverage(kind string, namespaces []string) readreason.Code {
 	resource := k8s.CanonicalBuiltinKind(kind)
 	assessment := p.cache.AssessKindRead(resource, namespaces)
+	if !isClusterScopedKind(kind) && len(namespaces) > 0 && len(assessment.Uncovered) == len(namespaces) {
+		return readreason.CollectorScopeLimited
+	}
 	switch assessment.Readiness {
 	case k8s.KindPending:
 		return readreason.KindSyncPending
