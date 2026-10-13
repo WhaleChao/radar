@@ -20,6 +20,10 @@ func TestAssessKindReadScopeAndReadiness(t *testing.T) {
 	if !rc.AssessKindRead(Pods, []string{"beta"}).Complete {
 		t.Fatal("covered target should be complete")
 	}
+	empty := rc.AssessKindRead(Pods, []string{})
+	if !empty.Complete || empty.Requested == nil || empty.Read == nil || empty.AllNamespaces {
+		t.Fatalf("empty finite target became unrestricted: %+v", empty)
+	}
 	all := rc.AssessKindRead(Pods, nil)
 	if all.Complete || all.AllNamespaces || len(all.Read) != 2 {
 		t.Fatalf("unscoped assessment = %+v", all)

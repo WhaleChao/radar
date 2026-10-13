@@ -32,6 +32,7 @@ func (rc *ResourceCache) AssessKindRead(resource string, requested []string) Kin
 		assessment.Read = covered
 		return assessment
 	}
+	assessment.Read = make([]string, 0, len(requested))
 	watched := make(map[string]struct{}, len(covered))
 	for _, namespace := range covered {
 		watched[namespace] = struct{}{}
