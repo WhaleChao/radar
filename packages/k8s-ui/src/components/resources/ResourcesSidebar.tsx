@@ -215,7 +215,7 @@ const ResourceTypeButton = forwardRef<HTMLButtonElement, ResourceTypeButtonProps
               </span>
             </Tooltip>
           ) : (
-            <Tooltip content={coverage?.status === 'partial' ? 'Count in the namespaces Radar could read; more may exist outside them.' : coverage?.status === 'complete' ? 'Count in the requested scope.' : 'Observed count; this Radar does not report coverage.'} position="left"><span className={clsx(
+            <Tooltip disabled={coverage?.status === 'complete'} content={coverage?.status === 'partial' ? 'Count in the namespaces Radar could read; more may exist outside them.' : coverage?.status === 'complete' ? 'Count in the requested scope.' : 'Observed count; this Radar does not report coverage.'} position="left"><span className={clsx(
               'text-xs py-0.5 rounded text-center font-mono',
               isSelected ? 'bg-skyhook-500/30 selection-text' : 'bg-theme-elevated',
               count < 1000 ? 'w-8' : 'w-9',
