@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -15,9 +16,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/pkg/k8score"
 )
 
 func cnpgTestResource(group, kind, resource string, namespaced bool) k8s.APIResource {
@@ -580,5 +583,24 @@ func TestCNPGWorkspace_DeniedNamespacesNeverComeFromTheServerInventory(t *testin
 	}
 	if len(cov.AllowedNamespaces) != 1 || cov.AllowedNamespaces[0] != "default" {
 		t.Errorf("filtered: allowedNamespaces = %v, want [default]", cov.AllowedNamespaces)
+	}
+}
+
+func TestCNPGTypedScopePreservesKnownExclusionBeforeSync(t *testing.T) {
+	core, err := k8score.NewResourceCache(k8score.CacheConfig{
+		Client:              k8sfake.NewClientset(),
+		ResourceScopes:      map[string]k8score.ResourceScope{"services": {Enabled: true}, "pods": {Enabled: true, Namespace: "alpha"}},
+		DeferredTypes:       map[string]bool{"pods": true},
+		DebugSyncDelays:     map[string]time.Duration{"pods": time.Hour},
+		DeferredSyncTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(core.Stop)
+	r := httptest.NewRequest(http.MethodGet, "/api/cnpg/workspace?namespace=beta", nil)
+	acc, _, read := testServerSrv.cnpgTypedScope(r, &k8s.ResourceCache{ResourceCache: core}, []string{"beta"}, "", "pods")
+	if acc.state != cnpgCoverageError || read == nil || len(read) != 0 {
+		t.Fatalf("excluded pending target = %+v, %#v", acc, read)
 	}
 }
