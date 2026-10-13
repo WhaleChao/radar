@@ -502,6 +502,14 @@ func TestResourceDynamicPendingEmptyDoesNotBecomeAbsence(t *testing.T) {
 			return
 		}
 		if r.URL.Query().Get("watch") == "true" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "BOOKMARK", "object": map[string]any{"apiVersion": "example.com/v1", "kind": "Widget", "metadata": map[string]any{"resourceVersion": "1", "annotations": map[string]any{"k8s.io/initial-events-end": "true"}}}})
+			w.(http.Flusher).Flush()
 			<-r.Context().Done()
 			return
 		}
