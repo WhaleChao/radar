@@ -1,10 +1,12 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,12 +28,12 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "pg"}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "pg"}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: mustQty(t, "4"), corev1.ResourceMemory: mustQty(t, "8Gi")}}},
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "operator", Namespace: "pg"}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name: "orders-1", Namespace: "pg", Labels: map[string]string{"cnpg.io/cluster": "orders"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "postgresql.cnpg.io/v1", Kind: "Cluster", Name: "orders", UID: "orders-uid", Controller: &controller}},
-		}},
+		}, Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: mustQty(t, "500m")}}}}}},
 	)
 	release := make(chan struct{})
 	client.PrependReactor("list", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -86,6 +88,19 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 			waitFor(t, 45*time.Second, func() bool {
 				return cache.KindReadinessFor("pods") == stage.readiness && cache.KindReadinessFor("nodes") == stage.readiness && cache.KindReadinessFor("deployments") == stage.readiness
 			})
+			vitalsResponse := httptest.NewRecorder()
+			srv.handleVitals(vitalsResponse, httptest.NewRequest(http.MethodGet, "/api/vitals?namespaces=pg", nil))
+			var vitals VitalsResponse
+			if err := json.Unmarshal(vitalsResponse.Body.Bytes(), &vitals); err != nil {
+				t.Fatal(err)
+			}
+			if stage.readiness != k8s.KindReady {
+				if vitals.Completeness.Complete || !slices.Contains(vitals.Completeness.Pending, "Pod") {
+					t.Fatalf("unread Vitals must report pending Pod evidence: %+v", vitals.Completeness)
+				}
+			} else if vitals.Pods.Total != 1 || vitals.CPU == nil || vitals.CPU.RequestsMillis != 500 {
+				t.Fatalf("late-ready Vitals lost observed requests: %+v", vitals)
+			}
 			meta := capacityapi.NewResponseMeta(time.Now())
 			if got := len(srv.loadCapacityPods(r, &meta, time.Now())); got != stage.count {
 				t.Fatalf("Capacity Pods = %d, want %d", got, stage.count)
