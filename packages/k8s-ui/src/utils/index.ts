@@ -34,3 +34,5 @@ export * from './workflow-execution'
 export * from './network-policy'
 export * from './resource-refs'
 export * from './resource-coverage'
+
+export * from './grant'

@@ -95,13 +95,34 @@ describe('buildCNPGFleet', () => {
 
   it('says "no access" rather than "none" when a kind is not readable', () => {
     const fleet = buildCNPGFleet(
-      resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { backups: { state: 'denied' }, scheduledBackups: { state: 'partial', deniedNamespaces: ['db'] } } }),
+      resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { backups: { state: 'denied' }, scheduledBackups: { state: 'partial', deniedNamespaces: ['db'], uncoveredNamespaces: [] } } }),
     )
     const p = fleet.rows[0].protection
     expect(p.lastSuccessfulBackup.text).toBe('No access to Backups')
     expect(p.lastSuccessfulBackup.tone).toBe('unknown')
     expect(p.schedule.text).toBe('No access to ScheduledBackups')
     expect(fleet.incompleteKinds).toEqual(expect.arrayContaining(['backups', 'scheduledBackups']))
+  })
+
+  it("blames Radar's collection, not the caller, for a namespace Radar doesn't collect", () => {
+    const p = buildCNPGFleet(
+      resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { scheduledBackups: { state: 'partial', deniedNamespaces: [], uncoveredNamespaces: ['db'], allowedNamespaces: ['other'] } } }),
+    ).rows[0].protection
+    expect(p.schedule.text).toBe("Radar doesn't collect ScheduledBackups here")
+  })
+
+  it('never reads a namespace Radar does not collect as readable', () => {
+    const p = buildCNPGFleet(
+      resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { scheduledBackups: { state: 'partial', deniedNamespaces: [], uncoveredNamespaces: ['db'] } } }),
+    ).rows[0].protection
+    expect(p.schedule.text).toBe("Radar doesn't collect ScheduledBackups here")
+  })
+
+  it('blames neither when an older Radar mixes both causes under deniedNamespaces', () => {
+    const p = buildCNPGFleet(
+      resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { scheduledBackups: { state: 'partial', deniedNamespaces: ['db'] } } }),
+    ).rows[0].protection
+    expect(p.schedule.text).toBe('ScheduledBackups not read here')
   })
 
   it('prefers the newest successful backup across Backup CRs and ObjectStore status, citing the source', () => {
@@ -249,7 +270,7 @@ describe('buildCNPGFleet', () => {
     const named = buildCNPGFleet(resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { backups: { state: 'partial', allowedNamespaces: ['db'] } } }))
     expect(named.rows[0].protection.lastSuccessfulBackup.text).toBe('None observed')
     const unnamed = buildCNPGFleet(resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { backups: { state: 'partial' } } }))
-    expect(unnamed.rows[0].protection.lastSuccessfulBackup.text).toBe('No access to Backups')
+    expect(unnamed.rows[0].protection.lastSuccessfulBackup.text).toBe('Backups not read here')
   })
 
   it('says no access instead of "no replica pods" when Pods are unreadable', () => {

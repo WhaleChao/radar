@@ -12,6 +12,7 @@ import (
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 )
 
 // NamespacedSearchKinds lists the sensitive typed kinds requiring exact caller RBAC.
@@ -27,7 +28,8 @@ type reasonClass int
 const (
 	// classScope covers the caller's access, Radar's setup and query feedback.
 	// They describe what a search covers rather than what went wrong, so they
-	// are reported only for a kind or namespace the query names.
+	// are reported as gaps only for a kind or namespace the query names; on a
+	// broad query they narrow the search instead.
 	classScope reasonClass = iota
 	// classTransient is data still loading; a retry can change the answer.
 	classTransient
@@ -39,29 +41,63 @@ func classify(reason readreason.Code) reasonClass {
 	switch reason {
 	case readreason.KindSyncPending:
 		return classTransient
-	case readreason.KindSyncFailed, readreason.ReadError, readreason.PermissionCheckFailed, readreason.CollectorUnauthorized:
+	case readreason.KindSyncFailed, readreason.KindWatchFailed, readreason.ReadError, readreason.PermissionCheckFailed, readreason.CollectorCredentialsRejected:
 		return classFailure
 	}
 	return classScope
 }
 
-// maxNamedFailures bounds the kinds one failure reason names on a query with
-// no kind: terms; the rest fold into that reason's "*" entry.
+// narrowingFor is what a scope reason a broad query does not report narrowed.
+func narrowingFor(reason readreason.Code) resourceapi.Narrowing {
+	switch reason {
+	case readreason.RBACDenied, readreason.NoNamespaceAccess, readreason.NamespaceNotVisible:
+		return resourceapi.NarrowedByCallerAccess
+	case readreason.OutsideNamespaceScope:
+		return resourceapi.NarrowedByNamespacePin
+	case readreason.OutsideNamespaceSelection:
+		return resourceapi.NarrowedByNamespaceSelection
+	}
+	return resourceapi.NarrowedByCollection
+}
+
+// maxNamedFailures bounds the kinds one reason names on a query with no kind:
+// terms; the rest are only counted.
 const maxNamedFailures = 5
 
-// coverage collects one search's unsearched entries and applies the reporting
-// rules: scope reasons only for what the query names, every transient and
-// failure reason, folded so the response never grows with the number of kinds
-// on the cluster.
+// maxFilterFailedObjects bounds the objects a filter_eval_failed gap names.
+const maxFilterFailedObjects = 20
+
+// typedNamespaceReader is a Provider that can say which namespaces of a typed
+// kind are readable while others still load.
+type typedNamespaceReader interface {
+	TypedReadable(kind string, namespaces []string) []string
+}
+
+// readableWithin narrows a kind's list scope (nil: every namespace) to the
+// namespaces readable now; with no readable namespaces it is empty.
+func readableWithin(listNs, readable []string) []string {
+	if listNs == nil {
+		return readable
+	}
+	return slices.DeleteFunc(slices.Clone(listNs), func(ns string) bool { return !slices.Contains(readable, ns) })
+}
+
+// coverage collects one search's gaps and applies the reporting rules: scope
+// reasons only for what the query names (on a broad query they narrow the
+// search instead), every transient and failure reason, folded so the response
+// never grows with the number of kinds on the cluster. A gap names either
+// kinds or namespaces, never both, so folding never invents a combination.
 type coverage struct {
 	namedKinds      bool
 	namedNamespaces map[string]bool
-	namespaceIndex  map[readreason.Code]map[string]bool
-	gaps            []UnsearchedKind
-	gapIndex        map[coverageKey]int
-	// unbounded marks "*" entries standing for an unknown number of kinds (the
-	// catalog itself could not be read); they carry no count.
+	kinds           map[readreason.Code][]resourceapi.KindRef
+	kindSeen        map[coverageKey]bool
+	nsGaps          map[readreason.Code][]string
+	namespaceSeen   map[readreason.Code]map[string]bool
+	// unbounded marks reasons that reach an unknown set of kinds (the catalog
+	// itself could not be read).
 	unbounded map[readreason.Code]bool
+	narrowed  map[resourceapi.Narrowing]bool
 }
 
 type coverageKey struct {
@@ -77,30 +113,37 @@ func newCoverage(q Query) *coverage {
 	return &coverage{
 		namedKinds:      len(q.KindFilter) > 0,
 		namedNamespaces: namespaces,
-		namespaceIndex:  map[readreason.Code]map[string]bool{},
+		kinds:           map[readreason.Code][]resourceapi.KindRef{},
+		kindSeen:        map[coverageKey]bool{},
+		nsGaps:          map[readreason.Code][]string{},
+		namespaceSeen:   map[readreason.Code]map[string]bool{},
 		unbounded:       map[readreason.Code]bool{},
-		gapIndex:        map[coverageKey]int{},
+		narrowed:        map[resourceapi.Narrowing]bool{},
 	}
 }
 
 // quiet reports whether a kind-level reason goes unreported for this query,
-// so callers can skip work that could only produce it.
+// so callers can skip work that could only produce it. A quiet reason still
+// narrowed the search, and is recorded as such.
 func (c *coverage) quiet(reason readreason.Code) bool {
-	return classify(reason) == classScope && !c.namedKinds
+	if classify(reason) != classScope || c.namedKinds {
+		return false
+	}
+	c.narrowed[narrowingFor(reason)] = true
+	return true
 }
 
 // kind records a kind-level reason for one scanned kind.
-func (c *coverage) kind(kind, group string, reason readreason.Code) *UnsearchedKind {
+func (c *coverage) kind(kind, group string, reason readreason.Code) {
 	if c.quiet(reason) {
-		return nil
+		return
 	}
 	key := coverageKey{kind, group, reason}
-	if i, exists := c.gapIndex[key]; exists {
-		return &c.gaps[i]
+	if c.kindSeen[key] {
+		return
 	}
-	c.gapIndex[key] = len(c.gaps)
-	c.gaps = append(c.gaps, UnsearchedKind{Kind: kind, Group: group, Reason: reason})
-	return &c.gaps[len(c.gaps)-1]
+	c.kindSeen[key] = true
+	c.kinds[reason] = append(c.kinds[reason], resourceapi.KindRef{Kind: kind, Group: group})
 }
 
 // catalog records a reason that applies to an unknown set of kinds, such as
@@ -110,88 +153,92 @@ func (c *coverage) catalog(reason readreason.Code) {
 		return
 	}
 	c.unbounded[reason] = true
-	c.star(reason)
 }
 
 // namespaces records a namespace-level reason. Only namespaces the query names
-// are reported, merged into one entry per reason.
+// are reported, merged into one gap per reason.
 func (c *coverage) namespaces(reason readreason.Code, namespaces ...string) {
-	var entry *UnsearchedKind
-	seen := c.namespaceIndex[reason]
 	for _, ns := range namespaces {
-		if !c.namedNamespaces[ns] || seen[ns] {
+		if !c.namedNamespaces[ns] || c.namespaceSeen[reason][ns] {
 			continue
 		}
-		if entry == nil {
-			entry = c.star(reason)
+		if c.namespaceSeen[reason] == nil {
+			c.namespaceSeen[reason] = map[string]bool{}
 		}
-		if seen == nil {
-			seen = map[string]bool{}
-			c.namespaceIndex[reason] = seen
-		}
-		seen[ns] = true
-		entry.Namespaces = append(entry.Namespaces, ns)
+		c.namespaceSeen[reason][ns] = true
+		c.nsGaps[reason] = append(c.nsGaps[reason], ns)
 	}
 }
 
-func (c *coverage) star(reason readreason.Code) *UnsearchedKind {
-	key := coverageKey{kind: "*", reason: reason}
-	if i, exists := c.gapIndex[key]; exists {
-		return &c.gaps[i]
-	}
-	c.gapIndex[key] = len(c.gaps)
-	c.gaps = append(c.gaps, UnsearchedKind{Kind: "*", Reason: reason})
-	return &c.gaps[len(c.gaps)-1]
-}
-
-// result folds the recorded entries. On a query that names kinds, every
-// kind-level entry is one of them and stays exact. Otherwise pending kinds
-// become one counted "*" entry, and each failure reason names its first
-// maxNamedFailures kinds by kind then group and counts the rest in its "*"
-// entry.
-func (c *coverage) result() []UnsearchedKind {
-	out := []UnsearchedKind{}
-	pending := map[[2]string]bool{}
-	failures := map[readreason.Code][]UnsearchedKind{}
-	for _, gap := range c.gaps {
-		slices.Sort(gap.Namespaces)
-		switch class := classify(gap.Reason); {
-		case gap.Kind == "*" || c.namedKinds || class == classScope:
-			out = append(out, gap)
-		case class == classTransient:
-			pending[[2]string{gap.Kind, gap.Group}] = true
-		default:
-			failures[gap.Reason] = append(failures[gap.Reason], gap)
+// result renders the gaps, most actionable first. On a query that names kinds
+// every kind-level gap names all of them. Otherwise loading kinds are only
+// counted — at startup they can be most of the catalog — and each failure
+// reason names its first maxNamedFailures kinds by kind then group and counts
+// the rest. A reason that already reaches an unknown set of kinds needs no
+// count of loading kinds beside it.
+func (c *coverage) result() []resourceapi.Gap {
+	out := []resourceapi.Gap{}
+	for reason, kinds := range c.kinds {
+		transient := classify(reason) == classTransient && !c.namedKinds
+		if transient && c.unbounded[reason] {
+			continue
 		}
-	}
-	fold := func(reason readreason.Code, n int) {
-		for i := range out {
-			if out[i].Kind == "*" && out[i].Reason == reason {
-				if !c.unbounded[reason] {
-					out[i].Count += n
-				}
-				return
-			}
+		limit := maxNamedFailures
+		switch {
+		case c.namedKinds:
+			limit = len(kinds)
+		case transient:
+			limit = 0
 		}
-		out = append(out, UnsearchedKind{Kind: "*", Reason: reason, Count: n})
+		out = append(out, resourceapi.Gap{Code: reason, Kinds: resourceapi.Kinds(kinds, limit)})
 	}
-	if len(pending) > 0 {
-		fold(readreason.KindSyncPending, len(pending))
+	for reason, namespaces := range c.nsGaps {
+		out = append(out, resourceapi.Gap{Code: reason, Namespaces: resourceapi.Names(namespaces, len(namespaces))})
 	}
-	for reason, gaps := range failures {
-		sortGaps(gaps)
-		out = append(out, gaps[:min(len(gaps), maxNamedFailures)]...)
-		if len(gaps) > maxNamedFailures {
-			fold(reason, len(gaps)-maxNamedFailures)
-		}
+	for reason := range c.unbounded {
+		out = append(out, resourceapi.Gap{Code: reason})
 	}
 	sortGaps(out)
 	return out
 }
 
-func sortGaps(gaps []UnsearchedKind) {
-	slices.SortFunc(gaps, func(a, b UnsearchedKind) int {
-		return cmp.Or(strings.Compare(a.Kind, b.Kind), strings.Compare(a.Group, b.Group), strings.Compare(string(a.Reason), string(b.Reason)))
+// narrowedBy is how a broad query's scope narrowed beyond what it reports.
+func (c *coverage) narrowedBy(namespaces []resourceapi.Narrowing) []resourceapi.Narrowing {
+	for _, n := range namespaces {
+		c.narrowed[n] = true
+	}
+	out := make([]resourceapi.Narrowing, 0, len(c.narrowed))
+	for n := range c.narrowed {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// sortGaps orders gaps by readreason precedence, then kinds before namespaces
+// before an unknown extent, so a response is stable for equal input.
+func sortGaps(gaps []resourceapi.Gap) {
+	dimension := func(g resourceapi.Gap) int {
+		switch {
+		case g.Kinds != nil:
+			return 0
+		case g.Namespaces != nil:
+			return 1
+		default:
+			return 2
+		}
+	}
+	slices.SortStableFunc(gaps, func(a, b resourceapi.Gap) int {
+		if a.Code != b.Code {
+			if readreason.Primary([]readreason.Code{a.Code, b.Code}) == a.Code {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(dimension(a), dimension(b))
 	})
 }
 
@@ -222,13 +269,26 @@ func (o *Options) ScopeNamespaces(q Query, visible, ceiling []string) {
 		}
 	}
 	o.NamespaceExcluded = o.Namespaces != nil && len(o.Namespaces) == 0
+	o.namespaceNarrowing = nil
+	if len(q.NSFilter) == 0 {
+		if ceiling != nil {
+			o.namespaceNarrowing = append(o.namespaceNarrowing, resourceapi.NarrowedByCallerAccess)
+		}
+		if visible != nil && (ceiling == nil || len(visible) < len(ceiling)) {
+			narrowing := resourceapi.NarrowedByNamespaceSelection
+			if o.Pinned {
+				narrowing = resourceapi.NarrowedByNamespacePin
+			}
+			o.namespaceNarrowing = append(o.namespaceNarrowing, narrowing)
+		}
+	}
 }
 
 // excludeMissingNamespaces reports a namespace an ns: term names that doesn't
-// exist on the cluster as namespace_excluded, the entry an unseen namespace
-// gets, instead of searching it to a silent empty answer or blaming the
-// namespace selection. Only for a caller whose RBAC covers every namespace:
-// for anyone else, which namespaces exist is not theirs to learn.
+// exist on the cluster as namespace_not_found, instead of searching it to a
+// silent empty answer or blaming the namespace selection. Only for a caller
+// whose RBAC covers every namespace: for anyone else, which namespaces exist
+// is not theirs to learn, and a missing namespace stays namespace_not_visible.
 func (o *Options) excludeMissingNamespaces(p Provider, q Query) {
 	if len(q.NSFilter) == 0 || !o.seesAllNamespaces {
 		return
@@ -240,7 +300,7 @@ func (o *Options) excludeMissingNamespaces(p Provider, q Query) {
 		kept = make([]string, 0, len(namespaces))
 		for _, ns := range namespaces {
 			if exists, known := p.NamespaceExists(ns); known && !exists {
-				o.ExcludedNamespaces = append(o.ExcludedNamespaces, ns)
+				o.MissingNamespaces = append(o.MissingNamespaces, ns)
 			} else {
 				kept = append(kept, ns)
 			}
@@ -259,14 +319,14 @@ var errIncompleteDiscovery = errors.New("some API groups could not be discovered
 // listErrorReason classifies a failed collector list or warm-up. The typed
 // cache reports a probe-disabled kind as a "forbidden:" error, and
 // ErrUnknownKind marks a kind Radar reads directly instead of watching. A 401
-// stays collector_access_denied: the probes and retained observations behind
-// most collector denials do not keep 401 apart from 403.
+// stays collector_forbidden: the probes and retained observations behind most
+// collector denials do not keep 401 apart from 403.
 func listErrorReason(err error) readreason.Code {
 	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || strings.HasPrefix(err.Error(), "forbidden:") {
-		return readreason.CollectorAccessDenied
+		return readreason.CollectorForbidden
 	}
 	if errors.Is(err, k8s.ErrUnknownKind) {
-		return readreason.CollectionNotSupported
+		return readreason.KindNotWatchable
 	}
 	if errors.Is(err, k8s.ErrDynamicNotReady) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || k8score.IsClientRateLimited(err) {
 		return readreason.KindSyncPending
@@ -285,7 +345,7 @@ func dynamicObservationReason(observation k8score.DynamicResourceObservation) re
 	case k8score.DynamicObservationSynced:
 		return ""
 	case k8score.DynamicObservationDenied:
-		return readreason.CollectorAccessDenied
+		return readreason.CollectorForbidden
 	case k8score.DynamicObservationSyncing:
 		if observation.ReasonCode == "sync_stalled" {
 			return readreason.KindSyncFailed
@@ -296,11 +356,11 @@ func dynamicObservationReason(observation k8score.DynamicResourceObservation) re
 		case "eager_watch_pending":
 			return readreason.KindSyncPending
 		case "watch_start_failed":
-			return readreason.KindSyncFailed
+			return readreason.KindWatchFailed
 		}
 		return readreason.KindNotWatched
 	case k8score.DynamicObservationUnsupported:
-		return readreason.CollectionNotSupported
+		return readreason.KindNotWatchable
 	default:
 		return readreason.KindNotWatched
 	}

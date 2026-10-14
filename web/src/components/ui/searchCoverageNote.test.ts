@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { SearchCoverageEntry } from '../../api/client'
-import { PENDING_RETRY_BUDGET_MS, kindPluralLabel, searchCoverageNote } from './searchCoverageNote'
+import { PENDING_RETRY_BUDGET_MS, kindPluralLabel, searchCoverageNote as noteFor, type SearchCoverageEntry } from './searchCoverageNote'
+import { coverageOf } from './searchCoverage.fixtures'
+
+const searchCoverageNote = (entries: SearchCoverageEntry[] | undefined, opts: Parameters<typeof noteFor>[1]) => noteFor(entries && coverageOf(entries), opts)
 
 const entry = (kind: string, reason: string, group = '', count?: number): SearchCoverageEntry => ({ kind, group, reason, count })
 
@@ -25,11 +27,11 @@ describe('searchCoverageNote', () => {
   )
 
   it('offers watch-start recovery only when the server says naming the kind retries it', () => {
-    const failed = { ...entry('Certificate', 'kind_sync_failed', 'cert-manager.io'), retryWithKind: true }
+    const failed = entry('Certificate', 'kind_watch_failed', 'cert-manager.io')
     expect(searchCoverageNote([failed], { query: 'renewal' })?.text).toBe("Couldn't read Certificate; matches of that kind may be missing. Search kind:Certificate to re-check.")
     expect(searchCoverageNote([failed], { query: 'kind:Certificate renewal' })?.text).toBe("Couldn't read Certificate; matches of that kind may be missing.")
     expect(searchCoverageNote([entry('*', 'read_error')], {})?.text).toBe("Couldn't read some kinds; matches of those kinds may be missing.")
-    expect(searchCoverageNote([entry('Certificate', 'collector_unauthorized')], {})?.action).toBeUndefined()
+    expect(searchCoverageNote([entry('Certificate', 'collector_credentials_rejected')], {})?.action).toBeUndefined()
   })
 
   it('uses the first recoverable kind as the example for a folded failure', () => {
@@ -44,16 +46,16 @@ describe('searchCoverageNote', () => {
 
   it('explains a named kind the caller or Radar cannot read', () => {
     expect(searchCoverageNote([entry('Secret', 'rbac_denied')], {})?.text).toBe("Your access doesn't include all Secrets.")
-    expect(searchCoverageNote([entry('Secret', 'collector_access_denied')], {})?.text).toBe("Radar isn't allowed to read Secrets on this cluster.")
+    expect(searchCoverageNote([entry('Secret', 'collector_forbidden')], {})?.text).toBe("Radar isn't allowed to read Secrets on this cluster.")
   })
 
   it('treats an unrecognized kind as not installed or misspelled, unless API groups went undiscovered', () => {
-    expect(searchCoverageNote([entry('CiliumNetworkPolicy', 'unknown_kind')], {})?.text).toBe('No kind named CiliumNetworkPolicy here — not installed, or misspelled?')
-    expect(searchCoverageNote([entry('Certificate', 'unknown_kind'), entry('*', 'read_error')], {})?.text).toBe("No kind named Certificate found, but some API groups couldn't be read.")
+    expect(searchCoverageNote([entry('CiliumNetworkPolicy', 'kind_unknown')], {})?.text).toBe('No kind named CiliumNetworkPolicy here — not installed, or misspelled?')
+    expect(searchCoverageNote([entry('Certificate', 'kind_unknown'), entry('*', 'read_error')], {})?.text).toBe("No kind named Certificate found, but some API groups couldn't be read.")
   })
 
   it('points an unsearchable kind at its list, as an action when the host can open it', () => {
-    const lease = [entry('Lease', 'collection_not_supported', 'coordination.k8s.io')]
+    const lease = [entry('Lease', 'kind_not_watchable', 'coordination.k8s.io')]
     expect(searchCoverageNote(lease, {})).toEqual({ text: "Leases can't be searched. Open the Leases list instead.", action: undefined })
 
     const open = vi.fn()
@@ -104,15 +106,17 @@ describe('searchCoverageNote', () => {
   it('says why a namespace the query named was not searched', () => {
     const ns = (reason: string, namespaces: string[]) => ({ kind: '*', group: '', reason, namespaces })
     expect(searchCoverageNote([ns('collector_scope_limited', ['rel-owner'])], {})?.text).toBe("Namespace 'rel-owner' wasn't searched: Radar here watches only some namespaces.")
-    expect(searchCoverageNote([ns('namespace_scope_limited', ['billing']), ns('collector_scope_limited', ['audit'])], {})?.text).toBe("Namespaces 'audit' and 'billing' weren't searched: Radar here watches only some namespaces.")
-    expect(searchCoverageNote([ns('namespace_excluded', ['payments-prd'])], { seesAllNamespaces: true })?.text).toBe("Namespace 'payments-prd' doesn't exist on this cluster.")
-    expect(searchCoverageNote([ns('namespace_excluded', ['payments-prd'])], {})?.text).toBe("Namespace 'payments-prd' wasn't found in what you can see.")
+    expect(searchCoverageNote([ns('collector_scope_limited', ['audit', 'billing'])], {})?.text).toBe("Namespaces 'audit' and 'billing' weren't searched: Radar here watches only some namespaces.")
+    expect(searchCoverageNote([ns('outside_namespace_selection', ['billing'])], {})?.text).toBe("Namespace 'billing' wasn't searched: your namespace selection leaves it out.")
+    expect(searchCoverageNote([ns('outside_namespace_scope', ['billing'])], {})?.text).toBe("Namespace 'billing' wasn't searched: Radar is pinned to another namespace.")
+    expect(searchCoverageNote([ns('namespace_not_found', ['payments-prd'])], {})?.text).toBe("Namespace 'payments-prd' doesn't exist on this cluster.")
+    expect(searchCoverageNote([ns('namespace_not_visible', ['payments-prd'])], {})?.text).toBe("Namespace 'payments-prd' wasn't found in what you can see.")
   })
 
   it('keeps a read failure visible beside namespace notes', () => {
     const ns = (reason: string, namespaces: string[]) => ({ kind: '*', group: '', reason, namespaces })
-    const mixed = [ns('namespace_excluded', ['gone']), ns('collector_scope_limited', ['rel-owner']), entry('SpStall', 'kind_sync_failed', 'stall.sp-live.test')]
-    expect(searchCoverageNote(mixed, { seesAllNamespaces: true })?.text).toBe(
+    const mixed = [ns('namespace_not_found', ['gone']), ns('collector_scope_limited', ['rel-owner']), entry('SpStall', 'kind_sync_failed', 'stall.sp-live.test')]
+    expect(searchCoverageNote(mixed, {})?.text).toBe(
       "Couldn't read SpStall; matches of that kind may be missing. Namespace 'gone' doesn't exist on this cluster.",
     )
   })
@@ -141,12 +145,12 @@ describe('searchCoverageNote', () => {
 
   it('keeps to two sentences, loading first, and keeps the action only when its sentence shows', () => {
     const openKindList = () => () => {}
-    const many = [entry('Secret', 'rbac_denied'), entry('Lease', 'collection_not_supported', 'coordination.k8s.io'), entry('*', 'kind_sync_pending')]
+    const many = [entry('Secret', 'rbac_denied'), entry('Lease', 'kind_not_watchable', 'coordination.k8s.io'), entry('*', 'kind_sync_pending')]
     const note = searchCoverageNote(many, { openKindList })!
     expect(note.text).toBe("Still loading — results may change. Leases can't be searched. Open the Leases list instead.")
     expect(note.parts?.map((part) => part.text)).toEqual(['Still loading — results may change.', "Leases can't be searched."])
     expect(note.parts?.[1].action?.label).toBe('Open the Leases list instead.')
-    expect(searchCoverageNote([...many, entry('Deploymnet', 'unknown_kind')], { openKindList })).toEqual({
+    expect(searchCoverageNote([...many, entry('Deploymnet', 'kind_unknown')], { openKindList })).toEqual({
       text: 'Still loading — results may change. No kind named Deploymnet here — not installed, or misspelled?',
       action: undefined,
     })
@@ -167,19 +171,17 @@ describe('helpers', () => {
 
 describe('large named target lists', () => {
   const names = Array.from({ length: 5000 }, (_, i) => `target-${String(i).padStart(4, '0')}`)
-  it.each(['namespace_excluded', 'namespace_scope_limited', 'collector_scope_limited'])(
+  it.each(['namespace_not_visible', 'namespace_not_found', 'outside_namespace_selection', 'outside_namespace_scope', 'collector_scope_limited'])(
     'caps %s namespace prose and preserves structured detail', (reason) => {
       const gaps = [{ kind: '*', group: '', reason, namespaces: names }]
-      for (const seesAllNamespaces of [false, true]) {
-        const text = searchCoverageNote(gaps, { seesAllNamespaces })!.text
-        expect(text).toContain("'target-0004' and 4995 more")
-        expect(text).not.toContain('target-0005')
-        expect(text.length).toBeLessThan(300)
-      }
+      const text = searchCoverageNote(gaps, {})!.text
+      expect(text).toContain("'target-0004' and 4995 more")
+      expect(text).not.toContain('target-0005')
+      expect(text.length).toBeLessThan(300)
       expect(gaps[0].namespaces).toEqual(names)
     },
   )
-  it.each(['unknown_kind', 'rbac_denied', 'collector_access_denied', 'collection_not_supported'])(
+  it.each(['kind_unknown', 'rbac_denied', 'collector_forbidden', 'kind_not_watchable'])(
     'caps %s kind prose and preserves exact entries', (reason) => {
       const gaps = names.map((kind) => entry(kind, reason))
       const text = searchCoverageNote(gaps, {})!.text

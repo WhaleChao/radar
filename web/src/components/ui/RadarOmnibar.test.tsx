@@ -3,7 +3,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SearchCoverageEntry } from '../../api/client'
+import type { SearchCoverageEntry } from './searchCoverageNote'
+import { coverageOf } from './searchCoverage.fixtures'
 
 vi.mock('../../api/usage-data', () => ({ recordUsageEvent: vi.fn() }))
 vi.mock('../../hooks/useRecentResources', () => ({ loadRecentResources: () => [], recordRecentResource: vi.fn() }))
@@ -36,7 +37,7 @@ beforeEach(() => {
     const url = new URL(input, 'http://localhost')
     if (!url.pathname.endsWith('/search')) throw new Error(`Unexpected request: ${input}`)
     searches++
-    return new Response(JSON.stringify({ hits: [], total: 0, searched: 0, total_matched: 0, partial: true, unsearched }), { status: 200 })
+    return new Response(JSON.stringify({ hits: [], total: 0, searched: 0, total_matched: 0, coverage: coverageOf(unsearched) }), { status: 200 })
   }))
   host = document.createElement('div')
   document.body.appendChild(host)
@@ -124,22 +125,22 @@ describe('RadarOmnibar while results load', () => {
 })
 
 describe('RadarOmnibar namespace notes', () => {
-  const missing: SearchCoverageEntry[] = [{ kind: '*', group: '', reason: 'namespace_excluded', namespaces: ['payments-prd'] }]
-
-  it('says a namespace does not exist when auth is off, which capabilities report by omitting authEnabled', async () => {
-    for (const data of [{}, { authEnabled: false }]) {
+  // Radar decides whether a missing namespace may be named as absent: only a
+  // caller who can see every namespace is told it doesn't exist.
+  it('says a namespace does not exist when Radar says so, whatever the auth mode', async () => {
+    for (const data of [{}, { authEnabled: true }]) {
       caps.data = data
-      unsearched = missing
+      unsearched = [{ kind: '*', group: '', reason: 'namespace_not_found', namespaces: ['payments-prd'] }]
       await typeQuery(`ns:payments-prd web${'authEnabled' in data ? 's' : ''}`)
       expect(page()).toContain("Namespace 'payments-prd' doesn't exist on this cluster.")
     }
   })
 
-  it('stays scoped to what the caller can see when auth is on or capabilities have not loaded', async () => {
-    for (const data of [{ authEnabled: true }, undefined]) {
+  it('stays scoped to what the caller can see when Radar does not say', async () => {
+    for (const data of [{}, { authEnabled: true }]) {
       caps.data = data
-      unsearched = missing
-      await typeQuery(`ns:payments-prd web${data ? '' : 's'}`)
+      unsearched = [{ kind: '*', group: '', reason: 'namespace_not_visible', namespaces: ['payments-prd'] }]
+      await typeQuery(`ns:payments-prd web${'authEnabled' in data ? 's' : ''}`)
       expect(page()).toContain("Namespace 'payments-prd' wasn't found in what you can see.")
     }
   })

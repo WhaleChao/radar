@@ -15,7 +15,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"coverage\":{\"status\":\"partial\",\"requested\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"names\":[\"alpha\",\"gamma\"],\"total\":2,\"omitted\":0}},\"gaps\":[{\"reason\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha,gamma\\\"; objects in other namespaces were not read, so this result cannot show they don't exist.\"},\"items\":[{\"kind\":\"Service\",\"name\":\"alpha-object\",\"namespace\":\"alpha\"}]}"
+            "text": "{\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"gaps\":[{\"code\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha\\\", \\\"gamma\\\". Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don't exist.\"},\"items\":[{\"kind\":\"Service\",\"name\":\"alpha-object\",\"namespace\":\"alpha\"}]}"
           }
         ]
       }
@@ -33,7 +33,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"coverage\":{\"status\":\"partial\",\"requested\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"names\":[\"alpha\",\"gamma\"],\"total\":2,\"omitted\":0}},\"gaps\":[{\"reason\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha,gamma\\\"; objects in other namespaces were not read, so this result cannot show they don't exist.\"},\"items\":[]}"
+            "text": "{\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"gaps\":[{\"code\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha\\\", \\\"gamma\\\". Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don't exist.\"},\"items\":[]}"
           }
         ]
       }
@@ -51,7 +51,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"coverage\":{\"status\":\"partial\",\"requested\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"names\":[\"alpha\",\"gamma\"],\"total\":2,\"omitted\":0}},\"gaps\":[{\"reason\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha,gamma\\\"; objects in other namespaces were not read, so this result cannot show they don't exist.\"},\"items\":[]}"
+            "text": "{\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"all_namespaces\"},\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"gaps\":[{\"code\":\"collector_scope_limited\"}],\"note\":\"Radar read services only in namespaces \\\"alpha\\\", \\\"gamma\\\". Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don't exist.\"},\"items\":[]}"
           }
         ]
       }

@@ -741,6 +741,7 @@ export interface HPADiagnosis extends HPADiagnosisView {
     name?: string
   }
   bounds: HPABounds
+  /** Spec order keeps source references paired with values; unmatched status entries follow. */
   metrics?: HPAMetricSummary[]
 }
 

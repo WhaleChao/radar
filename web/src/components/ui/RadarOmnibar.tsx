@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useMemo, useState, useRef, useImperativeHandle } from 'react'
 import { Omnibar, type OmnibarHandle } from './Omnibar'
-import { useSearch, useNamespaceScope, useContexts, useCapabilities, type SearchHit, type SearchResult } from '../../api/client'
+import { useSearch, useNamespaceScope, useContexts, type SearchHit, type SearchResult } from '../../api/client'
 import { useAPIResources } from '../../api/apiResources'
 import { loadRecentResources, recordRecentResource } from '../../hooks/useRecentResources'
 import { useCommandItems, type CommandItemCallbacks } from './command-items'
@@ -10,7 +10,7 @@ interface RadarOmnibarProps extends CommandItemCallbacks {
   onOpenResource: (hit: SearchHit) => void
 }
 
-const stillLoading = (data: SearchResult | undefined) => !!data?.unsearched?.some((e) => e.reason === 'kind_sync_pending')
+const stillLoading = (data: SearchResult | undefined) => !!data?.coverage?.gaps.some((gap) => gap.code === 'kind_sync_pending')
 
 // Radar standalone's omnibar: wires the injectable Omnibar to Radar's own hooks
 // (cluster /api/search, kubeconfig contexts, API discovery, recents). Radar Hub
@@ -44,7 +44,6 @@ export const RadarOmnibar = forwardRef<OmnibarHandle, RadarOmnibarProps>(functio
   useEffect(() => { if (!open) setExhaustedQuery(null) }, [open])
 
   const { data: nsScope } = useNamespaceScope()
-  const { data: capabilities } = useCapabilities()
   const { data: apiResources } = useAPIResources()
   const { data: contexts } = useContexts()
   const contextKey = useMemo(() => contexts?.find((c) => c.isCurrent)?.name ?? '', [contexts])
@@ -56,13 +55,11 @@ export const RadarOmnibar = forwardRef<OmnibarHandle, RadarOmnibarProps>(functio
 
   const commandItems = useCommandItems(callbacks)
   const { onNavigateKind } = callbacks
-  const note = searchCoverageNote(searchData?.unsearched, {
+  const note = searchCoverageNote(searchData?.coverage, {
     hits: searchData?.hits,
     query,
     recheckKind: (kind) => omnibarRef.current?.addModifier({ key: 'kind', value: kind }),
     pendingExhausted: exhaustedQuery === query,
-    // authEnabled is omitted when false; until capabilities load, stay neutral.
-    seesAllNamespaces: !!capabilities && !capabilities.authEnabled,
     openKindList: (kind, group) => {
       const resource = apiResources?.find((r) => r.kind === kind && r.group === group)
       return resource ? () => onNavigateKind(resource.name, resource.group) : undefined

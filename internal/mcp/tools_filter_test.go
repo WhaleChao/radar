@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -573,6 +574,12 @@ func TestHandleListResources_Secrets_PartialNamespaceAccess(t *testing.T) {
 	}
 	if containsName(body, "beta-secret") {
 		t.Errorf("beta-secret leaked despite per-namespace secret deny: %s", body)
+	}
+	// beta is alice's namespace but not her Secrets: the list must say so
+	// instead of reading as every Secret she can see.
+	_, coverage := partialListBody(t, result)
+	if !slices.Equal(coverage.GapNamespaces["rbac_denied"], []string{"beta"}) || !slices.Equal(coverage.Read, []string{"alpha"}) {
+		t.Errorf("withheld Secrets must be a gap: %+v", coverage)
 	}
 }
 

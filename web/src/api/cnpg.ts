@@ -23,6 +23,8 @@ export function useCNPGWorkspace(namespaces: string[], options?: { enabled?: boo
 export interface CNPGOperatorCoverage {
   state: 'full' | 'partial' | 'denied' | 'syncing' | 'error'
   deniedNamespaces?: string[]
+  /** Namespaces Radar's collector doesn't collect; absent from an older Radar. */
+  uncoveredNamespaces?: string[]
 }
 
 export interface CNPGOperatorComponent {

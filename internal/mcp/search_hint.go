@@ -8,27 +8,56 @@ import (
 
 	"github.com/skyhook-io/radar/internal/search"
 	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 )
 
 // maxCoverageSentences bounds coverageHint; further reasons are only counted.
 const maxCoverageSentences = 3
 
-// namespaceNotFound is hint-only: namespace_excluded as seen by a caller who
-// can see every namespace. It never reaches the wire.
-const namespaceNotFound readreason.Code = "namespace_not_found"
+// hintEntry is one kind or namespace a search couldn't cover, flattened from
+// the result's gaps: a named kind, or "*" for namespaces, for kinds counted
+// beyond the gap's sample (Count), or for an unknown set (Count 0).
+type hintEntry struct {
+	Kind, Group string
+	Reason      readreason.Code
+	Namespaces  []string
+	Count       int
+}
+
+func hintEntries(cov resourceapi.SearchCoverage) []hintEntry {
+	var out []hintEntry
+	for _, gap := range cov.Gaps {
+		switch {
+		case gap.Objects != nil:
+			// Filter failures are explained from filter_errors.
+		case gap.Kinds != nil:
+			for _, k := range gap.Kinds.Sample {
+				out = append(out, hintEntry{Kind: k.Kind, Group: k.Group, Reason: gap.Code})
+			}
+			if more := gap.Kinds.Count - len(gap.Kinds.Sample); more > 0 {
+				out = append(out, hintEntry{Kind: "*", Reason: gap.Code, Count: more})
+			}
+		case gap.Namespaces != nil:
+			out = append(out, hintEntry{Kind: "*", Reason: gap.Code, Namespaces: gap.Namespaces.Sample})
+		default:
+			out = append(out, hintEntry{Kind: "*", Reason: gap.Code})
+		}
+	}
+	return out
+}
 
 // coverageTemplate turns the unsearched entries for one or more reasons into
 // one sentence. Reasons sharing a template share the sentence. all is every
 // entry of the result, for sentences another reason qualifies.
 type coverageTemplate struct {
 	reasons  []readreason.Code
-	sentence func(entries, all []search.UnsearchedKind) string
+	sentence func(entries, all []hintEntry) string
 }
 
 // catalogUnreadable reports a "*" read_error with no count: API discovery
 // failed for some groups, so any kind could have been in them.
-func catalogUnreadable(all []search.UnsearchedKind) bool {
-	return slices.ContainsFunc(all, func(e search.UnsearchedKind) bool {
+func catalogUnreadable(all []hintEntry) bool {
+	return slices.ContainsFunc(all, func(e hintEntry) bool {
 		return e.Kind == "*" && e.Reason == readreason.ReadError && e.Count == 0
 	})
 }
@@ -39,7 +68,7 @@ var filterErrors = coverageTemplate{}
 // coverageTemplates is ordered most actionable first: what the agent can fix
 // or retry now, then what it can only report.
 var coverageTemplates = []coverageTemplate{
-	{[]readreason.Code{readreason.UnknownKind}, func(e, all []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.KindUnknown}, func(e, all []hintEntry) string {
 		names := joinKinds(e, "and", func(kind string) string { return "'" + kind + "'" })
 		if catalogUnreadable(all) {
 			return fmt.Sprintf("%s %s recognized, but some API groups couldn't be discovered: %s may be served by one of them; retry.",
@@ -50,25 +79,25 @@ var coverageTemplates = []coverageTemplate{
 		}
 		return fmt.Sprintf("Kinds %s aren't recognized on this cluster: they may not be installed here, or the names may be misspelled.", names)
 	}},
-	{[]readreason.Code{readreason.CollectionNotSupported}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.KindNotWatchable}, func(e, _ []hintEntry) string {
 		if len(e) == 1 {
 			return fmt.Sprintf("%s aren't searchable; use list_resources kind=%s.", kindPlural(e[0].Kind), e[0].Kind)
 		}
 		return fmt.Sprintf("%s aren't searchable; use list_resources for them.", joinKinds(e, "and", kindPlural))
 	}},
 	filterErrors,
-	{[]readreason.Code{readreason.KindSyncPending}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.KindSyncPending}, func(e, _ []hintEntry) string {
 		label, n := kindsLabel(e)
 		return fmt.Sprintf("%s %s still loading; retry in a few seconds before concluding absence.", capitalize(label), pluralWord(n, "was", "were"))
 	}},
-	{[]readreason.Code{readreason.PermissionCheckFailed}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.PermissionCheckFailed}, func(e, _ []hintEntry) string {
 		label, _ := kindsLabel(e)
 		return fmt.Sprintf("Radar couldn't check your access to %s; retry.", label)
 	}},
-	{[]readreason.Code{readreason.KindSyncFailed, readreason.ReadError, readreason.CollectorUnauthorized}, func(e, all []search.UnsearchedKind) string {
-		if slices.ContainsFunc(all, func(u search.UnsearchedKind) bool { return u.Reason == readreason.UnknownKind }) {
+	{[]readreason.Code{readreason.KindSyncFailed, readreason.KindWatchFailed, readreason.ReadError, readreason.CollectorCredentialsRejected}, func(e, all []hintEntry) string {
+		if slices.ContainsFunc(all, func(u hintEntry) bool { return u.Reason == readreason.KindUnknown }) {
 			// The unknown-kind sentence already explains undiscovered groups.
-			e = slices.DeleteFunc(slices.Clone(e), func(u search.UnsearchedKind) bool { return u.Kind == "*" && u.Count == 0 })
+			e = slices.DeleteFunc(slices.Clone(e), func(u hintEntry) bool { return u.Kind == "*" && u.Count == 0 })
 			if len(e) == 0 {
 				return ""
 			}
@@ -76,13 +105,13 @@ var coverageTemplates = []coverageTemplate{
 		label, n := kindsLabel(e)
 		return fmt.Sprintf("Couldn't read %s; matches of %s may be missing.", label, pluralWord(n, "that kind", "those kinds"))
 	}},
-	{[]readreason.Code{readreason.RBACDenied}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.RBACDenied}, func(e, _ []hintEntry) string {
 		return fmt.Sprintf("Your access doesn't include all %s; this result says nothing about the rest.", joinKinds(e, "or", kindPlural))
 	}},
-	{[]readreason.Code{readreason.NamespaceExcluded}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.NamespaceNotVisible}, func(e, _ []hintEntry) string {
 		return namespaceSentence(e, "it isn't among the namespaces you can see, or doesn't exist", "they aren't among the namespaces you can see, or don't exist")
 	}},
-	{[]readreason.Code{namespaceNotFound}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.NamespaceNotFound}, func(e, _ []hintEntry) string {
 		var namespaces []string
 		for _, entry := range e {
 			namespaces = append(namespaces, entry.Namespaces...)
@@ -92,10 +121,16 @@ var coverageTemplates = []coverageTemplate{
 		}
 		return fmt.Sprintf("Namespaces %s don't exist on this cluster.", quoteJoin(namespaces))
 	}},
-	{[]readreason.Code{readreason.NamespaceScopeLimited, readreason.CollectorScopeLimited}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.OutsideNamespaceSelection}, func(e, _ []hintEntry) string {
+		return namespaceSentence(e, "your namespace selection leaves it out", "your namespace selection leaves them out")
+	}},
+	{[]readreason.Code{readreason.OutsideNamespaceScope}, func(e, _ []hintEntry) string {
+		return namespaceSentence(e, "Radar is pinned to another namespace with --namespace-scope", "Radar is pinned to another namespace with --namespace-scope")
+	}},
+	{[]readreason.Code{readreason.CollectorScopeLimited}, func(e, _ []hintEntry) string {
 		return namespaceSentence(e, "Radar here watches only some namespaces", "Radar here watches only some namespaces")
 	}},
-	{[]readreason.Code{readreason.CollectorAccessDenied}, func(e, _ []search.UnsearchedKind) string {
+	{[]readreason.Code{readreason.CollectorForbidden}, func(e, _ []hintEntry) string {
 		return fmt.Sprintf("Radar isn't allowed to read %s on this cluster; granting you access won't help.", joinKinds(e, "or", kindPlural))
 	}},
 }
@@ -103,43 +138,36 @@ var coverageTemplates = []coverageTemplate{
 // coverageHint explains a partial search result to an agent: one sentence per
 // reason present, most actionable first, at most maxCoverageSentences and then
 // a count of the rest. Every reason yields a sentence, so it is non-empty
-// whenever res.Partial is true.
-//
-// seesAllNamespaces says the caller's RBAC covers every namespace, so a
-// namespace_excluded entry can only mean the named namespace doesn't exist.
-func coverageHint(res search.Result, seesAllNamespaces bool, namedKinds bool) string {
-	if seesAllNamespaces {
-		res.Unsearched = slices.Clone(res.Unsearched)
-		for i := range res.Unsearched {
-			if res.Unsearched[i].Reason == readreason.NamespaceExcluded {
-				res.Unsearched[i].Reason = namespaceNotFound
-			}
-		}
-	}
+// whenever the result is partial.
+func coverageHint(res search.Result, namedKinds bool) string {
+	return entriesHint(hintEntries(res.Coverage), res.FilterErrors, res.FilterErrorSample, namedKinds)
+}
+
+func entriesHint(unsearched []hintEntry, filterErrors int, filterErrorSample string, namedKinds bool) string {
 	var sentences []string
 	retryIndex := -1
 	retry := ""
 	used := map[readreason.Code]bool{}
 	for _, tmpl := range coverageTemplates {
 		if tmpl.sentence == nil {
-			if res.FilterErrors > 0 {
-				sentences = append(sentences, filterSentence(res.FilterErrors, res.FilterErrorSample))
+			if filterErrors > 0 {
+				sentences = append(sentences, filterSentence(filterErrors, filterErrorSample))
 			}
 			continue
 		}
-		var entries []search.UnsearchedKind
-		for _, gap := range res.Unsearched {
+		var entries []hintEntry
+		for _, gap := range unsearched {
 			if slices.Contains(tmpl.reasons, gap.Reason) {
 				entries = append(entries, gap)
 				used[gap.Reason] = true
 			}
 		}
 		if len(entries) > 0 {
-			if sentence := tmpl.sentence(entries, res.Unsearched); sentence != "" {
+			if sentence := tmpl.sentence(entries, unsearched); sentence != "" {
 				sentences = append(sentences, sentence)
 				if !namedKinds && slices.Contains(tmpl.reasons, readreason.ReadError) {
 					for _, entry := range entries {
-						if entry.Kind != "*" && (entry.Reason == readreason.ReadError || entry.RetryWithKind) {
+						if entry.Kind != "*" && (entry.Reason == readreason.ReadError || entry.Reason == readreason.KindWatchFailed) {
 							retryIndex = len(sentences) - 1
 							_, n := kindsLabel(entries)
 							if n == 1 {
@@ -155,17 +183,17 @@ func coverageHint(res search.Result, seesAllNamespaces bool, namedKinds bool) st
 		}
 	}
 	var other []string
-	for _, gap := range res.Unsearched {
+	for _, gap := range unsearched {
 		if !used[gap.Reason] && !slices.Contains(other, string(gap.Reason)) {
 			other = append(other, string(gap.Reason))
 		}
 	}
 	if len(other) > 0 {
-		sentences = append(sentences, fmt.Sprintf("Some kinds weren't searched (%s); see unsearched.", strings.Join(other, ", ")))
+		sentences = append(sentences, fmt.Sprintf("Some kinds weren't searched (%s); see coverage.gaps.", strings.Join(other, ", ")))
 	}
 	if retryIndex >= 0 && retryIndex < maxCoverageSentences {
 		sentenceCount := len(sentences)
-		if res.FilterErrors > 0 {
+		if filterErrors > 0 {
 			sentenceCount++
 		}
 		if sentenceCount < maxCoverageSentences {
@@ -183,7 +211,7 @@ func coverageHint(res search.Result, seesAllNamespaces bool, namedKinds bool) st
 // kindsLabel names the kinds entries stand for and how many there are: one
 // named kind with its group, several as a count and the first few names, and
 // "some kinds" (n = 0) when a "*" entry carries no count.
-func kindsLabel(entries []search.UnsearchedKind) (label string, n int) {
+func kindsLabel(entries []hintEntry) (label string, n int) {
 	var named []string
 	for _, e := range entries {
 		switch {
@@ -217,7 +245,7 @@ func capitalize(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-func kindWithGroup(e search.UnsearchedKind) string {
+func kindWithGroup(e hintEntry) string {
 	if e.Group == "" {
 		return e.Kind
 	}
@@ -225,7 +253,7 @@ func kindWithGroup(e search.UnsearchedKind) string {
 }
 
 // joinKinds lists the named kinds of entries, at most five, in prose.
-func joinKinds(entries []search.UnsearchedKind, conj string, format func(string) string) string {
+func joinKinds(entries []hintEntry, conj string, format func(string) string) string {
 	var names []string
 	seen := map[string]bool{}
 	for _, e := range entries {
@@ -269,7 +297,7 @@ func boundedCoverageNames(shown []string, total int) string {
 	return text
 }
 
-func namespaceSentence(entries []search.UnsearchedKind, oneWhy, manyWhy string) string {
+func namespaceSentence(entries []hintEntry, oneWhy, manyWhy string) string {
 	var namespaces []string
 	seen := map[string]bool{}
 	for _, e := range entries {

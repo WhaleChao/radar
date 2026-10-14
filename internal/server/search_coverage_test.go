@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -51,12 +50,12 @@ func TestSearchNewNamespacedKindsReportCallerDenial(t *testing.T) {
 				t.Fatal(err)
 			}
 			found := false
-			for _, gap := range result.Unsearched {
+			for _, gap := range unsearched(result) {
 				if gap.Kind == kind.Kind && gap.Group == kind.Group && gap.Reason == "rbac_denied" {
 					found = true
 				}
 			}
-			if !result.Partial || !found || len(result.Hits) != 0 {
+			if !partial(result) || !found || len(result.Hits) != 0 {
 				t.Fatalf("kind gate: %+v", result)
 			}
 			perms.SetCanI("list", kind.Group, kind.Resource, "default", true)
@@ -65,15 +64,16 @@ func TestSearchNewNamespacedKindsReportCallerDenial(t *testing.T) {
 			if allowed.StatusCode != http.StatusOK {
 				t.Fatalf("allowed status %d", allowed.StatusCode)
 			}
-			if err := json.NewDecoder(allowed.Body).Decode(&result); err != nil {
+			var allowedResult search.Result
+			if err := json.NewDecoder(allowed.Body).Decode(&allowedResult); err != nil {
 				t.Fatal(err)
 			}
-			if len(result.Hits) != 1 {
-				t.Fatalf("authorized kind omitted: %+v", result)
+			if len(allowedResult.Hits) != 1 {
+				t.Fatalf("authorized kind omitted: %+v", allowedResult)
 			}
-			for _, gap := range result.Unsearched {
+			for _, gap := range unsearched(allowedResult) {
 				if gap.Kind == kind.Kind {
-					t.Fatalf("authorized kind reports gap: %+v", result)
+					t.Fatalf("authorized kind reports gap: %+v", unsearched(allowedResult))
 				}
 			}
 		})
@@ -103,7 +103,7 @@ func TestSearchOrdinaryNamespacedKindsUseNamespaceVisibility(t *testing.T) {
 		if err != nil || len(result.Hits) != 1 {
 			t.Fatalf("%s namespace-visible kind omitted: %+v, %v", tc.kind, result, err)
 		}
-		for _, gap := range result.Unsearched {
+		for _, gap := range unsearched(result) {
 			if gap.Kind == tc.kind {
 				t.Fatalf("ordinary kind gated: %+v", gap)
 			}
@@ -217,10 +217,10 @@ func hitKeys(result search.Result) []string {
 	return keys
 }
 
-func namespaceGaps(result search.Result) []search.UnsearchedKind {
-	var gaps []search.UnsearchedKind
-	for _, gap := range result.Unsearched {
-		if strings.HasPrefix(string(gap.Reason), "namespace_") {
+func namespaceGaps(result search.Result) []unsearchedEntry {
+	var gaps []unsearchedEntry
+	for _, gap := range unsearched(result) {
+		if gap.Kind == "*" && gap.Namespaces != nil {
 			gaps = append(gaps, gap)
 		}
 	}
@@ -252,7 +252,7 @@ func TestSearchClusterScopedHitsForNamespaceRestrictedCaller(t *testing.T) {
 	} {
 		result := searchAs(t, env, "search-carol", tc.query)
 		if got := hitKeys(result); !slices.Equal(got, []string{tc.want}) {
-			t.Fatalf("%s: hits %v, want [%s]; coverage %+v", tc.query, got, tc.want, result.Unsearched)
+			t.Fatalf("%s: hits %v, want [%s]; coverage %+v", tc.query, got, tc.want, unsearched(result))
 		}
 	}
 	result := searchAs(t, env, "search-carol", "q=robusta")
@@ -270,7 +270,7 @@ func TestSearchClusterScopedHitsForNamespaceRestrictedCaller(t *testing.T) {
 	for _, query := range []string{"q=kind:ClusterRole+robusta", "q=kind:Node+control-plane"} {
 		result := searchAs(t, env, "search-dave", query)
 		denied := false
-		for _, gap := range result.Unsearched {
+		for _, gap := range unsearched(result) {
 			denied = denied || gap.Reason == "rbac_denied"
 		}
 		if len(result.Hits) != 0 || !denied {
@@ -306,23 +306,23 @@ func TestSearchAttributesNamedNamespacesToRBACOrSelection(t *testing.T) {
 	for _, tc := range []struct {
 		user, query string
 		hits        int
-		want        []search.UnsearchedKind
+		want        []unsearchedEntry
 	}{
 		{"search-erin", "q=robusta", 2, nil},
 		{"search-erin", "q=robusta&globalNs=1", 4, nil},
 		{"search-erin", "q=kind:Pod+robusta", 1, nil},
-		// A namespace that doesn't exist is reported as not searched for an
+		// A namespace that doesn't exist is reported as not found to an
 		// unrestricted caller, never as the pick's doing.
-		{"search-erin", "q=ns:team-b+ns:missing+robusta", 0, []search.UnsearchedKind{
-			{Kind: "*", Reason: "namespace_excluded", Namespaces: []string{"missing"}},
-			{Kind: "*", Reason: "namespace_scope_limited", Namespaces: []string{"team-b"}},
+		{"search-erin", "q=ns:team-b+ns:missing+robusta", 0, []unsearchedEntry{
+			{Kind: "*", Reason: "namespace_not_found", Namespaces: []string{"missing"}},
+			{Kind: "*", Reason: "outside_namespace_selection", Namespaces: []string{"team-b"}},
 		}},
-		{"search-erin", "q=ns:team-b+ns:missing+robusta&globalNs=1", 2, []search.UnsearchedKind{{Kind: "*", Reason: "namespace_excluded", Namespaces: []string{"missing"}}}},
-		{"search-frank", "q=ns:team-b+ns:other+robusta", 0, []search.UnsearchedKind{
-			{Kind: "*", Reason: "namespace_excluded", Namespaces: []string{"other"}},
-			{Kind: "*", Reason: "namespace_scope_limited", Namespaces: []string{"team-b"}},
+		{"search-erin", "q=ns:team-b+ns:missing+robusta&globalNs=1", 2, []unsearchedEntry{{Kind: "*", Reason: "namespace_not_found", Namespaces: []string{"missing"}}}},
+		{"search-frank", "q=ns:team-b+ns:other+robusta", 0, []unsearchedEntry{
+			{Kind: "*", Reason: "namespace_not_visible", Namespaces: []string{"other"}},
+			{Kind: "*", Reason: "outside_namespace_selection", Namespaces: []string{"team-b"}},
 		}},
-		{"search-frank", "q=ns:team-b+ns:other+robusta&globalNs=1", 2, []search.UnsearchedKind{{Kind: "*", Reason: "namespace_excluded", Namespaces: []string{"other"}}}},
+		{"search-frank", "q=ns:team-b+ns:other+robusta&globalNs=1", 2, []unsearchedEntry{{Kind: "*", Reason: "namespace_not_visible", Namespaces: []string{"other"}}}},
 	} {
 		result := searchAs(t, env, tc.user, tc.query)
 		if got := namespaceGaps(result); !reflect.DeepEqual(got, tc.want) || len(result.Hits) != tc.hits {
@@ -353,13 +353,13 @@ func TestSearchReportsFailedNamespaceDiscovery(t *testing.T) {
 
 	for _, tc := range []struct {
 		query string
-		want  search.UnsearchedKind
+		want  unsearchedEntry
 	}{
-		{"q=kind:Pod+robusta", search.UnsearchedKind{Kind: "Pod", Reason: "permission_check_failed"}},
-		{"q=ns:default+robusta", search.UnsearchedKind{Kind: "*", Reason: "permission_check_failed"}},
+		{"q=kind:Pod+robusta", unsearchedEntry{Kind: "Pod", Reason: "permission_check_failed"}},
+		{"q=ns:default+robusta", unsearchedEntry{Kind: "*", Reason: "permission_check_failed"}},
 	} {
 		result := searchAs(t, env, "search-unknown", tc.query)
-		if !result.Partial || len(result.Hits) != 0 || !slices.ContainsFunc(result.Unsearched, func(gap search.UnsearchedKind) bool { return reflect.DeepEqual(gap, tc.want) }) || len(namespaceGaps(result)) != 0 {
+		if !partial(result) || len(result.Hits) != 0 || !slices.ContainsFunc(unsearched(result), func(gap unsearchedEntry) bool { return reflect.DeepEqual(gap, tc.want) }) || len(namespaceGaps(result)) != 0 {
 			t.Fatalf("%s: %+v", tc.query, result)
 		}
 	}
@@ -382,7 +382,7 @@ func TestSearchAttributesNamedNamespacesToThePin(t *testing.T) {
 		k8s.ForceNamespaceScope = false
 		k8s.SetFallbackNamespace("")
 	})
-	want := []search.UnsearchedKind{{Kind: "*", Reason: "namespace_scope_limited", Namespaces: []string{"team-b"}}}
+	want := []unsearchedEntry{{Kind: "*", Reason: "outside_namespace_scope", Namespaces: []string{"team-b"}}}
 	for _, query := range []string{"q=ns:team-b+robusta", "q=ns:team-b+robusta&globalNs=1", "q=kind:Pod+ns:team-b+robusta&globalNs=1"} {
 		result := searchAs(t, env, "search-pinned", query)
 		if got := namespaceGaps(result); !reflect.DeepEqual(got, want) || len(result.Hits) != 0 {
@@ -390,7 +390,7 @@ func TestSearchAttributesNamedNamespacesToThePin(t *testing.T) {
 		}
 	}
 	// A namespace this cluster doesn't have isn't the pin's doing.
-	want = []search.UnsearchedKind{{Kind: "*", Reason: "namespace_excluded", Namespaces: []string{"payments-prd"}}}
+	want = []unsearchedEntry{{Kind: "*", Reason: "namespace_not_found", Namespaces: []string{"payments-prd"}}}
 	for _, query := range []string{"q=ns:payments-prd+robusta", "q=ns:payments-prd+robusta&globalNs=1"} {
 		if got := namespaceGaps(searchAs(t, env, "search-pinned", query)); !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s: namespace coverage %+v, want %+v", query, got, want)

@@ -804,7 +804,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	if resourceDiscovery != nil {
 		gitRepoGVR, hasGitRepos = resourceDiscovery.GetGVRWithGroup("GitRepository", "source.toolkit.fluxcd.io")
 	}
-	gitRepoIDs := make(map[string]string) // ns/name -> gitRepoID
+	var helmReleaseResources []*unstructured.Unstructured
 	if hasGitRepos && dynamicCache != nil {
 		gitRepos, err := dynamicCache.ListNamespaces(gitRepoGVR, opts.Namespaces)
 		if err != nil {
@@ -819,7 +819,6 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			name := repo.GetName()
 
 			repoID := fmt.Sprintf("gitrepository/%s/%s", ns, name)
-			gitRepoIDs[ns+"/"+name] = repoID
 
 			// Extract status fields
 			status, _, _ := unstructured.NestedMap(repo.Object, "status")
@@ -884,6 +883,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			}
 			name := hr.GetName()
 
+			helmReleaseResources = append(helmReleaseResources, hr)
 			hrID := fmt.Sprintf("helmrelease/%s/%s", ns, name)
 			helmReleaseIDs[ns+"/"+name] = hrID
 			if !gitops.FluxTargetsLocalCluster(hr) {
@@ -1183,6 +1183,10 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	var kedaAuthenticationDependencies []declaredDependency
 
 	// 1i. Add KEDA ScaledObject and ScaledJob nodes (CRD - fetched via dynamic cache)
+	// Targets resolve after the StatefulSet pass: StatefulSet IDs aren't
+	// registered yet here, and a ScaledObject may scale one.
+	type pendingScaleTarget struct{ sourceID, kind, key string }
+	var scaledObjectTargets []pendingScaleTarget
 	var scaledObjectGVR schema.GroupVersionResource
 	hasScaledObjects := false
 	if resourceDiscovery != nil {
@@ -1219,31 +1223,9 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			}
 
 			// ScaledObject → target workload edge (via spec.scaleTargetRef)
-			targetAPIVersion, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "apiVersion")
-			targetKind, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "kind")
-			targetName, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "name")
-			if targetKind == "" {
-				targetKind = "Deployment" // KEDA defaults to Deployment when kind is omitted
-			}
-			if targetName != "" && targetRefMatchesTopologyKind(targetKind, targetAPIVersion) {
-				targetKey := ns + "/" + targetName
-				var targetID string
-				switch targetKind {
-				case "Deployment":
-					targetID = deploymentIDs[targetKey]
-				case "StatefulSet":
-					targetID = statefulSetIDs[targetKey]
-				case "Rollout":
-					targetID = rolloutIDs[targetKey]
-				}
-				if targetID != "" {
-					edges = append(edges, Edge{
-						ID:     fmt.Sprintf("%s-to-%s", soID, targetID),
-						Source: soID,
-						Target: targetID,
-						Type:   EdgeUses,
-					})
-				}
+			targetAPIVersion, targetKind, targetName, hasTarget := configrefs.KEDAScaleTarget(so)
+			if hasTarget && targetRefMatchesTopologyKind(targetKind, targetAPIVersion) {
+				scaledObjectTargets = append(scaledObjectTargets, pendingScaleTarget{soID, targetKind, ns + "/" + targetName})
 			}
 		}
 	}
@@ -2699,6 +2681,26 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		trackWorkloadRefs(stsID, sts.Namespace, refs)
 	}
 
+	for _, target := range scaledObjectTargets {
+		var targetID string
+		switch target.kind {
+		case "Deployment":
+			targetID = deploymentIDs[target.key]
+		case "StatefulSet":
+			targetID = statefulSetIDs[target.key]
+		case "Rollout":
+			targetID = rolloutIDs[target.key]
+		}
+		if targetID != "" {
+			edges = append(edges, Edge{
+				ID:     fmt.Sprintf("%s-to-%s", target.sourceID, targetID),
+				Source: target.sourceID,
+				Target: targetID,
+				Type:   EdgeUses,
+			})
+		}
+	}
+
 	// 4. Add CronJob nodes
 	var cronjobs []*batchv1.CronJob
 	{
@@ -3686,6 +3688,12 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			},
 		})
 
+		refs := workloadRefs{secrets: make(map[string]bool)}
+		for _, ref := range configrefs.IngressTLSSecretReferences(ing) {
+			refs.secrets[ref.Name] = true
+		}
+		trackWorkloadRefs(ingID, ing.Namespace, refs)
+
 		// Connect to backend Services
 		for _, svcName := range configrefs.IngressBackendServices(ing) {
 			if svcID, ok := serviceIDs[ing.Namespace+"/"+svcName]; ok {
@@ -4445,10 +4453,17 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			})
 
 			// Connect to target workload via spec.targetRef
-			targetAPIVersion, _, _ := unstructured.NestedString(vpa.Object, "spec", "targetRef", "apiVersion")
 			targetKind, _, _ := unstructured.NestedString(vpa.Object, "spec", "targetRef", "kind")
 			targetName, _, _ := unstructured.NestedString(vpa.Object, "spec", "targetRef", "name")
-			if targetKind != "" && targetName != "" && targetRefMatchesTopologyKind(targetKind, targetAPIVersion) {
+			targetAPIVersion, _, _ := unstructured.NestedString(vpa.Object, "spec", "targetRef", "apiVersion")
+			if targetAPIVersion == "" {
+				builtin, ok := resourceid.BuiltinForKind(targetKind)
+				if !ok {
+					continue
+				}
+				targetAPIVersion = builtin.APIVersion()
+			}
+			if targetName != "" && targetRefMatchesTopologyKind(targetKind, targetAPIVersion) {
 				targetKey := ns + "/" + targetName
 				var targetID string
 				switch targetKind {
@@ -4475,38 +4490,11 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 	}
 
-	// 13. Create Flux source edges. Managed-resource edges are resolved after
-	// generic CRD nodes have been added so their exact API identity is available.
-	for _, ks := range kustomizationResources {
-		ns := ks.GetNamespace()
-		name := ks.GetName()
-		ksID := kustomizationIDs[ns+"/"+name]
-
-		// Also create edge from GitRepository to Kustomization if source ref exists
-		spec, _, _ := unstructured.NestedMap(ks.Object, "spec")
-		if spec != nil {
-			if sourceRef, ok, _ := unstructured.NestedMap(spec, "sourceRef"); ok && sourceRef != nil {
-				refKind, _ := sourceRef["kind"].(string)
-				refName, _ := sourceRef["name"].(string)
-				refNS, _ := sourceRef["namespace"].(string)
-				if refNS == "" {
-					refNS = ns // Default to same namespace
-				}
-
-				if refKind == "GitRepository" {
-					gitRepoID := gitRepoIDs[refNS+"/"+refName]
-					if gitRepoID != "" {
-						edges = append(edges, Edge{
-							ID:     fmt.Sprintf("%s-to-%s", gitRepoID, ksID),
-							Source: gitRepoID,
-							Target: ksID,
-							Type:   EdgeManages, // GitRepo provides source for Kustomization
-						})
-					}
-				}
-			}
-		}
-	}
+	// Source dependencies are not owners. Join all supported source kinds and
+	// referenced charts through the shared observed-target path.
+	fluxRoots := append(append([]*unstructured.Unstructured(nil), kustomizationResources...), helmReleaseResources...)
+	nodes, edges, fluxSourceWarnings := addFluxSourceEdges(nodes, edges, fluxRoots, dynamicCache, opts)
+	warnings = append(warnings, fluxSourceWarnings...)
 
 	// 14. Create FluxCD HelmRelease edges to managed resources
 	// HelmReleases don't have inventory - match by labels:

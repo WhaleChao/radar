@@ -30,7 +30,7 @@ func TestExplicitSearchWarmsRequestedNamespace(t *testing.T) {
 				p.warmError = errors.New("watch failed")
 			}
 			res, err := Search(context.Background(), p, Parse("kind:Widget"), Options{Namespaces: []string{"a", "b"}})
-			if err != nil || res.Partial != fail || !reflect.DeepEqual(p.warmNamespaces, []string{"b"}) {
+			if err != nil || partial(res) != fail || !reflect.DeepEqual(p.warmNamespaces, []string{"b"}) {
 				t.Fatalf("result=%+v err=%v warmed=%v", res, err, p.warmNamespaces)
 			}
 			want := []string{"a", "b"}
@@ -42,7 +42,7 @@ func TestExplicitSearchWarmsRequestedNamespace(t *testing.T) {
 			}
 			if fail {
 				res, _ = Search(context.Background(), p, Parse("kind:Widget"), Options{})
-				if !res.Partial || len(res.Hits) == 0 {
+				if !partial(res) || len(res.Hits) == 0 {
 					t.Fatalf("all-namespace failed warm lost cached hits: %+v", res)
 				}
 			}
@@ -73,10 +73,10 @@ func TestExplicitSearchSharesWarmDeadline(t *testing.T) {
 	}
 	start := time.Now()
 	res, err := Search(context.Background(), p, Parse("kind:Widget"), Options{})
-	if err != nil || time.Since(start) > 3*time.Second || len(p.warmed) != 3 || !res.Partial || len(res.Unsearched) != 3 {
+	if err != nil || time.Since(start) > 3*time.Second || len(p.warmed) != 3 || !partial(res) || len(unsearched(res)) != 3 {
 		t.Fatalf("result=%+v err=%v elapsed=%s warmed=%v", res, err, time.Since(start), p.warmed)
 	}
-	for _, gap := range res.Unsearched {
+	for _, gap := range unsearched(res) {
 		if gap.Reason != "kind_sync_pending" {
 			t.Fatalf("deadline coverage: %+v", gap)
 		}
@@ -94,12 +94,12 @@ func TestBroadSearchIncludesThirdPartyEvent(t *testing.T) {
 		},
 	}
 	res, _ := Search(context.Background(), p, Parse(""), Options{})
-	if res.Partial || len(res.Hits) != 1 || res.Hits[0].Group != "example.io" {
+	if partial(res) || len(res.Hits) != 1 || res.Hits[0].Group != "example.io" {
 		t.Fatalf("third-party Event: %+v", res)
 	}
 	p.observations = map[schema.GroupVersionResource]k8score.DynamicResourceObservation{gvr: {State: k8score.DynamicObservationSyncing}}
 	res, _ = Search(context.Background(), p, Parse(""), Options{})
-	if !res.Partial || !reflect.DeepEqual(res.Unsearched, []UnsearchedKind{{Kind: "*", Reason: "kind_sync_pending", Count: 1}}) {
+	if !partial(res) || !reflect.DeepEqual(unsearched(res), []UnsearchedKind{{Kind: "*", Reason: "kind_sync_pending", Count: 1}}) {
 		t.Fatalf("Event coverage: %+v", res)
 	}
 }

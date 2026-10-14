@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -599,8 +600,41 @@ func TestCNPGTypedScopePreservesKnownExclusionBeforeSync(t *testing.T) {
 	}
 	t.Cleanup(core.Stop)
 	r := httptest.NewRequest(http.MethodGet, "/api/cnpg/workspace?namespace=beta", nil)
-	acc, _, read := testServerSrv.cnpgTypedScope(r, &k8s.ResourceCache{ResourceCache: core}, []string{"beta"}, "", "pods")
+	acc, _, _, read := testServerSrv.cnpgTypedScope(r, &k8s.ResourceCache{ResourceCache: core}, []string{"beta"}, "", "pods")
 	if acc.state != cnpgCoverageError || read == nil || len(read) != 0 {
 		t.Fatalf("excluded pending target = %+v, %#v", acc, read)
+	}
+}
+
+// A namespace Radar's collector doesn't watch is Radar's gap, not the
+// caller's: it must never be reported as denied, which the UI renders as
+// "not readable with your access".
+func TestCNPGTypedScopeSeparatesUncoveredFromDenied(t *testing.T) {
+	core, err := k8score.NewResourceCache(k8score.CacheConfig{
+		Client:         k8sfake.NewClientset(),
+		ResourceScopes: map[string]k8score.ResourceScope{"pods": {Enabled: true, Namespace: "alpha"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(core.Stop)
+	deadline := time.Now().Add(5 * time.Second)
+	for !core.IsKindReady("pods") {
+		if time.Now().After(deadline) {
+			t.Fatal("pods never synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/cnpg/workspace?namespaces=alpha,beta", nil)
+	acc, denied, uncovered, read := testServerSrv.cnpgTypedScope(r, &k8s.ResourceCache{ResourceCache: core}, []string{"alpha", "beta"}, "", "pods")
+	if acc.state != cnpgCoveragePartial || len(denied) != 0 || !slices.Equal(uncovered, []string{"beta"}) || !slices.Equal(read, []string{"alpha"}) {
+		t.Fatalf("scope = %+v denied=%v uncovered=%v read=%v", acc, denied, uncovered, read)
+	}
+	cov := cnpgCoverageOf(acc, denied, uncovered)
+	if len(cov.DeniedNamespaces) != 0 || !slices.Equal(cov.UncoveredNamespaces, []string{"beta"}) {
+		t.Fatalf("coverage = %+v", cov)
+	}
+	if full := cnpgCoverageOf(cnpgKindAccess{state: cnpgCoverageFull}, nil, nil); full.UncoveredNamespaces == nil {
+		t.Fatal("uncoveredNamespaces must always be present so the UI can tell this Radar from an older one")
 	}
 }

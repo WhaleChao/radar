@@ -91,7 +91,7 @@ func TestBroadSearchPermissionChecksDoNotScaleWithNamespacedCRDs(t *testing.T) {
 		},
 		CanReadClusterScoped: func(kind, group, resource string) (bool, bool) { checks++; return true, true },
 	})
-	if err != nil || res.Partial {
+	if err != nil || partial(res) {
 		t.Fatalf("search: %+v %v", res, err)
 	}
 	if checks != 10 {
@@ -115,11 +115,11 @@ func TestBroadCoverageOmitsColdAndUnsupportedBeforeSAR(t *testing.T) {
 		}
 		return true, true
 	}})
-	if res.Partial || len(res.Unsearched) != 0 || len(p.warmed) != 0 {
+	if partial(res) || len(unsearched(res)) != 0 || len(p.warmed) != 0 {
 		t.Fatalf("broad coverage: %+v", res)
 	}
 	res, _ = Search(context.Background(), p, Parse("kind:Thing2"), Options{CanReadClusterScoped: func(string, string, string) (bool, bool) { t.Fatal("unsupported kind issued SAR"); return false, true }})
-	if !res.Partial || len(res.Unsearched) != 1 || res.Unsearched[0].Kind != "Thing2" || res.Unsearched[0].Reason != "collection_not_supported" {
+	if !partial(res) || len(unsearched(res)) != 1 || unsearched(res)[0].Kind != "Thing2" || unsearched(res)[0].Reason != "kind_not_watchable" {
 		t.Fatalf("explicit unsupported: %+v", res)
 	}
 }
@@ -128,7 +128,7 @@ func TestBroadOnlyUnsupportedIsComplete(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"}
 	p := &fakeProvider{kinds: map[schema.GroupVersionResource]string{gvr: "PodMetrics"}, observations: map[schema.GroupVersionResource]k8score.DynamicResourceObservation{gvr: {State: k8score.DynamicObservationUnsupported}}}
 	res, _ := Search(context.Background(), p, Parse(""), Options{})
-	if res.Partial || len(res.Unsearched) != 0 {
+	if partial(res) || len(unsearched(res)) != 0 {
 		t.Fatalf("list-only API makes broad search partial: %+v", res)
 	}
 }
@@ -140,7 +140,7 @@ func TestBroadOnlyUnsupportedIsComplete(t *testing.T) {
 func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 	gadget := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "gadgets"}
 	collectorDenied := &fakeProvider{
-		typedReasons: map[string]string{"Node": "collector_access_denied", "Secret": "collector_access_denied"},
+		typedReasons: map[string]string{"Node": "collector_forbidden", "Secret": "collector_forbidden"},
 		kinds:        map[schema.GroupVersionResource]string{gadget: "Gadget"},
 		namespaced:   map[schema.GroupVersionResource]bool{gadget: false},
 		observations: map[schema.GroupVersionResource]k8score.DynamicResourceObservation{gadget: {State: k8score.DynamicObservationDenied}},
@@ -148,7 +148,7 @@ func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 	for _, tc := range []struct {
 		allowed bool
 		reason  string
-	}{{false, "rbac_denied"}, {true, "collector_access_denied"}} {
+	}{{false, "rbac_denied"}, {true, "collector_forbidden"}} {
 		res, _ := Search(context.Background(), collectorDenied, Parse("kind:Node kind:Secret kind:Gadget"), Options{
 			NamespacedRBAC: func([]string, string, string) (string, []string) {
 				if tc.allowed {
@@ -163,8 +163,8 @@ func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 			{Kind: "Node", Reason: readreason.Code(tc.reason)},
 			{Kind: "Secret", Reason: readreason.Code(tc.reason)},
 		}
-		if !reflect.DeepEqual(res.Unsearched, want) {
-			t.Fatalf("caller allowed=%v: %+v, want %+v", tc.allowed, res.Unsearched, want)
+		if !reflect.DeepEqual(unsearched(res), want) {
+			t.Fatalf("caller allowed=%v: %+v, want %+v", tc.allowed, unsearched(res), want)
 		}
 	}
 	if res, _ := Search(context.Background(), collectorDenied, Parse("robusta"), Options{
@@ -174,8 +174,8 @@ func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 			}
 			return true, true
 		},
-	}); res.Partial {
-		t.Fatalf("broad search reported Radar's setup: %+v", res.Unsearched)
+	}); partial(res) {
+		t.Fatalf("broad search reported Radar's setup: %+v", unsearched(res))
 	}
 
 	loading := &fakeProvider{typedReasons: map[string]string{"Secret": "kind_sync_pending", "Node": "kind_sync_failed"}}
@@ -191,8 +191,8 @@ func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 		q := Parse(query)
 		opts := denied
 		opts.ScopeNamespaces(q, nil, nil)
-		if res, _ := Search(context.Background(), loading, q, opts); res.Partial || len(res.Unsearched) != 0 {
-			t.Fatalf("%s: unreadable kinds reported to the caller: %+v", query, res.Unsearched)
+		if res, _ := Search(context.Background(), loading, q, opts); partial(res) || len(unsearched(res)) != 0 {
+			t.Fatalf("%s: unreadable kinds reported to the caller: %+v", query, unsearched(res))
 		}
 	}
 	res, _ := Search(context.Background(), loading, Parse("kind:Secret kind:Node kind:Gadget"), denied)
@@ -201,8 +201,8 @@ func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 		{Kind: "Node", Reason: "rbac_denied"},
 		{Kind: "Secret", Reason: "rbac_denied"},
 	}
-	if !reflect.DeepEqual(res.Unsearched, want) {
-		t.Fatalf("named unreadable kinds = %+v, want %+v", res.Unsearched, want)
+	if !reflect.DeepEqual(unsearched(res), want) {
+		t.Fatalf("named unreadable kinds = %+v, want %+v", unsearched(res), want)
 	}
 	res, _ = Search(context.Background(), loading, Parse("robusta"), Options{
 		NamespacedRBAC:       func([]string, string, string) (string, []string) { return "", nil },
@@ -212,8 +212,8 @@ func TestCallerAccessPrecedesTransientCoverage(t *testing.T) {
 		{Kind: "*", Reason: "kind_sync_pending", Count: 2},
 		{Kind: "Node", Reason: "kind_sync_failed"},
 	}
-	if !reflect.DeepEqual(res.Unsearched, want) {
-		t.Fatalf("readable loading kinds = %+v, want %+v", res.Unsearched, want)
+	if !reflect.DeepEqual(unsearched(res), want) {
+		t.Fatalf("readable loading kinds = %+v, want %+v", unsearched(res), want)
 	}
 }
 
@@ -233,7 +233,7 @@ func TestDynamicObservationReasonsAndRequestedScope(t *testing.T) {
 	p := &fakeProvider{kinds: map[schema.GroupVersionResource]string{gvr: "Widget"}, namespaced: map[schema.GroupVersionResource]bool{gvr: true}, observations: map[schema.GroupVersionResource]k8score.DynamicResourceObservation{}}
 	p.observations[gvr] = k8score.DynamicResourceObservation{State: k8score.DynamicObservationSyncing, ReasonCode: "sync_stalled"}
 	res, _ := Search(context.Background(), p, Parse("kind:Widget"), Options{})
-	if !res.Partial || len(res.Unsearched) != 1 || string(res.Unsearched[0].Reason) != "kind_sync_failed" || len(p.warmed) != 0 {
+	if !partial(res) || len(unsearched(res)) != 1 || string(unsearched(res)[0].Reason) != "kind_sync_failed" || len(p.warmed) != 0 {
 		t.Fatalf("stalled sync: %+v", res)
 	}
 	p.warmError = fmt.Errorf("watch failed")
@@ -243,7 +243,7 @@ func TestDynamicObservationReasonsAndRequestedScope(t *testing.T) {
 		partial bool
 	}{{[]string{"a"}, false}, {[]string{"a", "b"}, true}, {nil, true}} {
 		res, _ = Search(context.Background(), p, Parse("kind:Widget"), Options{Namespaces: tc.ns})
-		if res.Partial != tc.partial {
+		if partial(res) != tc.partial {
 			t.Fatalf("namespace %v: %+v", tc.ns, res)
 		}
 	}
@@ -260,16 +260,16 @@ func TestWarmingRefusedNamespaceIsCollectorScope(t *testing.T) {
 		observations: map[schema.GroupVersionResource]k8score.DynamicResourceObservation{gvr: {State: k8score.DynamicObservationSynced, Scope: k8score.DynamicObservationScopeExplicitNamespaces, Namespaces: []string{"a"}}},
 		warmError:    apierrors.NewUnauthorized("token expired"),
 	}
-	if res, _ := Search(context.Background(), p, Parse("kind:Widget"), Options{Namespaces: []string{"a", "b"}}); res.Partial || len(res.Unsearched) != 0 {
-		t.Fatalf("kind: alone reported namespace scope: %+v", res.Unsearched)
+	if res, _ := Search(context.Background(), p, Parse("kind:Widget"), Options{Namespaces: []string{"a", "b"}}); partial(res) || len(unsearched(res)) != 0 {
+		t.Fatalf("kind: alone reported namespace scope: %+v", unsearched(res))
 	}
 	q := Parse("kind:Widget ns:a ns:b")
 	var opts Options
 	opts.ScopeNamespaces(q, nil, nil)
 	res, _ := Search(context.Background(), p, q, opts)
 	want := []UnsearchedKind{{Kind: "*", Reason: "collector_scope_limited", Namespaces: []string{"b"}}}
-	if !res.Partial || !reflect.DeepEqual(res.Unsearched, want) {
-		t.Fatalf("refused named namespace = %+v, want %+v", res.Unsearched, want)
+	if !partial(res) || !reflect.DeepEqual(unsearched(res), want) {
+		t.Fatalf("refused named namespace = %+v, want %+v", unsearched(res), want)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestPermissionCheckFailuresAreNotReportedAsDenial(t *testing.T) {
 			NamespacedRBAC:       func([]string, string, string) (string, []string) { return "permission_check_failed", nil },
 			CanReadClusterScoped: func(string, string, string) (bool, bool) { return false, false },
 		})
-		if !res.Partial || len(res.Unsearched) != 1 || res.Unsearched[0].Reason != "permission_check_failed" {
+		if !partial(res) || len(unsearched(res)) != 1 || unsearched(res)[0].Reason != "permission_check_failed" {
 			t.Fatalf("failed SAR: %+v", res)
 		}
 	}

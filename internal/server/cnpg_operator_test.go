@@ -407,7 +407,7 @@ func TestCNPGTypedReadersPreserveReadiness(t *testing.T) {
 				t.Fatalf("operator = %+v", got)
 			}
 			r := httptest.NewRequest(http.MethodGet, "/api/cnpg/workspace", nil)
-			acc, _, pods, _ := testServerSrv.cnpgWorkspaceReadPods(r, cache, nil, map[string]types.UID{})
+			acc, _, _, pods, _ := testServerSrv.cnpgWorkspaceReadPods(r, cache, nil, map[string]types.UID{})
 			if acc.state != tt.state || len(pods) != 0 {
 				t.Fatalf("pod evidence = %+v, %v", acc, pods)
 			}

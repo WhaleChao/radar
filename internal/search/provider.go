@@ -54,6 +54,14 @@ func NewCacheProvider() *CacheProvider {
 }
 
 func (p *CacheProvider) ListTyped(kind string, namespaces []string) ([]runtime.Object, error) {
+	// A namespace whose informer has synced is read from its own store, so a
+	// kind still loading elsewhere — whose lister is withheld until it has
+	// loaded everywhere — can still be searched there.
+	if namespaces != nil {
+		if objs, ok := p.cache.ReadableObjects(kind, namespaces); ok {
+			return objs, nil
+		}
+	}
 	return k8s.FetchResourceList(p.cache, kind, namespaces)
 }
 
@@ -124,10 +132,10 @@ func (p *CacheProvider) TypedCoverage(kind string, namespaces []string) readreas
 		return readreason.KindSyncFailed
 	case k8s.KindUnavailable:
 		if apierrors.IsUnauthorized(p.probeErrors[resource]) {
-			return readreason.CollectorUnauthorized
+			return readreason.CollectorCredentialsRejected
 		}
 		if p.permissions != nil && !p.permissions.CanList(kind) {
-			return readreason.CollectorAccessDenied
+			return readreason.CollectorForbidden
 		}
 		return readreason.KindNotWatched
 	}
@@ -136,6 +144,17 @@ func (p *CacheProvider) TypedCoverage(kind string, namespaces []string) readreas
 	}
 
 	return ""
+}
+
+// TypedReadable returns the namespaces of a namespace-scoped collector's kind
+// whose own informers have synced, of namespaces (nil: all it collects). A
+// kind one informer serves has no partial state, so it returns nil.
+func (p *CacheProvider) TypedReadable(kind string, namespaces []string) []string {
+	assessment := p.cache.AssessKindRead(k8s.CanonicalBuiltinKind(kind), namespaces)
+	if assessment.AllNamespaces {
+		return nil
+	}
+	return assessment.Read
 }
 
 func (p *CacheProvider) DynamicCacheStopped() bool {

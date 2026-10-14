@@ -111,29 +111,29 @@ func TestSearchCoverageMatchesAcrossRESTAndMCP(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = session.Close() })
 
-	var deniedGadgets []search.UnsearchedKind
+	var deniedGadgets []unsearchedEntry
 	for i := range 25 {
-		deniedGadgets = append(deniedGadgets, search.UnsearchedKind{Kind: fmt.Sprintf("Gadget%02d", i), Group: "gadgets.example.io", Reason: "collector_access_denied"})
+		deniedGadgets = append(deniedGadgets, unsearchedEntry{Kind: fmt.Sprintf("Gadget%02d", i), Group: "gadgets.example.io", Reason: "collector_forbidden"})
 	}
 	for _, tc := range []struct {
 		query  string
-		want   []search.UnsearchedKind
+		want   []unsearchedEntry
 		before func()
 	}{
 		// Unwatched kinds, list-only APIs and kinds Radar's own identity may
 		// not list are the search's scope: a broad query names none of them.
-		{"robusta", []search.UnsearchedKind{}, nil},
-		{"kind:Widget robusta", []search.UnsearchedKind{}, nil},
-		{"kind:NoSuchKindXyz robusta", []search.UnsearchedKind{{Kind: "NoSuchKindXyz", Reason: "unknown_kind"}}, nil},
-		{"kind:Report robusta", []search.UnsearchedKind{{Kind: "Report", Group: "example.io", Reason: "collection_not_supported"}}, nil},
+		{"robusta", []unsearchedEntry{}, nil},
+		{"kind:Widget robusta", []unsearchedEntry{}, nil},
+		{"kind:NoSuchKindXyz robusta", []unsearchedEntry{{Kind: "NoSuchKindXyz", Reason: "kind_unknown"}}, nil},
+		{"kind:Report robusta", []unsearchedEntry{{Kind: "Report", Group: "example.io", Reason: "kind_not_watchable"}}, nil},
 		{strings.Join(gadgetTerms, " ") + " robusta", deniedGadgets, nil},
-		{"robusta", []search.UnsearchedKind{{Kind: "*", Reason: "kind_sync_pending", Count: 1}}, func() {
+		{"robusta", []unsearchedEntry{{Kind: "*", Reason: "kind_sync_pending", Count: 1}}, func() {
 			if err := dc.EnsureWatching(probes); err == nil {
 				t.Fatal("unanswered walk unexpectedly granted")
 			}
 		}},
-		{"kind:ProbeWidget robusta", []search.UnsearchedKind{{Kind: "ProbeWidget", Group: probes.Group, Reason: "kind_sync_pending"}}, nil},
-		{"robusta", []search.UnsearchedKind{{Kind: "ProbeWidget", Group: probes.Group, Reason: "read_error"}}, func() {
+		{"kind:ProbeWidget robusta", []unsearchedEntry{{Kind: "ProbeWidget", Group: probes.Group, Reason: "kind_sync_pending"}}, nil},
+		{"robusta", []unsearchedEntry{{Kind: "ProbeWidget", Group: probes.Group, Reason: "read_error"}}, func() {
 			deadline := time.Now().Add(4 * time.Second)
 			for dc.Observation(probes).ProbeRetrying && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
@@ -142,8 +142,8 @@ func TestSearchCoverageMatchesAcrossRESTAndMCP(t *testing.T) {
 				t.Fatal("retry did not exhaust")
 			}
 		}},
-		{"kind:ProbeWidget robusta", []search.UnsearchedKind{{Kind: "ProbeWidget", Group: probes.Group, Reason: "read_error"}}, nil},
-		{"robusta", []search.UnsearchedKind{}, func() {
+		{"kind:ProbeWidget robusta", []unsearchedEntry{{Kind: "ProbeWidget", Group: probes.Group, Reason: "read_error"}}, nil},
+		{"robusta", []unsearchedEntry{}, func() {
 			probeAnswered.Store(true)
 			if err := dc.EnsureWatchingContext(t.Context(), probes, "a"); err != nil {
 				t.Fatal(err)
@@ -190,14 +190,17 @@ func TestSearchCoverageMatchesAcrossRESTAndMCP(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if !reflect.DeepEqual(restResult.Unsearched, tc.want) || restResult.Partial != (len(tc.want) > 0) {
-			t.Fatalf("%s: REST coverage %+v (partial=%v), want %+v", tc.query, restResult.Unsearched, restResult.Partial, tc.want)
+		if !reflect.DeepEqual(unsearched(restResult), tc.want) || partial(restResult) != (len(tc.want) > 0) {
+			t.Fatalf("%s: REST coverage %+v (partial=%v), want %+v", tc.query, unsearched(restResult), partial(restResult), tc.want)
 		}
-		if !reflect.DeepEqual(restResult.Unsearched, viaMCP.Unsearched) || restResult.Partial != viaMCP.Partial {
-			t.Fatalf("%s: REST coverage %+v differs from MCP %+v", tc.query, restResult.Unsearched, viaMCP.Unsearched)
+		if !reflect.DeepEqual(unsearched(restResult), unsearched(viaMCP.Result)) || partial(restResult) != partial(viaMCP.Result) {
+			t.Fatalf("%s: REST coverage %+v differs from MCP %+v", tc.query, unsearched(restResult), unsearched(viaMCP.Result))
 		}
-		if (viaMCP.CoverageHint != "") != viaMCP.Partial {
-			t.Fatalf("%s: MCP partial=%v with coverageHint %q", tc.query, viaMCP.Partial, viaMCP.CoverageHint)
+		// A partial result always explains itself; so does a narrowed broad
+		// search that found nothing, which is no proof of absence.
+		explains := partial(viaMCP.Result) || (len(viaMCP.Coverage.NarrowedBy) > 0 && len(viaMCP.Hits) == 0)
+		if (viaMCP.CoverageHint != "") != explains {
+			t.Fatalf("%s: MCP partial=%v with coverageHint %q", tc.query, partial(viaMCP.Result), viaMCP.CoverageHint)
 		}
 		for _, gap := range tc.want {
 			if gap.Reason == "kind_sync_pending" && !strings.Contains(viaMCP.CoverageHint, "retry in a few seconds") {

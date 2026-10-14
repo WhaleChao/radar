@@ -76,20 +76,18 @@ func TestSearchStopsOnCancellation(t *testing.T) {
 
 func TestCoverageDeduplicatesByIdentityAndReason(t *testing.T) {
 	c := newCoverage(Parse("kind:Widget"))
-	c.kind("Widget", "a.io", readreason.ReadError).RetryWithKind = true
 	for range 5000 {
 		c.kind("Widget", "a.io", readreason.ReadError)
 	}
 	c.kind("Widget", "b.io", readreason.ReadError)
 	c.kind("Widget", "a.io", readreason.KindSyncFailed)
-	c.star(readreason.ReadError)
-	c.star(readreason.ReadError)
+	c.catalog(readreason.ReadError)
+	c.catalog(readreason.ReadError)
 	got := c.result()
-	if len(got) != 4 {
+	// read_error over both Widgets, kind_sync_failed over one, and read_error
+	// over an unknown set of kinds: one gap per reason and dimension.
+	if len(got) != 3 || got[0].Code != readreason.KindSyncFailed || got[1].Kinds == nil || got[1].Kinds.Count != 2 || got[2].Kinds != nil {
 		t.Fatalf("gaps = %+v", got)
-	}
-	if !c.kind("Widget", "a.io", readreason.ReadError).RetryWithKind {
-		t.Fatal("duplicate lost retry guidance")
 	}
 }
 
@@ -202,7 +200,7 @@ func TestSearchClusterWideCacheStopsBetweenNamespaces(t *testing.T) {
 	if got.Searched != 1 || !slices.Equal(hitNames(got), []string{"Widget/a/robusta-a"}) {
 		t.Fatalf("search included objects after shutdown: %+v", got)
 	}
-	if got.Partial || len(got.Unsearched) != 0 {
+	if partial(got) || len(unsearched(got)) != 0 {
 		t.Fatalf("shutdown changed unwatched-kind coverage: %+v", got)
 	}
 }
@@ -221,7 +219,7 @@ func TestSearchClusterWideProbeGapRemainsNamespaceSpecific(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.observations != 3 || p.reads != 1 || !got.Partial {
+	if p.observations != 3 || p.reads != 1 || !partial(got) {
 		t.Fatalf("observations=%d reads=%d result=%+v", p.observations, p.reads, got)
 	}
 }
@@ -232,7 +230,7 @@ func TestCoverageNamespaceDeduplicationPreservesSort(t *testing.T) {
 		c.namespaces(readreason.CollectorScopeLimited, "z", "a", "ambient")
 	}
 	got := c.result()
-	if len(got) != 1 || len(got[0].Namespaces) != 2 || got[0].Namespaces[0] != "a" || got[0].Namespaces[1] != "z" {
+	if len(got) != 1 || got[0].Namespaces == nil || got[0].Namespaces.Count != 2 || got[0].Namespaces.Sample[0] != "a" || got[0].Namespaces.Sample[1] != "z" {
 		t.Fatalf("gaps=%+v", got)
 	}
 }
@@ -242,7 +240,7 @@ func TestSearchUnknownKindDeduplicatesCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Unsearched) != 1 || got.Unsearched[0].Reason != readreason.UnknownKind {
-		t.Fatalf("gaps=%+v", got.Unsearched)
+	if len(unsearched(got)) != 1 || unsearched(got)[0].Reason != readreason.KindUnknown {
+		t.Fatalf("gaps=%+v", unsearched(got))
 	}
 }

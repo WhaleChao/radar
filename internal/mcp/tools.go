@@ -19,11 +19,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/skyhook-io/radar/internal/filter"
 	"github.com/skyhook-io/radar/internal/helm"
@@ -40,6 +42,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/issuesapi"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 	"github.com/skyhook-io/radar/pkg/schedulinginsight"
 	"github.com/skyhook-io/radar/pkg/servinginsight"
@@ -124,6 +127,8 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 			"(pods/po, deployments/deploy, services/svc, configmaps/cm, CRDs). Returns compact Kubernetes-shaped " +
 			"rows plus summaryContext by default (managedBy, health, issueCount) so you can " +
 			"compare many similar resources and pick suspects before calling get_resource. " +
+			"Returns {coverage, items}: rows cover only coverage.scope (narrowedBy: your access or Radar's " +
+			"namespace pin); status \"partial\" names unread parts in gaps[] by code. Failures return {error, error_code}. " +
 			"For unknown kind/name searches, use search. For broad health triage, use " +
 			"get_dashboard or issues first.",
 		Annotations: readOnly,
@@ -147,7 +152,8 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 			"fetching resources one by one. Use the group parameter for ambiguous " +
 			"kinds such as Knative Service vs core Service. When recentChanges entries " +
 			"carry `application_configuration_change: true`, it is a factual edit " +
-			"classification and narrow ranking hint, not a causal or universal relevance verdict.",
+			"classification and narrow ranking hint, not a causal or universal relevance verdict. " +
+			"Failures return {error, error_code}; only object_not_found means it is absent.",
 		Annotations: readOnly,
 	}, logToolCall("get_resource", handleGetResource))
 
@@ -211,26 +217,26 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 		Annotations: readOnly,
 	}, logToolCall("get_pod_logs", handleGetPodLogs))
 
-	diagnoseDescription := "Collect a bounded, point-in-time evidence bundle for one narrowed workload, " +
-		"GitOps reconciler, or network entry. It combines signals in one round-trip to support diagnosis; " +
+	diagnoseDescription := "Get a bounded, point-in-time evidence bundle for one narrowed workload, " +
+		"GitOps reconciler or network entry. Combines signals in one round-trip; " +
 		"it does not run an agent and is not an authoritative root-cause verdict or an exhaustive account. " +
-		"After narrowing, use for CrashLoopBackOff, OOMKilled, image-pull, readiness, scheduling, GitOps sync/health, " +
-		"or traffic not reaching a service, route, or ingress. For Pod, Deployment, StatefulSet, DaemonSet, or Argo Rollout it " +
-		"bundles resource context, selected/capped current and previous logs, Warning events, startup blockers, " +
-		"related issues, and recent workload/ConfigMap changes. " +
-		"Warning events are a capped sample; use get_events for a broader, dedicated event read. " +
+		"Use for CrashLoopBackOff, OOMKilled, image-pull, readiness, scheduling, GitOps sync/health, " +
+		"or traffic not reaching a service, route or ingress. Pod, Deployment, StatefulSet, DaemonSet and Argo Rollout " +
+		"bundle resource context, selected/capped current and previous logs, Warning events, startup blockers, " +
+		"related issues and recent workload/ConfigMap changes. " +
+		"Warning events are a capped sample for the observed resource and Pods; UID-less evidence cannot prove an incarnation. Use get_events for a broader, dedicated event read, including history. " +
 		"`crashCause` is evidence, not a root-cause verdict. `logLineSelection` ranks " +
 		"`" + crashLineFatalPattern + "`, `" + crashLineHeaderOnly + "`, `" +
 		crashLineLastMatchedLine + "`, then `" + crashLineLogTail + "`. Inspect source logs for low-confidence " +
 		"selections; `traceback_header_only` means the informative line was not captured. " +
 		"`auditSummary.highestSeverity` uses static-posture critical|high|medium|low (built-ins high|medium), " +
 		"unlike live `issueSummary` critical|warning. `application_configuration_change: true` classifies an edit; " +
-		"it is not a causal or universal relevance verdict. Application, Kustomization, and Flux HelmRelease return reconciler " +
-		"status and parsed issues without logs. Network entry kinds return per-route reachability evidence: trust " +
+		"it is not a causal or universal relevance verdict. Application, Kustomization and Flux HelmRelease return " +
+		"status and parsed issues; no logs. Network entries give per-route reachability evidence: trust " +
 		"`routes[].outcome` + `confidence` and `headline`/`diagnosis` over coarse `verdict`; `indirect` means only the " +
-		"API-server proxy reached it, not the live path. Point-in-time means the bundle is frozen from this call, " +
+		"API-server proxy reached it, not the live path. Point-in-time means frozen from this call, " +
 		"not that every source was read atomically; preserve collection limits, errors, timestamps, and confidence. " +
-		"Prefer a targeted resource/log/event tool for one facet; use get_resource for other kinds."
+		"For one facet, prefer resource/log/event tools; use get_resource for other kinds."
 	if includeWrites {
 		tool := &mcp.Tool{
 			Name: "diagnose",
@@ -859,35 +865,30 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 			return nil, nil, resourcePermissionError(checked, "list", gvrGroup, gvrResource, "")
 		}
 	}
-	var allowed []string
-	var err error
+	var target readTarget
+	var gaps gapSet
 	if !clusterScoped {
-		allowed, err = resourceReadNamespaces(ctx, requested)
-		if err != nil {
+		var err error
+		if target, err = resolveReadTarget(ctx, requested); err != nil {
 			return nil, nil, err
 		}
 	}
+	readable := target.namespaces
 	if kind == "secrets" {
-		allowed, err = resourceSecretNamespaces(ctx, allowed, "list")
-		if err != nil {
+		var secretGaps gapSet
+		var err error
+		if readable, secretGaps, err = narrowSecrets(ctx, readable, "list"); err != nil {
 			return nil, nil, err
 		}
+		gaps.merge(secretGaps)
 	}
-	cache, readScope, err := resourceReadCache(ctx, kind, group, allowed)
+	cache, plan, err := resourceReadCache(ctx, kind, group, readable)
 	if err != nil {
-		return nil, nil, err
-	}
-	var coverage *listCoverage
-	if !clusterScoped && allowed == nil && readScope != nil {
-		coverage = collectorLimitedCoverage(kind, readreason.CollectorScopeLimited, readScope)
-	}
-	allowed = readScope
-
-	// For cluster-scoped reads, force a cluster-wide list (don't iterate
-	// per allowed namespace — cluster-scoped resources don't live there).
-	listScope := allowed
-	if clusterScoped {
-		listScope = nil
+		// Secrets withheld from the caller are part of why nothing was read.
+		if !gaps.empty() && gaps.absorb(err) {
+			err = gaps.failure()
+		}
+		return nil, nil, withListCoverage(ctx, err, target, clusterScoped)
 	}
 
 	// When a group is specified, route to the dynamic cache so CRDs whose
@@ -898,30 +899,50 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 	// (deployments?group=apps) is a typed lookup — the dynamic cache has no
 	// informer for built-ins — so only true CRDs / plural collisions go dynamic.
 	// Mirrors the group-aware dispatch in the REST handlers.
-	if group != "" && !k8s.TypedKindOwnsGroup(kind, group) {
-		return listDynamicResources(ctx, cache, kind, group, listScope, clusterScoped, input.Context)
+	if plan == nil || (group != "" && !k8s.TypedKindOwnsGroup(kind, group)) {
+		return listDynamicResources(ctx, cache, kind, group, target, readable, gaps, clusterScoped, input.Context)
 	}
 
-	// Try typed cache first (group=="" → core/built-in lookup).
-	objs, err := k8s.FetchResourceList(cache, kind, listScope)
+	readAll := plan.all
+	read := plan.read
+	listScope := read
+	if readAll || clusterScoped {
+		listScope = nil
+	}
+	gaps.merge(plan.gaps)
+	var objs []runtime.Object
+	if plan.whole {
+		objs, err = k8s.FetchResourceList(cache, kind, listScope)
+	} else {
+		// The kind is still loading elsewhere: read the namespaces whose own
+		// informers have synced straight from their stores.
+		var ok bool
+		if objs, ok = cache.ReadableObjects(plan.resource, read); !ok {
+			err = readErrorf(readreason.KindSyncPending, "%s are still loading, please retry shortly", plan.resource)
+		}
+	}
 	if !resourceReadCacheIsCurrent(cache) {
-		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+		return nil, nil, errConnectionChanged()
 	}
 	if err == k8s.ErrUnknownKind {
 		// Fall through to dynamic cache for CRDs. ClassifyKindScope/SAR
 		// above already authorized cluster-scoped CRDs; namespaced CRDs
-		// are scoped via listScope. Pass clusterScoped through so the
+		// are scoped via the target. Pass clusterScoped through so the
 		// issue index drops the namespace filter for cluster-scoped
 		// CRDs — those issues live at namespace="" and would otherwise
 		// be filtered out by the user's namespaced-access set.
-		return listDynamicResources(ctx, cache, kind, group, listScope, clusterScoped, input.Context)
+		return listDynamicResources(ctx, cache, kind, group, target, readable, gaps, clusterScoped, input.Context)
 	}
 	if err != nil {
+		var re *readError
+		if errors.As(err, &re) {
+			return nil, nil, err
+		}
 		return nil, nil, readErrorf(readreason.ReadError, "failed to list %s: %w", kind, err)
 	}
 
-	if allowed != nil && !clusterScoped {
-		objs = retainAllowedObjects(objs, allowed, kind)
+	if listScope != nil {
+		objs = retainAllowedObjects(objs, listScope, kind)
 	}
 
 	results, err := aicontext.MinifyList(objs, aicontext.LevelSummary)
@@ -939,29 +960,32 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 	// cluster-scoped RBAC gate above (canReadClusterScopedKind) already
 	// authorized the read, so we pass nil here to compose cluster-wide.
 	if input.Context != "none" {
-		idxNamespaces := allowed
-		if clusterScoped {
-			idxNamespaces = nil
-		}
-		if builder := newResourceSummaryContextBuilder(ctx, idxNamespaces); builder != nil {
+		if builder := newResourceSummaryContextBuilder(ctx, listScope); builder != nil {
 			summarycontext.AttachToTypedList(results, objs, builder)
 		}
 	}
 
 	if !resourceReadCacheIsCurrent(cache) {
-		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+		return nil, nil, errConnectionChanged()
 	}
-	return listResult(results, coverage)
+	return listResult(results, listCoverageFor(kind, clusterScoped, target, read, readAll, gaps.gaps(ctx, resourceapi.MCPSample)))
 }
 
-func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, group string, namespaces []string, clusterScoped bool, contextMode string) (*mcp.CallToolResult, any, error) {
+// listDynamicResources lists a kind the dynamic cache serves. namespaces is
+// what the caller may read of target (nil: every namespace); gaps carries what
+// the caller's own access already withheld. Each namespace is a separate read
+// unit: one that fails is a gap, and the list fails only when none succeeds.
+func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, group string, target readTarget, namespaces []string, gaps gapSet, clusterScoped bool, contextMode string) (*mcp.CallToolResult, any, error) {
 	dynamicCache := k8s.GetDynamicResourceCache()
 	discovery := k8s.GetResourceDiscovery()
 	current := func() bool {
 		return cache == k8s.GetResourceCache() && dynamicCache == k8s.GetDynamicResourceCache() && discovery == k8s.GetResourceDiscovery()
 	}
 	if !current() {
-		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+		return nil, nil, errConnectionChanged()
+	}
+	if clusterScoped {
+		namespaces = nil
 	}
 	gvr, found := discoveredGVR(kind, group)
 	// No namespaces means an unrestricted caller and no --namespace-scope pin
@@ -971,7 +995,7 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 	listAt := func(ns string) func() ([]*unstructured.Unstructured, error) {
 		return func() ([]*unstructured.Unstructured, error) {
 			if !current() {
-				return nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+				return nil, errConnectionChanged()
 			}
 			if found && dynamicCache != nil {
 				if k8s.ShouldBypassDynamicInformer(gvr) {
@@ -982,25 +1006,21 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 			return cache.ListDynamicWithGroup(ctx, kind, ns, group)
 		}
 	}
+	collector := dynamicCollectorTarget(kind, group, "list")
 
 	var rawItems []*unstructured.Unstructured
 	listed := false
-	// limitedBy is why an unrestricted read had to settle for the namespaces
-	// below instead of the cluster: Radar's identity was refused the
-	// cluster-wide list for this request (a direct kind), or the kind's
-	// informers cover only some namespaces.
-	var limitedBy readreason.Code
 	if directGVR, ok := dynamicReadGVR(kind, group); unrestrictedAll && ok && k8s.ShouldBypassDynamicInformer(directGVR) {
 		// A direct kind has no informer to establish its coverage. When the
 		// collector is refused cluster-wide, read the namespaces custom
-		// resource informers fall back to, under the same coverage rule.
+		// resource informers fall back to; the rest is Radar's own refusal.
 		items, err := readDynamicScope(ctx, kind, group, "", "list", listAt(""))
 		switch {
 		case err == nil:
 			rawItems, listed = items, true
-		case apierrors.IsForbidden(err) && dynamicCache != nil && len(dynamicCache.FallbackNamespaces()) > 0:
+		case isCollectorForbidden(err) && dynamicCache != nil && len(dynamicCache.FallbackNamespaces()) > 0:
 			namespaces = dynamicCache.FallbackNamespaces()
-			limitedBy = readreason.CollectorAccessDenied
+			gaps.add(readreason.CollectorForbidden, err)
 		default:
 			return nil, nil, err
 		}
@@ -1011,55 +1031,61 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 		}
 		if observation := dynamicCache.Observation(gvr); observation.Scope == k8score.DynamicObservationScopeExplicitNamespaces {
 			namespaces = observation.Namespaces
-			limitedBy = readreason.CollectorScopeLimited
+			gaps.add(readreason.CollectorScopeLimited, coverageError(ctx, collector, nil, namespaces, nil))
 		}
 	}
 
-	var coverage *listCoverage
+	readAll := false
+	var read []string
 	switch {
 	case listed:
-	case len(namespaces) > 0:
-		var read, uncovered []string
+		readAll = true
+	case namespaces != nil:
+		read = []string{}
+		var refused []string
 		var refusal error
 		for _, ns := range namespaces {
 			items, err := readDynamicScope(ctx, kind, group, ns, "list", listAt(ns))
-			if apierrors.IsForbidden(err) {
-				uncovered = append(uncovered, ns)
-				if refusal == nil {
-					refusal = err
-				}
-				continue
-			}
 			if err != nil {
-				return nil, nil, err
+				code, classified := readErrorCodeOf(err)
+				if !classified || code == readreason.ConnectionChanged {
+					return nil, nil, err
+				}
+				if code == readreason.CollectorForbidden {
+					refused = append(refused, ns)
+					if refusal == nil {
+						refusal = collectorCause(err)
+					}
+				}
+				gaps.add(code, err, ns)
+				continue
 			}
 			read = append(read, ns)
 			rawItems = append(rawItems, items...)
 		}
-		covered := slices.Clone(read)
-		if found && dynamicCache != nil {
-			if observation := dynamicCache.Observation(gvr); observation.Scope == k8score.DynamicObservationScopeExplicitNamespaces {
-				for _, ns := range observation.Namespaces {
-					if !slices.Contains(covered, ns) {
-						covered = append(covered, ns)
+		if len(read) == 0 {
+			if len(refused) > 1 {
+				// One sentence for every namespace Radar was refused in,
+				// rather than the first namespace's.
+				var covered []string
+				if found && dynamicCache != nil {
+					if observation := dynamicCache.Observation(gvr); observation.Scope == k8score.DynamicObservationScopeExplicitNamespaces {
+						covered = observation.Namespaces
 					}
 				}
+				gaps.firstErr[readreason.CollectorForbidden] = coverageError(ctx, collector, refused, covered, refusal)
 			}
-		}
-		target := dynamicCollectorTarget(kind, group, "list")
-		if err := namespaceCoverageError(ctx, target, unrestrictedAll, len(read), uncovered, covered, refusal); err != nil {
-			return nil, nil, err
-		}
-		namespaces = read
-		if limitedBy != "" {
-			coverage = collectorLimitedCoverage(target.resource, limitedBy, read)
+			return nil, nil, withListCoverage(ctx, gaps.failure(), target, clusterScoped)
 		}
 	default:
 		items, err := readDynamicScope(ctx, kind, group, "", "list", listAt(""))
 		if err != nil {
-			return nil, nil, err
+			if !gaps.empty() && gaps.absorb(err) {
+				err = gaps.failure()
+			}
+			return nil, nil, withListCoverage(ctx, err, target, clusterScoped)
 		}
-		rawItems = items
+		rawItems, readAll = items, true
 	}
 
 	allItems := make([]any, 0, len(rawItems))
@@ -1072,8 +1098,8 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 		// namespace-restricted slice would silently zero issueCount on
 		// every row. Caller has already gated cluster-scoped reads via
 		// canReadClusterScopedKind, so cluster-wide compose is safe.
-		idxNamespaces := namespaces
-		if clusterScoped {
+		idxNamespaces := read
+		if readAll || clusterScoped {
 			idxNamespaces = nil
 		}
 		if builder := newResourceSummaryContextBuilder(ctx, idxNamespaces); builder != nil {
@@ -1082,9 +1108,27 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 	}
 
 	if !current() {
-		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+		return nil, nil, errConnectionChanged()
 	}
-	return listResult(allItems, coverage)
+	return listResult(allItems, listCoverageFor(collector.resource, clusterScoped, target, read, readAll, gaps.gaps(ctx, resourceapi.MCPSample)))
+}
+
+// readErrorCodeOf classifies one namespace's failed dynamic read. An API
+// server refusal of Radar's own identity is the collector's, not the caller's.
+func readErrorCodeOf(err error) (readreason.Code, bool) {
+	var re *readError
+	if errors.As(err, &re) {
+		return re.code, true
+	}
+	if apierrors.IsForbidden(err) {
+		return readreason.CollectorForbidden, true
+	}
+	return "", false
+}
+
+func isCollectorForbidden(err error) bool {
+	var re *readError
+	return errors.As(err, &re) && re.code == readreason.CollectorForbidden
 }
 
 func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getResourceInput) (*mcp.CallToolResult, any, error) {
@@ -1115,7 +1159,7 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 				if discovery == nil {
 					return nil, nil, readErrorf(readreason.KindSyncPending, "%s: resource discovery is still loading, please retry shortly", kind)
 				}
-				return nil, nil, readErrorf(readreason.UnknownKind, "%s", kind)
+				return nil, nil, readErrorf(readreason.KindUnknown, "%s", kind)
 			}
 			return nil, nil, readErrorf(readreason.NamespaceRequired, "specify a namespace for %s", kind)
 		}
@@ -1133,7 +1177,7 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 	if !clusterScoped {
 		namespaces = []string{namespace}
 	}
-	cache, _, err := resourceReadCache(ctx, kind, group, namespaces)
+	cache, plan, err := resourceReadCache(ctx, kind, group, namespaces)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1153,9 +1197,23 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 		resourceData = aicontext.MinifyUnstructured(u, aicontext.LevelDetail)
 		rawObj = u
 	} else {
-		obj, err := k8s.FetchResource(cache, kind, namespace, name)
+		var obj runtime.Object
+		var err error
+		if plan != nil && !plan.whole {
+			// The kind is still loading elsewhere; this namespace's own
+			// informer has synced, so its store answers, including a miss.
+			if readable, found, ok := cache.ReadableObject(plan.resource, namespace, name); !ok {
+				err = readErrorf(readreason.KindSyncPending, "%s are still loading, please retry shortly", plan.resource)
+			} else if !found {
+				err = k8score.ErrResourceNotFound
+			} else {
+				obj = readable
+			}
+		} else {
+			obj, err = k8s.FetchResource(cache, kind, namespace, name)
+		}
 		if !resourceReadCacheIsCurrent(cache) {
-			return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+			return nil, nil, errConnectionChanged()
 		}
 		if err == k8s.ErrUnknownKind {
 			u, dynErr := fetchMCPDynamicResource(ctx, cache, kind, group, namespace, name)
@@ -1164,6 +1222,8 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 			}
 			resourceData = aicontext.MinifyUnstructured(u, aicontext.LevelDetail)
 			rawObj = u
+		} else if _, coded := err.(*readError); coded {
+			return nil, nil, err
 		} else if err != nil {
 			return nil, nil, resourceGetError(ctx, err, kind, namespace, name)
 		} else {
@@ -1247,7 +1307,7 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 	}
 
 	if !resourceReadCacheIsCurrent(cache) {
-		return nil, nil, readErrorf(readreason.KindSyncPending, "cluster context changed during the read; retry shortly")
+		return nil, nil, errConnectionChanged()
 	}
 
 	// Three shapes:
@@ -1288,7 +1348,11 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 			}
 			canonicalGroup = gvk.Group
 		}
-		attachResourceExtras(ctx, cache, result, includes, canonicalKind, canonicalGroup, namespace, name)
+		objectMeta, err := meta.Accessor(rawObj)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read resource metadata: %w", err)
+		}
+		attachResourceExtras(ctx, cache, result, includes, canonicalKind, canonicalGroup, namespace, name, objectMeta.GetUID(), types.UID(objectMeta.GetAnnotations()[corev1.MirrorPodAnnotationKey]))
 	}
 	return toJSONResult(result)
 }
@@ -1374,7 +1438,8 @@ func buildMCPResourceContextWithStaleChecks(ctx context.Context, obj runtime.Obj
 		}),
 	}
 
-	if topo, prov, dyn, ok := mcpTopologyForContext(namespace); ok {
+	if topo, index, prov, dyn, ok := mcpTopologyForContext(); ok {
+		opts.RelIndex = index
 		opts.Topology = topo
 		opts.Provider = prov
 		opts.DynamicProv = dyn
@@ -1386,7 +1451,7 @@ func buildMCPResourceContextWithStaleChecks(ctx context.Context, obj runtime.Obj
 // attachResourceExtras populates optional extras (events, metrics, logs) on
 // the result map based on the includes set. relationship synthesis moved to
 // resourceContext via Build and is no longer routed through this function.
-func attachResourceExtras(ctx context.Context, cache *k8s.ResourceCache, result map[string]any, includes map[string]bool, kind, group, namespace, name string) {
+func attachResourceExtras(ctx context.Context, cache *k8s.ResourceCache, result map[string]any, includes map[string]bool, kind, group, namespace, name string, uid, mirrorUID types.UID) {
 	if includes["drain-plan"] {
 		if normalizeDisplayKind(kind) != "Node" || group != "" {
 			result["drainPlanError"] = "drain-plan is available only for core Nodes"
@@ -1434,9 +1499,13 @@ func attachResourceExtras(ctx context.Context, cache *k8s.ResourceCache, result 
 				// Supplemental include — controller-level events only. Pod-level
 				// events on a workload's pods (CrashLoopBackOff, etc.) require
 				// resolving the pod set; that's the diagnose tool's job, not
-				// this include's. nil podNames intentionally restricts to
+				// this include's. nil podUIDs intentionally restricts to
 				// InvolvedObject == this kind+name.
-				matched := filterEventsByInvolvedObject(events, normalizeDisplayKind(kind), group, name, nil)
+				matched, excluded := filterEventsByInvolvedObject(events, normalizeDisplayKind(kind), group, name, uid, mirrorUID, nil)
+				if excluded > 0 {
+					existing, _ := result["warnings"].([]string)
+					result["warnings"] = append(existing, earlierIncarnationEventsNote(excluded, false))
+				}
 				if len(matched) > 0 {
 					deduplicated, totalGroups := aicontext.DeduplicateEventsN(matched, 10)
 					result["events"] = deduplicated
@@ -3372,6 +3441,7 @@ func handleSearch(ctx context.Context, req *mcp.CallToolRequest, input searchInp
 			return canReadInNamespaceDecision(ctx, group, resource, "", "list")
 		},
 	}
+	opts.Pinned = k8s.ForceNamespaceScope
 	opts.ScopeNamespaces(parsed, visible, ceiling)
 	opts.NamespaceCheckFailed = namespaceCheckFailed
 	scanNamespaces := opts.Namespaces
@@ -3406,8 +3476,10 @@ func handleSearch(ctx context.Context, req *mcp.CallToolRequest, input searchInp
 			result.Total, result.TotalMatched,
 		)
 	}
-	if result.Partial {
-		response.CoverageHint = coverageHint(result, ceiling == nil && !namespaceCheckFailed, len(parsed.KindFilter) > 0)
+	if result.Coverage.Status == resourceapi.CoveragePartial {
+		response.CoverageHint = coverageHint(result, len(parsed.KindFilter) > 0)
+	} else if len(result.Coverage.NarrowedBy) > 0 && len(result.Hits) == 0 {
+		response.CoverageHint = "No matches within what your access and Radar's collection cover; that does not rule out matches outside them."
 	}
 	return toJSONResult(response)
 }

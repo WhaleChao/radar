@@ -52,7 +52,7 @@ func TestSearchProbeRetryCoverage(t *testing.T) {
 				want = append(want, UnsearchedKind{Kind: "*", Reason: tc.reason, Count: 3})
 				want = append(want, capNamed("Widget", 8, 0, 4, tc.reason)...)
 			}
-			if !reflect.DeepEqual(res.Unsearched, want) || res.Partial != (len(want) > 0) || len(p.warmed) > 0 {
+			if !reflect.DeepEqual(unsearched(res), want) || partial(res) != (len(want) > 0) || len(p.warmed) > 0 {
 				t.Fatalf("broad: %+v warm=%v want=%+v", res, p.warmed, want)
 			}
 			res, err = Search(context.Background(), p, Parse("kind:Widget07 robusta"), Options{})
@@ -67,11 +67,11 @@ func TestSearchProbeRetryCoverage(t *testing.T) {
 			if tc.reason == readreason.ReadError {
 				want, wantWarm = []UnsearchedKind{}, 1
 			}
-			if !reflect.DeepEqual(res.Unsearched, want) || len(p.warmed) != wantWarm {
+			if !reflect.DeepEqual(unsearched(res), want) || len(p.warmed) != wantWarm {
 				t.Fatalf("named: %+v warm=%v want=%+v wantWarm=%d", res, p.warmed, want, wantWarm)
 			}
 			res, _ = Search(context.Background(), p, Parse("robusta"), Options{CanReadClusterScoped: func(string, string, string) (bool, bool) { return false, true }})
-			if res.Partial {
+			if partial(res) {
 				t.Fatalf("denied caller inherited gap: %+v", res)
 			}
 		})
@@ -130,7 +130,7 @@ func TestSearchProbeRetryKeepsVisibleHitsAndRecovers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(res.Unsearched, tc.want) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a"}) {
+		if !reflect.DeepEqual(unsearched(res), tc.want) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a"}) {
 			t.Fatalf("during retry %s ns=%v: %+v", tc.query, tc.ns, res)
 		}
 	}
@@ -145,7 +145,7 @@ func TestSearchProbeRetryKeepsVisibleHitsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Partial || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a", "Widget/b/robusta-b"}) {
+	if partial(res) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a", "Widget/b/robusta-b"}) {
 		t.Fatalf("answered kind incomplete: %+v", res)
 	}
 }
@@ -170,7 +170,7 @@ func TestSearchProbeRetryForbiddenBecomesCollectorScope(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(res.Unsearched, tc.want) || res.Partial != (len(tc.want) > 0) {
+		if !reflect.DeepEqual(unsearched(res), tc.want) || partial(res) != (len(tc.want) > 0) {
 			t.Fatalf("%s: %+v want %+v", tc.query, res, tc.want)
 		}
 	}
@@ -219,11 +219,11 @@ func TestSearchExhaustedNamedKindRecovers(t *testing.T) {
 	before := lists.Load()
 	allowed.Store(true)
 	res, err := Search(t.Context(), p, Parse("robusta"), opts)
-	if err != nil || !res.Partial || lists.Load() != before || !reflect.DeepEqual(res.Unsearched, []UnsearchedKind{{Kind: "Widget", Group: gvr.Group, Reason: readreason.ReadError}}) {
+	if err != nil || !partial(res) || lists.Load() != before || !reflect.DeepEqual(unsearched(res), []UnsearchedKind{{Kind: "Widget", Group: gvr.Group, Reason: readreason.ReadError}}) {
 		t.Fatalf("broad search warmed or lost the exhausted error: %+v err=%v lists=%d", res, err, lists.Load())
 	}
 	res, err = Search(t.Context(), p, Parse("kind:Widget robusta"), opts)
-	if err != nil || res.Partial || !reflect.DeepEqual(hitNames(res), []string{"Widget//robusta"}) || dc.Observation(gvr).ProbeRetrying {
+	if err != nil || partial(res) || !reflect.DeepEqual(hitNames(res), []string{"Widget//robusta"}) || dc.Observation(gvr).ProbeRetrying {
 		t.Fatalf("named search did not warm and recover: %+v err=%v", res, err)
 	}
 }
@@ -288,7 +288,7 @@ func TestSearchExhaustedNamedKindSyncTimeoutRefreshesCoverage(t *testing.T) {
 		t.Fatalf("access did not recover before sync timeout: %+v", o)
 	}
 	want := []UnsearchedKind{{Kind: "Widget", Group: gvr.Group, Reason: readreason.KindSyncPending}}
-	if err != nil || !res.Partial || !reflect.DeepEqual(res.Unsearched, want) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a"}) {
+	if err != nil || !partial(res) || !reflect.DeepEqual(unsearched(res), want) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a"}) {
 		t.Fatalf("sync timeout retained stale coverage or lost synced hits: %+v err=%v", res, err)
 	}
 	releaseOnce.Do(func() { close(releaseSync) })
@@ -296,7 +296,7 @@ func TestSearchExhaustedNamedKindSyncTimeoutRefreshesCoverage(t *testing.T) {
 		t.Fatal("recovered informer did not sync")
 	}
 	res, err = Search(t.Context(), p, Parse("kind:Widget robusta"), opts)
-	if err != nil || res.Partial || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a", "Widget/b/robusta-b"}) {
+	if err != nil || partial(res) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a", "Widget/b/robusta-b"}) {
 		t.Fatalf("synced recovery retained a gap: %+v err=%v", res, err)
 	}
 }
@@ -351,7 +351,7 @@ func TestSearchExplicitNamespaceRetryScope(t *testing.T) {
 	}
 	opts := Options{Include: IncludeNone, SkipKinds: skipTyped}
 	res, err := Search(t.Context(), p, Parse("robusta"), opts)
-	if err != nil || !res.Partial || !reflect.DeepEqual(hitNames(res), []string{"Widget/b/robusta-b"}) {
+	if err != nil || !partial(res) || !reflect.DeepEqual(hitNames(res), []string{"Widget/b/robusta-b"}) {
 		t.Fatalf("scope settled while a remained unwatched: %+v err=%v", res, err)
 	}
 	aAllowed.Store(true)
@@ -363,7 +363,7 @@ func TestSearchExplicitNamespaceRetryScope(t *testing.T) {
 		t.Fatal("a did not eventually recover")
 	}
 	res, err = Search(t.Context(), p, Parse("robusta"), opts)
-	if err != nil || res.Partial || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a", "Widget/b/robusta-b"}) {
+	if err != nil || partial(res) || !reflect.DeepEqual(hitNames(res), []string{"Widget/a/robusta-a", "Widget/b/robusta-b"}) {
 		t.Fatalf("full scope did not recover: %+v err=%v", res, err)
 	}
 }

@@ -8,7 +8,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/skyhook-io/radar/internal/k8s"
@@ -95,10 +94,10 @@ func (s *Server) handleCNPGOperator(w http.ResponseWriter, r *http.Request) {
 		Config:     []CNPGOperatorConfigRef{},
 	}
 
-	depAcc, depDenied, deployments := s.cnpgOperatorDeployments(r, cache, scope)
-	resp.Coverage["deployments"] = cnpgCoverageOf(depAcc, depDenied)
-	svcAcc, svcDenied, services := s.cnpgOperatorServices(r, cache, scope)
-	resp.Coverage["services"] = cnpgCoverageOf(svcAcc, svcDenied)
+	depAcc, depDenied, depUncovered, deployments := s.cnpgOperatorDeployments(r, cache, scope)
+	resp.Coverage["deployments"] = cnpgCoverageOf(depAcc, depDenied, depUncovered)
+	svcAcc, svcDenied, svcUncovered, services := s.cnpgOperatorServices(r, cache, scope)
+	resp.Coverage["services"] = cnpgCoverageOf(svcAcc, svcDenied, svcUncovered)
 
 	var operators []*appsv1.Deployment
 	for _, d := range deployments {
@@ -161,14 +160,14 @@ func (s *Server) cnpgOperatorScope(r *http.Request) []string {
 	return s.getUserNamespaces(r, nil)
 }
 
-func (s *Server) cnpgOperatorDeployments(r *http.Request, cache *k8s.ResourceCache, scope []string) (cnpgKindAccess, []string, []*appsv1.Deployment) {
-	acc, denied, read := s.cnpgTypedScope(r, cache, scope, "apps", "deployments")
+func (s *Server) cnpgOperatorDeployments(r *http.Request, cache *k8s.ResourceCache, scope []string) (cnpgKindAccess, []string, []string, []*appsv1.Deployment) {
+	acc, denied, uncovered, read := s.cnpgTypedScope(r, cache, scope, "apps", "deployments")
 	if acc.state != cnpgCoverageFull && acc.state != cnpgCoveragePartial {
-		return acc, denied, nil
+		return acc, denied, uncovered, nil
 	}
 	lister := cache.Deployments()
 	if lister == nil {
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, nil
 	}
 	var out []*appsv1.Deployment
 	if read == nil {
@@ -185,22 +184,22 @@ func (s *Server) cnpgOperatorDeployments(r *http.Request, cache *k8s.ResourceCac
 		}
 		return out[i].Name < out[j].Name
 	})
-	return acc, denied, out
+	return acc, denied, uncovered, out
 }
 
-func (s *Server) cnpgOperatorServices(r *http.Request, cache *k8s.ResourceCache, scope []string) (cnpgKindAccess, []string, []*corev1.Service) {
-	acc, denied, read := s.cnpgTypedScope(r, cache, scope, "", "services")
+func (s *Server) cnpgOperatorServices(r *http.Request, cache *k8s.ResourceCache, scope []string) (cnpgKindAccess, []string, []string, []*corev1.Service) {
+	acc, denied, uncovered, read := s.cnpgTypedScope(r, cache, scope, "", "services")
 	if acc.state != cnpgCoverageFull && acc.state != cnpgCoveragePartial {
-		return acc, denied, nil
+		return acc, denied, uncovered, nil
 	}
 	lister := cache.Services()
 	if lister == nil {
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, nil
 	}
 	hasPlugin, err := labels.Parse(cnpgPluginNameLabel)
 	if err != nil {
 		log.Printf("[cnpg] Failed to build plugin selector: %v", err)
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, nil
 	}
 	var out []*corev1.Service
 	if read == nil {
@@ -211,7 +210,7 @@ func (s *Server) cnpgOperatorServices(r *http.Request, cache *k8s.ResourceCache,
 			out = append(out, items...)
 		}
 	}
-	return acc, denied, out
+	return acc, denied, uncovered, out
 }
 
 func cnpgOperatorContainerOf(d *appsv1.Deployment) *corev1.Container {
@@ -335,35 +334,34 @@ func (s *Server) cnpgOperatorConfigMap(r *http.Request, cache *k8s.ResourceCache
 		return ref
 	}
 	assessment := cache.AssessKindRead("configmaps", []string{namespace})
-	if len(assessment.Uncovered) > 0 {
+	switch {
+	case len(assessment.Uncovered) > 0:
 		state.Reason = "Radar does not watch ConfigMaps in " + namespace
 		return ref
-	}
-	switch assessment.Readiness {
-	case k8s.KindPending:
-		state.Reason = "ConfigMaps are still loading"
-		return ref
-	case k8s.KindFailed:
-		state.Reason = "ConfigMaps failed to load"
-		return ref
-	case k8s.KindUnavailable:
+	case assessment.Readiness == k8s.KindUnavailable:
 		state.Reason = "Radar is not collecting ConfigMaps"
 		return ref
-	}
-	lister := cache.ConfigMaps()
-	if lister == nil {
-		state.Reason = "could not read the ConfigMap"
+	case len(assessment.Loading) > 0:
+		state.Reason = "ConfigMaps are still loading"
+		return ref
+	case len(assessment.Failed) > 0:
+		state.Reason = "ConfigMaps failed to load"
 		return ref
 	}
-	cm, err := lister.ConfigMaps(namespace).Get(name)
+	// The namespace's own store answers even while other namespaces load.
+	obj, found, ok := cache.ReadableObject("configmaps", namespace, name)
+	cm, isConfigMap := obj.(*corev1.ConfigMap)
 	switch {
-	case apierrors.IsNotFound(err):
+	case !ok:
+		state.Reason = "could not read the ConfigMap"
+		return ref
+	case !found:
 		exists := false
 		state.Exists = &exists
 		state.Reason = "not found"
 		return ref
-	case err != nil:
-		log.Printf("[cnpg] Failed to read ConfigMap %s/%s: %v", namespace, name, err)
+	case !isConfigMap:
+		log.Printf("[cnpg] ConfigMap store returned %T for %s/%s", obj, namespace, name)
 		state.Reason = "could not read the ConfigMap"
 		return ref
 	}

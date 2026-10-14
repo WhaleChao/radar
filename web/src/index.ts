@@ -101,7 +101,8 @@ export type {
 } from './components/ui/Omnibar';
 export { bestScore } from './components/ui/command-items';
 export type { CommandItem } from './components/ui/command-items';
-export type { SearchHit, SearchMatchedField, SearchCoverageEntry } from './api/client';
+export type { SearchHit, SearchMatchedField } from './api/client';
+export type { SearchCoverageEntry } from './components/ui/searchCoverageNote';
 
 export { fetchResourceList, type ResourceListOptions } from './api/client';
 export { normalizeResourceList, type ResourceListResult } from './api/resourceLists';

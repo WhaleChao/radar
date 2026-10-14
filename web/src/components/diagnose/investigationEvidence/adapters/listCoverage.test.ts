@@ -103,7 +103,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
     const projection = projectCase("partial and empty");
     expect(groupsOf(projection.groups, "inventory")).toEqual([]);
     expect(projection.limitations.map((item) => item.message)).toEqual([
-      'The listing returned nothing. Radar read services only in namespaces "alpha,gamma"; objects in other namespaces were not read, so this result cannot show they don\'t exist.',
+      'The listing returned nothing. Radar read services only in namespaces "alpha", "gamma". Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don\'t exist.',
     ]);
     expect(investigationEvidenceCoverageLimited(projection, "Service")).toBe(
       true,
@@ -117,13 +117,13 @@ describe("a list Radar's collector read only in some namespaces", () => {
     );
     const coverage = {
       status: "partial",
-      requested: { type: "all_namespaces" },
+      scope: { type: "all_namespaces" },
       read: {
         type: "namespaces",
-        namespaces: { names: namespaces.slice(0, 8), total: 40, omitted: 32 },
+        namespaces: { count: 40, sample: namespaces.slice(0, 8) },
       },
-      gaps: [{ reason: "collector_scope_limited" }],
-      note: 'Radar read services only in namespaces "team-01,team-02,team-03 and 37 more"; objects in other namespaces were not read, so this result cannot show they don\'t exist.',
+      gaps: [{ code: "collector_scope_limited" }],
+      note: 'Radar read services only in namespaces "team-01", "team-02", "team-03", "team-04", "team-05", "team-06", "team-07", "team-08" and 32 more. Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don\'t exist.',
     };
     const rows = [
       { kind: "Service", name: "present", namespace: namespaces[0] },
@@ -190,7 +190,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
     expect(empty.limitations.map((item) => item.message)).toEqual([
       `The listing returned nothing. ${coverage.note}`,
     ]);
-    expect(empty.limitations[0].message).not.toContain("team-04");
+    expect(empty.limitations[0].message).not.toContain("team-09");
   });
 
   it("names the resource Radar read, not the alias the agent asked for", () => {
@@ -290,5 +290,104 @@ describe("a list Radar's collector read only in some namespaces", () => {
         "Radar couldn't summarize this investigation step. Review it in Activity.",
       ]);
     }
+  });
+});
+
+describe("a list Radar read all of", () => {
+  const rows = [{ kind: "Service", name: "api", namespace: "alpha" }];
+
+  it("shows rows without a coverage caveat when nothing narrowed the scope", () => {
+    const coverage = {
+      status: "complete",
+      scope: { type: "all_namespaces" },
+      read: { type: "all_namespaces" },
+      gaps: [],
+    };
+    const projection = project([
+      tool(
+        "list",
+        "list_resources",
+        { coverage, items: rows },
+        { summary: JSON.stringify({ kind: "services" }) },
+      ),
+    ]);
+    const [inventory] = groupsOf(projection.groups, "inventory");
+    expect(inventory.latest.summary).toBe("1 returned");
+    expect(projection.limitations).toEqual([]);
+    const empty = project([
+      tool(
+        "empty",
+        "list_resources",
+        { coverage, items: [] },
+        { summary: JSON.stringify({ kind: "services" }) },
+      ),
+    ]);
+    expect(empty.limitations.map((item) => item.message)).toEqual([
+      "No services resources: Radar read all of the requested scope.",
+    ]);
+  });
+
+  it("keeps a narrowed scope from reading as the cluster", () => {
+    const coverage = {
+      status: "complete",
+      scope: {
+        type: "namespaces",
+        namespaces: { count: 2, sample: ["alpha", "beta"] },
+      },
+      narrowedBy: ["caller_access"],
+      read: {
+        type: "namespaces",
+        namespaces: { count: 2, sample: ["alpha", "beta"] },
+      },
+      gaps: [],
+      note: 'This list covers only namespaces "alpha", "beta" (your access). It says nothing about services in other namespaces.',
+    };
+    const projection = project([
+      tool(
+        "list",
+        "list_resources",
+        { coverage, items: rows },
+        { summary: JSON.stringify({ kind: "services" }) },
+      ),
+    ]);
+    const [inventory] = groupsOf(projection.groups, "inventory");
+    expect(inventory.latest.summary).toBe("1 returned · only alpha, beta read");
+    const empty = project([
+      tool(
+        "empty",
+        "list_resources",
+        { coverage, items: [] },
+        { summary: JSON.stringify({ kind: "services" }) },
+      ),
+    ]);
+    expect(empty.limitations.map((item) => item.message)).toEqual([
+      `The listing returned nothing. ${coverage.note}`,
+    ]);
+  });
+
+  it("never reads an older Radar's bare array as complete", () => {
+    const empty = project([
+      tool("empty", "list_resources", [], {
+        summary: JSON.stringify({ kind: "services" }),
+      }),
+    ]);
+    expect(empty.limitations[0].message).toContain(
+      "Anything you do not have permission to read was not searched.",
+    );
+  });
+
+  it("rejects a partial or narrowed list that does not explain itself", () => {
+    const projection = project([
+      tool("list", "list_resources", {
+        coverage: {
+          status: "partial",
+          scope: { type: "all_namespaces" },
+          read: { type: "all_namespaces" },
+          gaps: [{ code: "kind_sync_pending" }],
+        },
+        items: rows,
+      }),
+    ]);
+    expect(groupsOf(projection.groups, "inventory")).toEqual([]);
   });
 });
