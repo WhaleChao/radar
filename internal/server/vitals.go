@@ -12,6 +12,7 @@ import (
 
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/readscope"
 	"github.com/skyhook-io/radar/pkg/health"
 )
 
@@ -166,7 +167,7 @@ func (s *Server) handleVitals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	namespaces := s.parseNamespacesForUser(r)
-	if noNamespaceAccess(namespaces) {
+	if readscope.NoNamespaceAccess(namespaces) {
 		s.writeJSON(w, VitalsResponse{
 			Completeness: VitalsCompleteness{AccessRestricted: true},
 		})
@@ -199,7 +200,7 @@ func (s *Server) handleVitals(w http.ResponseWriter, r *http.Request) {
 
 	var scopedPods []*corev1.Pod
 	if podsReadable && podAssessment.Readiness == k8s.KindReady {
-		scopedPods = listPodsScoped(cache.Pods(), podNamespaces)
+		scopedPods = readscope.ListPodsScoped(cache.Pods(), podNamespaces)
 	}
 	if podsReadable && cache.Pods() != nil {
 		pods := scopedPods

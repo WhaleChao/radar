@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/readscope"
 	"github.com/skyhook-io/radar/pkg/k8score"
 )
 
@@ -27,7 +28,7 @@ func (s *Server) capacityNamespacesForUser(r *http.Request) []string {
 }
 
 func (s *Server) capacityNamespacesForSource(r *http.Request, namespaces []string, group, resource string) []string {
-	if noNamespaceAccess(namespaces) {
+	if readscope.NoNamespaceAccess(namespaces) {
 		return namespaces
 	}
 	if namespaces == nil {
