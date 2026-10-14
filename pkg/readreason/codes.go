@@ -175,17 +175,18 @@ func AffectsWholeCluster(c Code) bool {
 	return c == ClusterConnecting || c == ClusterDisconnected || c == CollectorCredentialsRejected
 }
 
-// precedence orders codes for an error that has to name one: what the caller
-// can act on first, then what blocks every read, then Radar's own limits, then
-// what may resolve by itself.
+// precedence orders codes for an error that has to name one, by what the
+// caller should do first: fix a request no retry can answer, then wait for
+// what resolves by itself — a retry then returns at least part of the answer —
+// then act on their own access, then on Radar's limits.
 var precedence = []Code{
 	NamespaceRequired, KindUnknown, KindNotWatchable, ListTooLarge,
+	ClusterDisconnected, ClusterConnecting, ConnectionChanged,
+	KindSyncPending, PermissionCheckFailed, KindWatchFailed,
 	RBACDenied, NoNamespaceAccess, NamespaceNotVisible, NamespaceNotFound,
 	OutsideNamespaceScope, OutsideNamespaceSelection,
-	ClusterDisconnected, ClusterConnecting, ConnectionChanged,
 	CollectorCredentialsRejected, CollectorForbidden, KindNotWatched,
-	KindWatchFailed, KindSyncFailed, CollectorScopeLimited,
-	PermissionCheckFailed, KindSyncPending, FilterEvalFailed, ReadError,
+	KindSyncFailed, CollectorScopeLimited, FilterEvalFailed, ReadError,
 	ObjectNotFound,
 }
 

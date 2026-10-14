@@ -72,11 +72,20 @@ func TestPrimaryIgnoresOrder(t *testing.T) {
 	}
 }
 
-func TestPrimaryPrefersWhatTheCallerCanActOn(t *testing.T) {
-	if got := Primary([]Code{KindSyncPending, CollectorScopeLimited, RBACDenied}); got != RBACDenied {
+// A read that served nothing because part of it is still loading names the
+// loading: a retry returns at least that part. Otherwise the caller's own
+// access comes before Radar's limits.
+func TestPrimaryPrefersWhatAResolvesFirst(t *testing.T) {
+	if got := Primary([]Code{CollectorScopeLimited, RBACDenied, KindSyncPending}); got != KindSyncPending {
 		t.Fatalf("Primary = %s", got)
 	}
-	if got := Primary([]Code{KindSyncPending, KindSyncFailed}); got != KindSyncFailed {
+	if got := Primary([]Code{CollectorScopeLimited, RBACDenied}); got != RBACDenied {
+		t.Fatalf("Primary = %s", got)
+	}
+	if got := Primary([]Code{KindSyncFailed, CollectorForbidden}); got != CollectorForbidden {
+		t.Fatalf("Primary = %s", got)
+	}
+	if got := Primary([]Code{KindSyncPending, KindUnknown}); got != KindUnknown {
 		t.Fatalf("Primary = %s", got)
 	}
 	if got := Primary(nil); got != "" {
