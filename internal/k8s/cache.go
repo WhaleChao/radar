@@ -2245,6 +2245,30 @@ func (rc *ResourceCache) AssessKindRead(resource string, requested []string) k8s
 	return core.AssessKindRead(resource, requested)
 }
 
+// ReadableObjects, ReadableObject and ReadableCount are the nil-safe forms of
+// k8score's readiness-gated reads: they serve a namespace whose own informer
+// has synced even while the kind as a whole is still loading.
+func (rc *ResourceCache) ReadableObjects(resource string, namespaces []string) ([]runtime.Object, bool) {
+	if rc == nil {
+		return nil, false
+	}
+	return rc.ResourceCache.ReadableObjects(resource, namespaces)
+}
+
+func (rc *ResourceCache) ReadableObject(resource, namespace, name string) (obj runtime.Object, found, ok bool) {
+	if rc == nil {
+		return nil, false, false
+	}
+	return rc.ResourceCache.ReadableObject(resource, namespace, name)
+}
+
+func (rc *ResourceCache) ReadableCount(resource string, namespaces []string) (int, bool) {
+	if rc == nil {
+		return 0, false
+	}
+	return rc.ResourceCache.ReadableCount(resource, namespaces)
+}
+
 // PermissionResult returns the probes that selected this cache's informer
 // scope. A later global refresh must not re-label rows from this cache.
 func (rc *ResourceCache) PermissionResult() *PermissionCheckResult {

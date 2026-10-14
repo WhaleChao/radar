@@ -226,53 +226,66 @@ export function adaptListNamespaces(
   );
 }
 
-// A list Radar's collector could read only in some namespaces arrives as
-// `{coverage, items}`, naming the namespaces it read; a complete list is the
-// bare array.
+// list_resources arrives as `{coverage, items}`. coverage.read names the
+// namespaces Radar read when that is a namespace set, and coverage.note
+// explains a partial or narrowed read. A bare array is an older Radar's list
+// (or a run recorded from one): it carries no coverage, so nothing about it
+// may read as complete.
+type ListCoverage = {
+  partial: boolean;
+  /** Set when Radar read a finite namespace set: rows prove nothing outside it. */
+  namespacesRead?: string[];
+  namespacesReadOmitted: number;
+  note?: string;
+};
+
 function listedRows(
   payload: unknown,
-):
-  | {
-      rows: unknown[];
-      coverage?: {
-        namespacesRead: string[];
-        namespacesTotal: number;
-        namespacesOmitted: number;
-        note: string;
-      };
-    }
-  | undefined {
+): { rows: unknown[]; coverage?: ListCoverage } | undefined {
   if (Array.isArray(payload)) return { rows: payload };
   const value = record(payload);
   const coverage = record(value?.coverage);
-  const read = record(coverage?.read);
-  const namespaceSet = record(read?.namespaces);
-  const namespacesRead = stringArray(namespaceSet?.names);
-  const total = namespaceSet?.total;
-  const omitted = namespaceSet?.omitted;
+  const status = coverage?.status;
   if (
     !value ||
     !Array.isArray(value.items) ||
-    coverage?.status !== "partial" ||
-    read?.type !== "namespaces" ||
-    !namespacesRead?.length ||
-    typeof total !== "number" ||
-    !Number.isInteger(total) ||
-    typeof omitted !== "number" ||
-    !Number.isInteger(omitted) ||
-    omitted < 0 ||
-    total !== namespacesRead.length + omitted ||
-    !nonEmptyString(coverage.note)
+    (status !== "complete" && status !== "partial")
+  ) {
+    return undefined;
+  }
+  const read = record(coverage?.read);
+  const note = nonEmptyString(coverage?.note) ? coverage.note : undefined;
+  const narrowed =
+    Array.isArray(coverage?.narrowedBy) && coverage.narrowedBy.length > 0;
+  if ((status === "partial" || narrowed) && !note) return undefined;
+  if (read?.type !== "namespaces") {
+    return {
+      rows: value.items,
+      coverage: {
+        partial: status === "partial",
+        namespacesReadOmitted: 0,
+        note,
+      },
+    };
+  }
+  const set = record(read.namespaces);
+  const sample = stringArray(set?.sample);
+  const count = set?.count;
+  if (
+    !sample ||
+    typeof count !== "number" ||
+    !Number.isInteger(count) ||
+    count < sample.length
   ) {
     return undefined;
   }
   return {
     rows: value.items,
     coverage: {
-      namespacesRead,
-      namespacesTotal: total,
-      namespacesOmitted: omitted,
-      note: coverage.note,
+      partial: status === "partial",
+      namespacesRead: sample,
+      namespacesReadOmitted: count - sample.length,
+      note,
     },
   };
 }
@@ -290,6 +303,8 @@ export function adaptListResources(
   }
   const { rows, coverage } = listed;
   const namespacesRead = coverage?.namespacesRead;
+  const namespacesReadCount =
+    (namespacesRead?.length ?? 0) + (coverage?.namespacesReadOmitted ?? 0);
   const resources = rows
     .map(resourceSummary)
     .filter((item): item is InvestigationResourceSummary => Boolean(item));
@@ -311,16 +326,18 @@ export function adaptListResources(
     : undefined;
   const title = options.title ?? (namespace ? `${noun} in ${namespace}` : noun);
   if (resources.length === 0) {
-    // list_resources intentionally returns [] for some RBAC-filtered reads;
-    // even a successful transport outcome therefore cannot prove absence.
-    // The requested kind may be an alias ("svc"), so a partial read's copy
-    // is the server's note, which names the resource it resolved.
+    // An older Radar returns [] for some RBAC-filtered reads, so a bare array
+    // cannot prove absence. A partial or narrowed read's copy is the server's
+    // note: the requested kind may be an alias ("svc"), and the note names
+    // the resource it resolved.
     builder.limit(
       source,
       "Resource inventory",
-      coverage
-        ? `The listing returned nothing. ${coverage.note}`
-        : `Radar found no matching resources for ${scope}. Anything you do not have permission to read was not searched.`,
+      !coverage
+        ? `Radar found no matching resources for ${scope}. Anything you do not have permission to read was not searched.`
+        : coverage.note
+          ? `The listing returned nothing. ${coverage.note}`
+          : `No ${scope}: Radar read all of the requested scope.`,
       "unknown",
     );
     return;
@@ -349,8 +366,8 @@ export function adaptListResources(
       summary: [
         `${resources.length} returned`,
         nonEmptyString(args?.group) ? args.group : undefined,
-        namespacesRead
-          ? `only ${coverage!.namespacesTotal > 2 ? `${coverage!.namespacesTotal} namespaces` : namespacesRead.join(", ")} read`
+        namespacesRead && (coverage?.partial || coverage?.note)
+          ? `only ${namespacesReadCount > 2 ? `${namespacesReadCount} namespaces` : namespacesRead.join(", ")} read`
           : undefined,
       ]
         .filter(Boolean)
@@ -361,7 +378,7 @@ export function adaptListResources(
             resources,
             scope,
             namespacesRead,
-            namespacesReadOmitted: coverage!.namespacesOmitted,
+            namespacesReadOmitted: coverage!.namespacesReadOmitted,
           }
         : { type: "inventory", resources, scope },
     },

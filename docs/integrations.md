@@ -307,6 +307,8 @@ Radar has first-class renderers for **AWS (CAPA)**, **GCP (CAPG)**, and **Azure 
 
 **Detail View:** Target workload, update mode, per-container resource recommendations (target, lower bound, upper bound, uncapped), resource policy, and conditions.
 
+Target links use the API group in `targetRef.apiVersion`. Built-in targets without an API version use their standard group.
+
 **Problem Detection:** Alerts for unsupported configurations, missing recommendations, and low confidence scores.
 
 ### Supported CRDs
@@ -606,11 +608,21 @@ See the main [README](../README.md#gitops) for the user-facing overview. This se
 | GitRepository | `source.toolkit.fluxcd.io/v1` | Yes | Yes | — |
 | OCIRepository | `source.toolkit.fluxcd.io/v1beta2` | Yes | Yes | — |
 | HelmRepository | `source.toolkit.fluxcd.io/v1` | Yes | Yes | — |
+| Bucket / HelmChart / ExternalArtifact | `source.toolkit.fluxcd.io` | When referenced | Generic | — |
 | Kustomization | `kustomize.toolkit.fluxcd.io/v1` | Yes | Yes | Yes |
 | HelmRelease | `helm.toolkit.fluxcd.io/v2` | Yes | Yes | Yes |
 | Alert | `notification.toolkit.fluxcd.io/v1beta3` | — | Yes | — |
 
 **Workflow operations**: Reconcile, Reconcile-with-source (Kustomization/HelmRelease), Suspend/Resume.
+
+**Source relationships**: Topology, Related Resources and REST/MCP context link
+observed Flux sources in both directions within Radar's namespace scope.
+Kustomizations use `spec.sourceRef`; HelmReleases use `spec.chart.spec.sourceRef`
+or `spec.chartRef`. Inline releases also link the generated HelmChart named by
+`status.helmChart`; an observed HelmChart links its source in its own namespace.
+These are dependencies, not owners: topology draws each source upstream, with
+the edge pointing into the object that reads it. A link does not prove that Flux
+permits the reference or has produced an artifact.
 
 **Diagnosis**: Conditions extracted to issues (Ready=False, Stalled=True, Reconciling=True). Per-resource diff and recent events not yet available for Flux (HelmRelease-installed resources don't carry `last-applied-configuration`; tracked in [#601](https://github.com/skyhook-io/radar/issues/601)).
 

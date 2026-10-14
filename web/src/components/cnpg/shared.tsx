@@ -250,13 +250,26 @@ export function SectionTable<T>({
   )
 }
 
+function namespaceList(namespaces: string[]): string {
+  const shown = namespaces.slice(0, 3).join(', ')
+  return namespaces.length > 3 ? `${shown} and ${namespaces.length - 3} more` : shown
+}
+
 /** Empty-state text for a collection, derived from how much of it was readable. */
 export function coverageEmpty(cov: CNPGKindCoverage | undefined, noun: string): string {
   switch (cov?.state) {
     case 'full':
       return `No ${noun} in this scope.`
-    case 'partial':
-      return `No ${noun} visible. Some namespaces are not readable with your access.`
+    case 'partial': {
+      // An older Radar lists Radar's own collection gaps as denied, so only a
+      // Radar that sends uncoveredNamespaces can say whose gap it is.
+      const denied = (cov.deniedNamespaces?.length ?? 0) > 0
+      const uncovered = (cov.uncoveredNamespaces?.length ?? 0) > 0
+      if (cov.uncoveredNamespaces && denied && !uncovered) return `No ${noun} visible. Some namespaces are not readable with your access.`
+      if (uncovered && !denied) return `No ${noun} visible. Radar doesn't collect ${noun} in ${namespaceList(cov.uncoveredNamespaces!)}.`
+      if (uncovered && denied) return `No ${noun} visible. Some namespaces are not readable with your access, and Radar doesn't collect ${noun} in ${namespaceList(cov.uncoveredNamespaces!)}.`
+      return `No ${noun} visible. Some namespaces were not read.`
+    }
     case 'denied':
       return `No access to ${noun}.`
     case 'syncing':

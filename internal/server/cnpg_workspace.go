@@ -69,17 +69,25 @@ var cnpgWorkspaceKinds = []cnpgWorkspaceKind{
 }
 
 // CNPGWorkspaceCoverage states how much of one kind the caller could see.
-// DeniedNamespaces lists only namespaces already in the caller's scope, so it
-// may be omitted on a partial state; AllowedNamespaces is always set on a
-// partial state and is the authority for which namespaces were read.
+// DeniedNamespaces names requested namespaces the caller's own access
+// excludes; UncoveredNamespaces names requested namespaces Radar's collector
+// does not collect, which more access for the caller would not change. Both
+// list only namespaces already in the caller's scope, so a partial state may
+// name neither; AllowedNamespaces is always set on a partial state and is the
+// authority for which namespaces were read. UncoveredNamespaces is always
+// present: a Radar that omits it lists both causes under DeniedNamespaces.
 type CNPGWorkspaceCoverage struct {
-	State             string   `json:"state"`
-	DeniedNamespaces  []string `json:"deniedNamespaces,omitempty"`
-	AllowedNamespaces []string `json:"allowedNamespaces,omitempty"`
+	State               string   `json:"state"`
+	DeniedNamespaces    []string `json:"deniedNamespaces,omitempty"`
+	UncoveredNamespaces []string `json:"uncoveredNamespaces"`
+	AllowedNamespaces   []string `json:"allowedNamespaces,omitempty"`
 }
 
-func cnpgCoverageOf(acc cnpgKindAccess, denied []string) CNPGWorkspaceCoverage {
-	cov := CNPGWorkspaceCoverage{State: acc.state, DeniedNamespaces: denied}
+func cnpgCoverageOf(acc cnpgKindAccess, denied, uncovered []string) CNPGWorkspaceCoverage {
+	if uncovered == nil {
+		uncovered = []string{}
+	}
+	cov := CNPGWorkspaceCoverage{State: acc.state, DeniedNamespaces: denied, UncoveredNamespaces: uncovered}
 	if acc.state == cnpgCoveragePartial {
 		cov.AllowedNamespaces = make([]string, 0, len(acc.namespaces))
 		for ns := range acc.namespaces {
@@ -208,7 +216,7 @@ func (s *Server) handleCNPGWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		access[k.key] = acc
 		items[k.key] = list
-		resp.Coverage[k.key] = cnpgCoverageOf(acc, denied)
+		resp.Coverage[k.key] = cnpgCoverageOf(acc, denied, nil)
 	}
 	if !resp.Installed {
 		s.writeJSON(w, resp)
@@ -231,9 +239,9 @@ func (s *Server) handleCNPGWorkspace(w http.ResponseWriter, r *http.Request) {
 		resp.Objects[k.key] = out
 	}
 
-	podAccess, podDenied, pods, instancePods := s.cnpgWorkspaceReadPods(r, cache, namespaces, cnpgClusterUIDs(items[cnpgWorkspaceClusterKey]))
+	podAccess, podDenied, podUncovered, pods, instancePods := s.cnpgWorkspaceReadPods(r, cache, namespaces, cnpgClusterUIDs(items[cnpgWorkspaceClusterKey]))
 	access[cnpgWorkspacePodsKey] = podAccess
-	resp.Coverage[cnpgWorkspacePodsKey] = cnpgCoverageOf(podAccess, podDenied)
+	resp.Coverage[cnpgWorkspacePodsKey] = cnpgCoverageOf(podAccess, podDenied, podUncovered)
 	resp.Objects[cnpgWorkspacePodsKey] = pods
 
 	resp.Issues = s.cnpgWorkspaceIssues(r, namespaces, access, instancePods)
@@ -510,48 +518,48 @@ func trimCNPGPod(p *corev1.Pod) cnpgWorkspacePod {
 // cnpgTypedScope resolves where the caller may list a typed kind and which of
 // those namespaces Radar's informer actually holds. The informer may itself be
 // namespace-scoped when Radar's own identity cannot list the kind
-// cluster-wide; what it does not hold is unread, not empty. read is nil for
-// "every namespace".
-func (s *Server) cnpgTypedScope(r *http.Request, cache *k8s.ResourceCache, namespaces []string, group, resource string) (acc cnpgKindAccess, denied, read []string) {
+// cluster-wide; what it does not hold is unread, not empty, and is Radar's
+// gap rather than the caller's, so it comes back as uncovered, apart from
+// denied. read is nil for "every namespace".
+func (s *Server) cnpgTypedScope(r *http.Request, cache *k8s.ResourceCache, namespaces []string, group, resource string) (acc cnpgKindAccess, denied, uncovered, read []string) {
 	allowed, denied, partial, ok := s.cnpgWorkspaceScope(r, namespaces, group, resource)
 	if !ok {
-		return cnpgKindAccess{state: cnpgCoverageDenied}, nil, []string{}
+		return cnpgKindAccess{state: cnpgCoverageDenied}, nil, nil, []string{}
 	}
 	assessment := cache.AssessKindRead(resource, allowed)
 	if len(assessment.Uncovered) > 0 && len(assessment.Uncovered) == len(allowed) {
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, []string{}
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, []string{}
 	}
 	switch assessment.Readiness {
 	case k8s.KindPending:
-		return cnpgKindAccess{state: cnpgCoverageSyncing}, nil, []string{}
+		return cnpgKindAccess{state: cnpgCoverageSyncing}, nil, nil, []string{}
 	case k8s.KindFailed, k8s.KindUnavailable:
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, []string{}
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, []string{}
 	}
 	if !assessment.Complete && len(assessment.Read) == 0 {
 		log.Printf("[cnpg] %s cache does not cover the requested scope", resource)
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, []string{}
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, []string{}
 	}
 	if namespaces != nil {
-		denied = append(denied, assessment.Uncovered...)
-		sort.Strings(denied)
+		uncovered = slices.Sorted(slices.Values(assessment.Uncovered))
 	}
 	acc = accessFromScope(assessment.Read, partial || !assessment.Complete)
-	return acc, denied, assessment.Read
+	return acc, denied, uncovered, assessment.Read
 }
 
 // cnpgWorkspaceReadPods returns the instance Pods of visible Clusters, plus
 // the namespace/name set of what it returned — the only Pods whose issues the
 // response may carry.
-func (s *Server) cnpgWorkspaceReadPods(r *http.Request, cache *k8s.ResourceCache, namespaces []string, clusterUIDs map[string]types.UID) (cnpgKindAccess, []string, []any, map[string]bool) {
+func (s *Server) cnpgWorkspaceReadPods(r *http.Request, cache *k8s.ResourceCache, namespaces []string, clusterUIDs map[string]types.UID) (cnpgKindAccess, []string, []string, []any, map[string]bool) {
 	out := []any{}
 	returned := map[string]bool{}
-	acc, denied, read := s.cnpgTypedScope(r, cache, namespaces, "", "pods")
+	acc, denied, uncovered, read := s.cnpgTypedScope(r, cache, namespaces, "", "pods")
 	if acc.state != cnpgCoverageFull && acc.state != cnpgCoveragePartial {
-		return acc, nil, out, returned
+		return acc, nil, nil, out, returned
 	}
 	if cache.Pods() == nil {
 		log.Printf("[cnpg] Pod cache unavailable for workspace")
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, out, returned
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, out, returned
 	}
 
 	pods := readscope.ListPodsScoped(cache.Pods(), read)
@@ -567,7 +575,7 @@ func (s *Server) cnpgWorkspaceReadPods(r *http.Request, cache *k8s.ResourceCache
 			returned[p.Namespace+"/"+p.Name] = true
 		}
 	}
-	return acc, denied, out, returned
+	return acc, denied, uncovered, out, returned
 }
 
 var cnpgWorkspaceKeyByGroupKind = func() map[string]string {

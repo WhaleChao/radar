@@ -541,6 +541,10 @@ export type { AuditFinding, ResourceGroup, CheckMeta, Check };
 
 export interface AuditResponse {
   missingInputs?: string[];
+  // Absent on a Radar that predates the per-resource opt-out.
+  ignoreChecksAnnotation?: string;
+  // checkID → namespace → resources whose findings the annotation hid.
+  annotationIgnoredByNamespace?: Record<string, Record<string, number>>;
   summary: DashboardAudit;
   findings: AuditFinding[];
   groups: ResourceGroup[];
@@ -6712,13 +6716,16 @@ export const useFluxResume = createGitOpsMutation<FluxResourceVars>({
 export const useFluxSyncWithSource = createGitOpsMutation<FluxResourceVars>({
   getPath: (v) => `/flux/${v.kind}/${v.namespace}/${v.name}/sync-with-source`,
   errorMessage: "Failed to sync with source",
-  successMessage: "Sync with source triggered",
+  // The server names what it reconciled, and says when a source was skipped.
+  getSuccessMessage: (data) => data.message,
   getInvalidateKeys: (v) => [
     ...fluxInvalidateKeys(v),
     // Also invalidate source resources as they were reconciled too
     ["resources", "gitrepositories"],
     ["resources", "ocirepositories"],
     ["resources", "helmrepositories"],
+    ["resources", "helmcharts"],
+    ["resources", "buckets"],
   ],
 });
 

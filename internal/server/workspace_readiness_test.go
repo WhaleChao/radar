@@ -124,15 +124,15 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 					t.Fatalf("ready %s did not establish its observed row: %#v", source, coverage)
 				}
 			}
-			podAcc, _, pods, returned := srv.cnpgWorkspaceReadPods(r, cache, []string{"pg"}, map[string]types.UID{"pg/orders": "orders-uid"})
+			podAcc, _, _, pods, returned := srv.cnpgWorkspaceReadPods(r, cache, []string{"pg"}, map[string]types.UID{"pg/orders": "orders-uid"})
 			if podAcc.state != stage.cnpg || len(pods) != stage.count || len(returned) != stage.count {
 				t.Fatalf("CNPG Pods: access=%#v rows=%d returned=%d", podAcc, len(pods), len(returned))
 			}
-			depAcc, _, deployments := srv.cnpgOperatorDeployments(r, cache, []string{"pg"})
+			depAcc, _, _, deployments := srv.cnpgOperatorDeployments(r, cache, []string{"pg"})
 			if depAcc.state != stage.cnpg || len(deployments) != stage.count {
 				t.Fatalf("operator Deployments: access=%#v rows=%d", depAcc, len(deployments))
 			}
-			svcAcc, _, _ := srv.cnpgOperatorServices(r, cache, []string{"pg"})
+			svcAcc, _, _, _ := srv.cnpgOperatorServices(r, cache, []string{"pg"})
 			if svcAcc.state != cnpgCoverageFull {
 				t.Fatalf("ready Services affected by sibling readiness: %#v", svcAcc)
 			}
@@ -144,11 +144,11 @@ func TestWorkspaceTypedSourcesRequireInitialSync(t *testing.T) {
 					t.Fatalf("readiness masked %s denial: %#v", source, deniedMeta.Coverage[source])
 				}
 			}
-			deniedAcc, _, _, _ := deniedServer.cnpgWorkspaceReadPods(deniedRequest, cache, []string{"pg"}, nil)
+			deniedAcc, _, _, _, _ := deniedServer.cnpgWorkspaceReadPods(deniedRequest, cache, []string{"pg"}, nil)
 			if deniedAcc.state != cnpgCoverageDenied {
 				t.Fatalf("readiness masked CNPG Pod denial: %#v", deniedAcc)
 			}
-			emptyAcc, _, _, _ := srv.cnpgWorkspaceReadPods(r, cache, []string{}, nil)
+			emptyAcc, _, _, _, _ := srv.cnpgWorkspaceReadPods(r, cache, []string{}, nil)
 			if emptyAcc.state != cnpgCoverageDenied {
 				t.Fatalf("empty namespace access widened: %#v", emptyAcc)
 			}
@@ -196,7 +196,7 @@ func TestWorkspaceDisabledTypedSourcesRemainUnavailable(t *testing.T) {
 			t.Fatalf("disabled %s reason = %q, want %q", source, coverage.ReasonCode, wantReason)
 		}
 	}
-	access, _, _, _ := srv.cnpgWorkspaceReadPods(r, k8s.GetResourceCache(), []string{"pg"}, nil)
+	access, _, _, _, _ := srv.cnpgWorkspaceReadPods(r, k8s.GetResourceCache(), []string{"pg"}, nil)
 	if access.state != cnpgCoverageError {
 		t.Fatalf("disabled Pods must not report full or syncing: %#v", access)
 	}
@@ -225,7 +225,7 @@ func TestCNPGPodsAfterStartupBackstopRemainUnread(t *testing.T) {
 		t.Fatal("backstop fixture did not retain a pending Pod informer")
 	}
 	r := httptest.NewRequest(http.MethodGet, "/api/cnpg/workspace?namespace=pg", nil)
-	access, _, pods, returned := (&Server{}).cnpgWorkspaceReadPods(r, cache, []string{"pg"}, map[string]types.UID{"pg/orders": "orders-uid"})
+	access, _, _, pods, returned := (&Server{}).cnpgWorkspaceReadPods(r, cache, []string{"pg"}, map[string]types.UID{"pg/orders": "orders-uid"})
 	if access.state != cnpgCoverageSyncing || len(pods) != 0 || len(returned) != 0 {
 		t.Fatalf("backstop Pod result: access=%#v rows=%d returned=%d", access, len(pods), len(returned))
 	}
