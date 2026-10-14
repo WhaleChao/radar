@@ -13,7 +13,6 @@ import (
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/pkg/health"
-	"github.com/skyhook-io/radar/pkg/k8score"
 )
 
 // GET /api/vitals — a cluster's vital signs: a compact scale + capacity
@@ -195,15 +194,11 @@ func (s *Server) handleVitals(w http.ResponseWriter, r *http.Request) {
 		// numbers as the caller's whole world.
 		podsPartial = len(podNamespaces) < len(namespaces)
 	}
-	// The SA cache itself can be namespace-scoped (startup RBAC fallback);
-	// a cluster-wide caller reading a scoped cache is partial too.
-	if perm := k8s.GetCachedPermissionResult(); perm != nil {
-		if scope, ok := perm.Scopes[k8score.Pods]; ok && scope.Enabled && scope.Namespace != "" {
-			podsPartial = true
-		}
-	}
+	podAssessment := cache.AssessKindRead("pods", podNamespaces)
+	podsPartial = podsPartial || (podAssessment.Readiness == k8s.KindReady && !podAssessment.Complete)
+
 	var scopedPods []*corev1.Pod
-	if podsReadable {
+	if podsReadable && podAssessment.Readiness == k8s.KindReady {
 		scopedPods = listPodsScoped(cache.Pods(), podNamespaces)
 	}
 	if podsReadable && cache.Pods() != nil {
@@ -252,7 +247,7 @@ func (s *Server) handleVitals(w http.ResponseWriter, r *http.Request) {
 	// canReadNodes branch; a caller denied node list must not learn cluster
 	// capacity here either). Requests/capacity are informer-derived; live
 	// usage is the metrics-server probe, memoized (see vitalsMetricsMemo).
-	if canReadNodes && cache.Nodes() != nil && podsReadable && cache.KindReadinessFor("pods") == k8s.KindReady && cache.KindReadinessFor("nodes") == k8s.KindReady {
+	if canReadNodes && cache.Nodes() != nil && podsReadable && podAssessment.Complete && cache.AssessKindRead("nodes", nil).Complete {
 		// Capacity + requests are informer-derived — computed FRESH on every
 		// call (memoizing them would freeze counts for the TTL). Only the
 		// live metrics-server probe is memoized, keyed by user (the probe

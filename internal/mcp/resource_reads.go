@@ -227,10 +227,7 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 	if namespaces == nil {
 		return cache, covered, nil
 	}
-	uncovered := assessment.Uncovered
-	if err := namespaceCoverageError(ctx, collectorTarget{resource: gvr.Resource, group: gvr.Group}, false, 0, uncovered, cache.KindNamespaces(gvr.Resource), nil); err != nil {
-		return nil, nil, err
-	}
+
 	return cache, namespaces, nil
 }
 
