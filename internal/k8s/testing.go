@@ -95,9 +95,8 @@ func InitTestPromotedSyncingCache(client kubernetes.Interface, syncTimeout, defe
 		MinimalSet:          map[string]bool{"services": true},
 		SyncTimeout:         syncTimeout,
 		DeferredSyncTimeout: deferredSyncTimeout,
-		// Delaying the informer START is the only safe way to hold a kind
-		// unsynced against a fake clientset: a blocking list reactor wedges
-		// every other kind too (reactors run under the fake's lock).
+		// Blocking a list reactor wedges other kinds under the fake's lock.
+		// Delay informer start or return errors immediately to hold it unsynced.
 		DebugSyncDelays: syncDelays,
 	}
 
