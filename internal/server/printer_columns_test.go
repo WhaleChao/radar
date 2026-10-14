@@ -307,7 +307,7 @@ func TestNormalizeNilSlice(t *testing.T) {
 func TestWriteResourceListIncludesCoverageWithoutTable(t *testing.T) {
 	s := &Server{}
 	rec := httptest.NewRecorder()
-	coverage := readCoverage([]string{"alpha"}, []string{"alpha"}, false, true, nil)
+	coverage := listTarget{namespaces: []string{"alpha"}}.coverage(nil, nil)
 	s.writeResourceList(rec, httptest.NewRequest("GET", "/api/resources/widgets", nil), nil, false, "widgets", "example.com", []any{}, coverage)
 	var got resourceTableResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {

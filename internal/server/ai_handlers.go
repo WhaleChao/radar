@@ -32,11 +32,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
@@ -54,6 +55,8 @@ import (
 	"github.com/skyhook-io/radar/pkg/executioninsight"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/policyreports"
+	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 	"github.com/skyhook-io/radar/pkg/schedulinginsight"
 	"github.com/skyhook-io/radar/pkg/servinginsight"
@@ -189,15 +192,15 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	}
 	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
 		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
-		coverage, _, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
+		plan, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
 		if err != nil {
 			s.writeCollectionFailure(w, kind, err)
 			return
 		}
 		// This agent endpoint still returns a bare list; partial scope cannot be
 		// represented by that contract, so require its entire requested scope.
-		if coverage.Status != "complete" {
-			s.writeErrorCode(w, 503, "collector_scope_limited", "Radar cannot provide a complete list for the requested scope")
+		if len(plan.gaps) > 0 || !plan.whole {
+			s.writeIncompleteAIList(w, listTarget{clusterScoped: clusterScoped, namespaces: namespaces}, plan.gaps)
 			return
 		}
 	}
@@ -277,13 +280,14 @@ func issueIndexNamespaces(namespaces []string, kind, group string) []string {
 
 // aiListDynamic handles the CRD/dynamic fallback for AI list.
 func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8s.ResourceCache, kind string, namespaces []string, group string, level aicontext.VerbosityLevel, skipContext bool) {
-	allItems, coverage, err := readDynamicResourceList(r, cache, kind, group, namespaces, resourceListHardLimit)
+	allItems, _, gaps, err := readDynamicResourceList(r, cache, kind, group, namespaces, resourceListHardLimit)
 	if err != nil {
 		s.writeCollectionFailure(w, kind, err)
 		return
 	}
-	if coverage.Status != "complete" {
-		s.writeErrorCode(w, 503, "collector_scope_limited", "Radar cannot provide a complete list for the requested scope")
+	if len(gaps) > 0 {
+		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+		s.writeIncompleteAIList(w, listTarget{clusterScoped: clusterScoped, namespaces: namespaces}, gaps)
 		return
 	}
 	if !s.checkResourceListSize(w, len(allItems), resourceListHardLimit) {
@@ -359,8 +363,13 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 		if clusterScoped {
 			target = nil
 		}
-		if _, _, err := typedReadCoverage(cache, key, target, clusterScoped); err != nil {
+		plan, err := typedReadCoverage(cache, key, target, clusterScoped)
+		if err != nil {
 			s.writeCollectionFailure(w, kind, err)
+			return
+		}
+		if !plan.whole {
+			s.writeCollectionFailure(w, kind, readFailuref(readreason.KindSyncPending, "%s are still loading, please retry shortly", key))
 			return
 		}
 	}
@@ -649,4 +658,25 @@ func (s *Server) computeAuditSummaryForResource(r *http.Request, cache *k8s.Reso
 
 func (s *Server) computeAuditSummaryAndRows(r *http.Request, cache *k8s.ResourceCache, group, kind, namespace, name string) (*resourcecontext.AuditSummary, []bpaudit.Finding) {
 	return auditcontext.SummarizeResource(cache, group, kind, namespace, name, s.auditOptions(r))
+}
+
+// writeIncompleteAIList refuses a list the agent endpoint can't return whole:
+// its bare array has no way to say what is missing, so the code is the most
+// actionable gap's and the gaps travel in the error's coverage.
+func (s *Server) writeIncompleteAIList(w http.ResponseWriter, target listTarget, gaps []resourceapi.Gap) {
+	codes := make([]readreason.Code, 0, len(gaps))
+	for _, gap := range gaps {
+		codes = append(codes, gap.Code)
+	}
+	code := readreason.Primary(codes)
+	if code == "" {
+		code = readreason.KindSyncPending
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(readStatusFor(code))
+	s.writeJSON(w, resourceapi.ReadError{
+		Error:     "Radar cannot provide a complete list for the requested scope",
+		ErrorCode: code,
+		Coverage:  &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: target.scope(), Gaps: gaps},
+	})
 }

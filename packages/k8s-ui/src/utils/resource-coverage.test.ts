@@ -3,11 +3,11 @@ import type { ResourceReadCoverage } from '../types/resource-coverage'
 import { resourceCoverageNotice, resourceEmptyMessage, resourceCountLabel, isConfirmedEmpty } from './resource-coverage'
 
 const partial: ResourceReadCoverage = {
-  status: 'partial', requested: { type: 'all_namespaces' },
-  read: { type: 'namespaces', namespaces: { names: ['alpha', 'beta', 'gamma', 'delta'], total: 1000, omitted: 996 } },
-  gaps: [{ reason: 'collector_scope_limited' }],
+  status: 'partial', scope: { type: 'all_namespaces' },
+  read: { type: 'namespaces', namespaces: { sample: ['alpha', 'beta', 'gamma', 'delta'], count: 1000 } },
+  gaps: [{ code: 'collector_scope_limited' }],
 }
-const complete: ResourceReadCoverage = { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } }
+const complete: ResourceReadCoverage = { status: 'complete', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } }
 
 describe('resource coverage presentation', () => {
   it('keeps large namespace lists bounded while showing the true scope size', () => {
@@ -15,8 +15,10 @@ describe('resource coverage presentation', () => {
     expect(resourceCoverageNotice(partial)).not.toContain('delta')
   })
   it('explains loading and collector denial without calling either absence', () => {
-    expect(resourceCoverageNotice({ ...partial, gaps: [{ reason: 'kind_sync_pending' }] })).toContain('still loading')
-    expect(resourceCoverageNotice({ ...partial, gaps: [{ reason: 'collector_access_denied' }] })).toContain("Radar's collector could not read")
+    expect(resourceCoverageNotice({ ...partial, gaps: [{ code: 'kind_sync_pending' }] })).toContain('still loading')
+    expect(resourceCoverageNotice({ ...partial, gaps: [{ code: 'collector_forbidden' }] })).toContain("Radar's collector could not read")
+    expect(resourceCoverageNotice(partial)).toContain("Radar doesn't collect this kind")
+    expect(resourceCoverageNotice({ ...partial, gaps: [{ code: 'collector_scope_limited' }, { code: 'kind_sync_pending' }] })).toContain('still loading')
   })
   it('does not warn on positive rows from an older instance', () => {
     expect(resourceCoverageNotice({ status: 'unknown' })).toBeUndefined()

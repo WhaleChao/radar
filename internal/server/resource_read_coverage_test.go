@@ -61,9 +61,16 @@ func assertResourceReadError(t *testing.T, resp *http.Response, status int, reas
 	if resp.StatusCode != status || code != reason || message == "" {
 		t.Fatalf("status/code = %d/%q, want %d/%q: %s", resp.StatusCode, code, status, reason, body)
 	}
-	for _, field := range []string{"items", "coverage", "columns", "cells"} {
+	for _, field := range []string{"items", "columns", "cells"} {
 		if _, exists := result[field]; exists {
 			t.Fatalf("failed read exposed %s: %s", field, body)
+		}
+	}
+	// A failed read may say what it covered and why, never that it read any of it.
+	if raw, exists := result["coverage"]; exists {
+		var coverage resourceapi.Coverage
+		if err := json.Unmarshal(raw, &coverage); err != nil || coverage.Read != nil || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) == 0 {
+			t.Fatalf("failed read's coverage claims a read: %s", body)
 		}
 	}
 }
@@ -105,21 +112,21 @@ func TestResourceListCoverageDistinguishesEmptyAndUnread(t *testing.T) {
 					if tc.partial {
 						wantStatus = resourceapi.CoveragePartial
 					}
-					if body.Coverage.Status != wantStatus || body.Coverage.Requested.Type != resourceapi.ScopeType(tc.requestedType) {
+					if body.Coverage.Status != wantStatus || body.Coverage.Scope.Type != resourceapi.ScopeType(tc.requestedType) {
 						t.Fatalf("coverage = %+v", body.Coverage)
 					}
-					if body.Coverage.Read.Namespaces == nil || !slices.Equal(body.Coverage.Read.Namespaces.Names, []string{"alpha"}) {
+					if body.Coverage.Read.Namespaces == nil || !slices.Equal(body.Coverage.Read.Namespaces.Sample, []string{"alpha"}) {
 						t.Fatalf("read scope = %+v", body.Coverage.Read)
 					}
 					if tc.partial {
-						if len(body.Coverage.Gaps) != 1 || body.Coverage.Gaps[0].Reason != "collector_scope_limited" {
+						if len(body.Coverage.Gaps) != 1 || body.Coverage.Gaps[0].Code != "collector_scope_limited" {
 							t.Fatalf("gaps = %+v", body.Coverage.Gaps)
 						}
 						gap := body.Coverage.Gaps[0].Namespaces
 						if tc.gapNames == nil && gap != nil {
 							t.Fatalf("invented unread universe: %+v", gap)
 						}
-						if tc.gapNames != nil && (gap == nil || !slices.Equal(gap.Names, tc.gapNames)) {
+						if tc.gapNames != nil && (gap == nil || !slices.Equal(gap.Sample, tc.gapNames)) {
 							t.Fatalf("missing unread namespace: %+v", gap)
 						}
 					} else if len(body.Coverage.Gaps) != 0 {
@@ -132,7 +139,7 @@ func TestResourceListCoverageDistinguishesEmptyAndUnread(t *testing.T) {
 			}
 			resp := get(t, "/api/resources/pods?namespace=beta")
 			defer resp.Body.Close()
-			assertResourceReadError(t, resp, 503, "collector_scope_limited")
+			assertResourceReadError(t, resp, 409, "collector_scope_limited")
 		})
 	}
 }
@@ -146,7 +153,7 @@ func TestResourceGetCoverageBeforeNotFound(t *testing.T) {
 	}
 	resp := get(t, "/api/resources/pods/beta/missing")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, 503, "collector_scope_limited")
+	assertResourceReadError(t, resp, 409, "collector_scope_limited")
 	resp = get(t, "/api/resources/pods/alpha/missing")
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
@@ -190,7 +197,7 @@ func TestAIResourceReadKeepsArrayAndRejectsIncompleteScope(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			resp := get(t, path)
 			defer resp.Body.Close()
-			assertResourceReadError(t, resp, 503, "collector_scope_limited")
+			assertResourceReadError(t, resp, 409, "collector_scope_limited")
 		})
 	}
 }
@@ -217,12 +224,12 @@ func TestResourceListCoverageContainsOnlyCallerVisibleNamespaces(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Coverage.Status != resourceapi.CoveragePartial || result.Coverage.Requested.Namespaces.Total != 2 || result.Coverage.Read.Namespaces.Total != 1 {
+	if result.Coverage.Status != resourceapi.CoveragePartial || result.Coverage.Scope.Namespaces.Count != 2 || result.Coverage.Read.Namespaces.Count != 1 {
 		t.Fatalf("coverage = %+v", result.Coverage)
 	}
 	resp = env.authGet(t, "/api/resources/pods?namespace=hidden-collector-namespace&table=1", "reader", "")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, 403, "no_namespace_access")
+	assertResourceReadError(t, resp, 403, "namespace_not_visible")
 }
 
 func TestResourceCoverageNamespaceMetadataIsBounded(t *testing.T) {
@@ -239,14 +246,14 @@ func TestResourceCoverageNamespaceMetadataIsBounded(t *testing.T) {
 	var body testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/pods?namespaces="+strings.Join(names, ",")), &body)
 	for _, tc := range []struct {
-		set            *resourceapi.NamespaceSet
+		set            *resourceapi.NameSet
 		total, omitted int
-	}{{body.Coverage.Requested.Namespaces, 80, 16}, {body.Coverage.Read.Namespaces, 70, 6}} {
-		if tc.set == nil || len(tc.set.Names) != 64 || tc.set.Total != tc.total || tc.set.Omitted != tc.omitted {
+	}{{body.Coverage.Scope.Namespaces, 80, 16}, {body.Coverage.Read.Namespaces, 70, 6}} {
+		if tc.set == nil || len(tc.set.Sample) != 64 || tc.set.Count != tc.total || tc.set.Count-len(tc.set.Sample) != tc.omitted {
 			t.Fatalf("preview = %+v, want total/omitted %d/%d", tc.set, tc.total, tc.omitted)
 		}
 	}
-	if body.Coverage.Gaps[0].Namespaces.Total != 10 || body.Coverage.Gaps[0].Namespaces.Omitted != 0 {
+	if body.Coverage.Gaps[0].Namespaces.Count != 10 || len(body.Coverage.Gaps[0].Namespaces.Sample) != 10 {
 		t.Fatalf("gap = %+v", body.Coverage.Gaps)
 	}
 }
@@ -285,7 +292,7 @@ func TestResourceListChecksCurrentSizeAfterCountGrowth(t *testing.T) {
 	}
 	resp := get(t, "/api/resources/pods?namespace=alpha&maxItems=2")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, 400, "resource_list_too_large")
+	assertResourceReadError(t, resp, 400, "list_too_large")
 	var exact testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/pods?namespace=alpha&maxItems=3"), &exact)
 	if len(exact.Items) != 3 || exact.Coverage.Status != resourceapi.CoverageComplete {
@@ -328,7 +335,7 @@ func TestResourceCountsShareMetadataBudgetAcrossKinds(t *testing.T) {
 		if coverage.Status != resourceapi.CoverageComplete {
 			t.Fatalf("empty complete cache count %s misclassified: %+v", key, coverage)
 		}
-		sets := []*resourceapi.NamespaceSet{coverage.Requested.Namespaces, coverage.Read.Namespaces}
+		sets := []*resourceapi.NameSet{coverage.Scope.Namespaces, coverage.Read.Namespaces}
 		for _, gap := range coverage.Gaps {
 			sets = append(sets, gap.Namespaces)
 		}
@@ -336,10 +343,10 @@ func TestResourceCountsShareMetadataBudgetAcrossKinds(t *testing.T) {
 			if set == nil {
 				continue
 			}
-			if set.Total != 80 || len(set.Names)+set.Omitted != set.Total || len(set.Names) > 64 {
+			if set.Count != 80 || len(set.Sample) > 64 {
 				t.Fatalf("%s invalid metadata preview: %+v", key, set)
 			}
-			previewNames += len(set.Names)
+			previewNames += len(set.Sample)
 		}
 	}
 	if previewNames > 2048 {
@@ -373,7 +380,7 @@ func TestResourceNamespaceCountMatchesAuthorizedClusterScopedList(t *testing.T) 
 	assertOK(t, env.authGet(t, "/api/resources/namespaces?namespace=alpha", "namespace-reader", ""), &list)
 	var counts ResourceCountsResponse
 	assertOK(t, env.authGet(t, "/api/resource-counts?namespace=alpha", "namespace-reader", ""), &counts)
-	if len(list.Items) != 2 || counts.Counts["Namespace"] != 2 || counts.Coverage["Namespace"].Requested.Type != resourceapi.ScopeCluster || counts.Coverage["Namespace"].Status != resourceapi.CoverageComplete {
+	if len(list.Items) != 2 || counts.Counts["Namespace"] != 2 || counts.Coverage["Namespace"].Scope.Type != resourceapi.ScopeCluster || counts.Coverage["Namespace"].Status != resourceapi.CoverageComplete {
 		t.Fatalf("authorized Namespace count/list disagree: list=%+v counts=%+v", list, counts)
 	}
 	denied := &auth.UserPermissions{AllowedNamespaces: []string{"alpha"}}
@@ -420,7 +427,7 @@ func TestResourceCountsHonorSpecialNamespacedListGates(t *testing.T) {
 	var list testResourceListEnvelope
 	assertOK(t, env.authGet(t, "/api/resources/secrets?namespaces=alpha,beta", "partial", ""), &list)
 	coverage := counts.Coverage["Secret"]
-	if counts.Counts["Secret"] != len(list.Items) || counts.Counts["Secret"] != 1 || coverage.Status != resourceapi.CoveragePartial || coverage.Requested.Namespaces == nil || !slices.Equal(coverage.Requested.Namespaces.Names, []string{"alpha", "beta"}) || coverage.Read.Namespaces == nil || !slices.Equal(coverage.Read.Namespaces.Names, []string{"alpha"}) || len(coverage.Gaps) != 1 || coverage.Gaps[0].Reason != "rbac_denied" || coverage.Gaps[0].Namespaces == nil || !slices.Equal(coverage.Gaps[0].Namespaces.Names, []string{"beta"}) {
+	if counts.Counts["Secret"] != len(list.Items) || counts.Counts["Secret"] != 1 || coverage.Status != resourceapi.CoveragePartial || coverage.Scope.Namespaces == nil || !slices.Equal(coverage.Scope.Namespaces.Sample, []string{"alpha", "beta"}) || coverage.Read.Namespaces == nil || !slices.Equal(coverage.Read.Namespaces.Sample, []string{"alpha"}) || len(coverage.Gaps) != 1 || coverage.Gaps[0].Code != "rbac_denied" || coverage.Gaps[0].Namespaces == nil || !slices.Equal(coverage.Gaps[0].Namespaces.Sample, []string{"beta"}) {
 		t.Fatalf("Secret count did not use list's authorized scope: counts=%+v list=%+v", counts, list)
 	}
 	if _, exists := counts.Counts["LimitRange"]; exists || counts.Reasons["LimitRange"] != "rbac_denied" {
@@ -472,12 +479,12 @@ func TestResourceDynamicNamespaceCoverageDoesNotBorrowAnotherInformer(t *testing
 	}
 	var result testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/widgets?group=example.com&namespaces=alpha,beta"), &result)
-	if result.Coverage.Status != resourceapi.CoveragePartial || len(result.Items) != 0 || result.Items == nil || len(result.Coverage.Gaps) != 1 || result.Coverage.Gaps[0].Reason != "collector_access_denied" {
+	if result.Coverage.Status != resourceapi.CoveragePartial || len(result.Items) != 0 || result.Items == nil || len(result.Coverage.Gaps) != 1 || result.Coverage.Gaps[0].Code != "collector_forbidden" {
 		t.Fatalf("dynamic empty partial = %+v", result)
 	}
 	resp := get(t, "/api/resources/widgets/beta/missing?group=example.com")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, 403, "collector_access_denied")
+	assertResourceReadError(t, resp, 503, "collector_forbidden")
 	resp = get(t, "/api/resources/widgets/alpha/missing?group=example.com")
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
@@ -588,12 +595,12 @@ func TestResourceListGroupCollisionKeepsRowsAndCoverageTogether(t *testing.T) {
 	}
 	var core testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/Service?namespace=alpha"), &core)
-	if len(core.Items) != 1 || mustNested(t, core.Items[0], "metadata", "name") != "core-service" || core.Coverage.Read.Namespaces.Total != 1 || core.Coverage.Status != resourceapi.CoverageComplete {
+	if len(core.Items) != 1 || mustNested(t, core.Items[0], "metadata", "name") != "core-service" || core.Coverage.Read.Namespaces.Count != 1 || core.Coverage.Status != resourceapi.CoverageComplete {
 		t.Fatalf("core Service read = %+v", core)
 	}
 	var knative testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/Services?group=serving.knative.dev&namespace=beta&table=1"), &knative)
-	if len(knative.Items) != 1 || mustNested(t, knative.Items[0], "metadata", "name") != "knative-service" || knative.Items[0]["apiVersion"] != "serving.knative.dev/v1" || knative.Kind != "services" || knative.Group != gvr.Group || knative.Coverage.Status != resourceapi.CoverageComplete || !slices.Equal(knative.Coverage.Read.Namespaces.Names, []string{"beta"}) {
+	if len(knative.Items) != 1 || mustNested(t, knative.Items[0], "metadata", "name") != "knative-service" || knative.Items[0]["apiVersion"] != "serving.knative.dev/v1" || knative.Kind != "services" || knative.Group != gvr.Group || knative.Coverage.Status != resourceapi.CoverageComplete || !slices.Equal(knative.Coverage.Read.Namespaces.Sample, []string{"beta"}) {
 		t.Fatalf("group-qualified Service read borrowed core data/scope: %+v", knative)
 	}
 }
@@ -650,7 +657,7 @@ func TestDirectResourceListFollowsSmallPagesWithinBudget(t *testing.T) {
 			resp := get(t, fmt.Sprintf("/api/resources/endpointslices?group=discovery.k8s.io&namespace=alpha&maxItems=%d", limit))
 			defer resp.Body.Close()
 			if limit == 2 {
-				assertResourceReadError(t, resp, 400, "resource_list_too_large")
+				assertResourceReadError(t, resp, 400, "list_too_large")
 			} else {
 				var result testResourceListEnvelope
 				if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -680,7 +687,7 @@ func TestUnsupportedDynamicListKeepsItsCollectionCause(t *testing.T) {
 	before := len(dyn.Actions())
 	resp := get(t, "/api/resources/summaries?group=example.com&namespace=alpha")
 	defer resp.Body.Close()
-	assertResourceReadError(t, resp, 503, "collection_not_supported")
+	assertResourceReadError(t, resp, 400, "kind_not_watchable")
 	if len(dyn.Actions()) != before {
 		t.Fatal("unsupported collection attempted a Kubernetes read")
 	}
@@ -697,9 +704,9 @@ func TestCancelledDirectNamespaceReadIsNotInformerLoading(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := httptest.NewRequest("GET", "/api/resources/leases?namespace=alpha", nil).WithContext(ctx)
-	_, _, err := readDynamicResourceList(req, k8s.GetResourceCache(), "leases", gvr.Group, []string{"alpha"}, 10)
+	_, _, _, err := readDynamicResourceList(req, k8s.GetResourceCache(), "leases", gvr.Group, []string{"alpha"}, 10)
 	var failure *resourceReadFailure
-	if !errors.As(err, &failure) || failure.status != 503 || failure.reason != readreason.ReadError {
+	if !errors.As(err, &failure) || failure.code != readreason.ReadError || readStatusFor(failure.code) != 500 {
 		t.Fatalf("cancelled direct read = %v", err)
 	}
 	if len(dyn.Actions()) != 0 {
@@ -723,17 +730,22 @@ func TestResourceReadPreservesKnownExclusionBeforeInitialSync(t *testing.T) {
 		{[]string{"alpha", "beta"}, readreason.KindSyncPending},
 		{nil, readreason.KindSyncPending},
 	} {
-		coverage, read, err := typedReadCoverage(cache, "pods", tc.namespaces, false)
+		plan, err := typedReadCoverage(cache, "pods", tc.namespaces, false)
 		var failure *resourceReadFailure
-		if !errors.As(err, &failure) || failure.reason != tc.reason || read != nil {
-			t.Fatalf("%v: coverage=%+v read=%v error=%v; want %s", tc.namespaces, coverage, read, err, tc.reason)
+		if !errors.As(err, &failure) || failure.code != tc.reason || plan.read != nil {
+			t.Fatalf("%v: plan=%+v error=%v; want %s", tc.namespaces, plan, err, tc.reason)
 		}
 		if len(tc.namespaces) == 2 {
-			if !strings.Contains(failure.message, "beta") || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || coverage.Gaps[1].Reason != readreason.CollectorScopeLimited || !slices.Equal(coverage.Gaps[1].Namespaces.Names, []string{"beta"}) {
-				t.Fatalf("mixed target lost known exclusion: %+v %v", coverage, failure)
+			var scope *resourceapi.Gap
+			for i := range failure.gaps {
+				if failure.gaps[i].Code == readreason.CollectorScopeLimited {
+					scope = &failure.gaps[i]
+				}
+			}
+			if len(failure.gaps) != 2 || scope == nil || !slices.Equal(scope.Namespaces.Sample, []string{"beta"}) {
+				t.Fatalf("mixed target lost known exclusion: %+v", failure.gaps)
 			}
 		}
-
 	}
 }
 
@@ -754,7 +766,8 @@ func TestPendingResourceCountsRetainKnownScopeGaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	coverage := response.Coverage["Pod"]
-	if w.Code != 200 || !slices.Contains(response.Unavailable, "Pod") || response.Reasons["Pod"] != string(readreason.KindSyncPending) || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || !slices.Equal(coverage.Gaps[1].Namespaces.Names, []string{"beta"}) {
+	scopeGap := slices.IndexFunc(coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.CollectorScopeLimited })
+	if w.Code != 200 || !slices.Contains(response.Unavailable, "Pod") || response.Reasons["Pod"] != string(readreason.KindSyncPending) || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || scopeGap < 0 || !slices.Equal(coverage.Gaps[scopeGap].Namespaces.Sample, []string{"beta"}) {
 		t.Fatalf("counts lost unread scope facts: status=%d %+v", w.Code, response)
 	}
 	if _, exists := response.Counts["Pod"]; exists {

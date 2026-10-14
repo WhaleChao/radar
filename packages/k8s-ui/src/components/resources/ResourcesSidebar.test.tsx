@@ -68,7 +68,7 @@ describe('ResourcesSidebar count visibility', () => {
         onSelectedKindChange={() => {}}
         apiResources={[horizontalPodAutoscaler]}
         resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }}
-        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
+        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
       />
     )
 
@@ -83,7 +83,7 @@ describe('ResourcesSidebar count visibility', () => {
         onSelectedKindChange={() => {}}
         apiResources={[horizontalPodAutoscaler]}
         resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }}
-        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
+        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
       />
     )
 
@@ -98,7 +98,7 @@ describe('ResourcesSidebar count visibility', () => {
         onSelectedKindChange={() => {}}
         apiResources={[horizontalPodAutoscaler]}
         resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }}
-        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
+        resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'complete', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'all_namespaces' } } }}
         pinned={[{ name: 'horizontalpodautoscalers', kind: 'HorizontalPodAutoscaler', group: 'autoscaling' }]}
         isPinned={(name, group) => name === 'horizontalpodautoscalers' && group === 'autoscaling'}
       />
@@ -186,7 +186,7 @@ describe('ResourcesSidebar category workspaces', () => {
 })
 
 it('keeps a partial zero visible rather than hiding the kind as empty', () => {
-  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], total: 1, omitted: 0 } } } }} />)
+  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { sample: ['alpha'], count: 1 } } } }} />)
   expect(html).toContain('HorizontalPodAutoscaler')
   expect(html).toContain('–')
   expect(html).not.toContain('≥0')
@@ -213,7 +213,7 @@ describe('sidebarDestinationsMatching', () => {
 
  it('qualifies the collapsed category total as well as the individual kind', () => {
  const widget = { name: 'widgets', kind: 'Widget', group: 'read.example.test', version: 'v1', namespaced: true, isCrd: true, verbs: ['get', 'list', 'watch'] }
- const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[widget]} resourceCounts={{ 'read.example.test/Widget': 3 }} resourceCoverage={{ 'read.example.test/Widget': { status: 'partial', gaps: [], requested: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], total: 1, omitted: 0 } } } }} />)
+ const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[widget]} resourceCounts={{ 'read.example.test/Widget': 3 }} resourceCoverage={{ 'read.example.test/Widget': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { sample: ['alpha'], count: 1 } } } }} />)
  const start = html.indexOf('>Test Read Example</span>')
  expect(start).toBeGreaterThan(-1)
  expect(html.slice(start, html.indexOf('</button>', start))).toContain('≥3')

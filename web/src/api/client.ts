@@ -4,6 +4,7 @@ import { knownKindForPluralWithGroup, pluralToKind } from '@skyhook-io/k8s-ui/ut
 import { useEffect, useRef } from 'react'
 import type { KueueAdmissionResponse } from '@skyhook-io/k8s-ui/types/scheduling'
 import type { SearchCoverage } from '@skyhook-io/k8s-ui/types/read-coverage'
+import { readActionFor } from '@skyhook-io/k8s-ui/utils/read-actions'
 import type { GitOpsWriteEvidence } from '@skyhook-io/k8s-ui/utils/gitops-write-guard'
 import type {
   AppHistory,
@@ -2848,7 +2849,10 @@ export function useResources<T>(
     // surfacing an error.
     retry: (failureCount, error) => {
       if (isStillLoadingError(error)) return true;
-      if (isKindSyncFailed(error) || (error instanceof ApiError && error.data?.error_code === 'resource_list_too_large')) return false;
+      if (isKindSyncFailed(error)) return false;
+      // A request no retry can answer (too large, outside the collector, a
+      // denial) is shown at once rather than retried.
+      if (error instanceof ApiError && !['retry', 'request_kind', undefined].includes(readActionFor(error.data?.error_code))) return false;
       return failureCount < 1; // one retry, 4xx included, unlike the QueryClient default
     },
     retryDelay: (failureCount, error) =>

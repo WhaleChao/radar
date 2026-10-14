@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeResourceList } from './resourceLists'
 
-const complete = { status: 'complete' as const, gaps: [], requested: { type: 'cluster' as const }, read: { type: 'cluster' as const } }
+const complete = { status: 'complete' as const, gaps: [], scope: { type: 'cluster' as const }, read: { type: 'cluster' as const } }
 
 describe('versioned resource-list responses', () => {
   it('uses the new envelope and retains partial metadata with zero rows', () => {
-    const coverage = { ...complete, status: 'partial' as const, gaps: [{ reason: 'collector_scope_limited' }] }
+    const coverage = { ...complete, status: 'partial' as const, gaps: [{ code: 'collector_scope_limited' }] }
     expect(normalizeResourceList({ items: [], kind: 'Pod', group: '', coverage }, true, false)).toEqual({ items: [], coverage, printerTable: null })
   })
   it('marks old array results as unknown rather than complete', () => {

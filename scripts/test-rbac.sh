@@ -370,7 +370,7 @@ mcp_call() {
 
 expect_mcp_denied() {
   local desc=$1 user=$2 tool=$3 args=$4
-  if mcp_response "$user" "$tool" "$args" | jq -e '.result.isError == true and (.result.content[0].text | startswith("rbac_denied:"))' >/dev/null; then
+  if mcp_response "$user" "$tool" "$args" | jq -e '.result.isError == true and .result.structuredContent.error_code == "rbac_denied" and (.result.content[0].text | fromjson | .error_code == "rbac_denied")' >/dev/null; then
     ok "$desc"
   else
     fail "$desc — expected explicit RBAC error"
@@ -459,14 +459,14 @@ expect_rest_forbidden "alice cannot list Nodes" alice /api/resources/nodes
 echo
 echo -e "${B}=== MCP: list_resources filters per-user ===${N}"
 
-ALICE_MCP_PODS=$(mcp_call alice list_resources '{"kind":"pods"}' | jq -r '.[].name // empty' 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+ALICE_MCP_PODS=$(mcp_call alice list_resources '{"kind":"pods"}' | jq -r '.items[].name // empty' 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
 if [[ "$ALICE_MCP_PODS" == "rbac-test-pod-a" ]]; then
   ok "MCP alice list_resources kind=pods returns only rbac-test-pod-a"
 else
   fail "MCP alice pods = [$ALICE_MCP_PODS], expected [rbac-test-pod-a]"
 fi
 
-BOB_MCP_PODS=$(mcp_call bob list_resources '{"kind":"pods"}' | jq -r '.[].name // empty' 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+BOB_MCP_PODS=$(mcp_call bob list_resources '{"kind":"pods"}' | jq -r '.items[].name // empty' 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
 if [[ "$BOB_MCP_PODS" == "rbac-test-pod-b" ]]; then
   ok "MCP bob list_resources kind=pods returns only rbac-test-pod-b"
 else
@@ -661,7 +661,7 @@ expect_at_least_one "REST erin can list nodes despite no namespace access" "$ERI
 
 expect_rest_forbidden "REST erin cannot list Pods" erin /api/resources/pods
 
-ERIN_MCP_NODES=$(mcp_call erin list_resources '{"kind":"nodes"}' | arr_len)
+ERIN_MCP_NODES=$(mcp_call erin list_resources '{"kind":"nodes"}' | jq '.items' 2>/dev/null | arr_len)
 if [[ "$ERIN_MCP_NODES" -ge 1 ]]; then
   ok "MCP erin list_resources kind=nodes returns ≥1"
 else

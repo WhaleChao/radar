@@ -1,0 +1,165 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/skyhook-io/radar/internal/auth"
+	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
+)
+
+// Every code a read can fail with has an HTTP status, so none falls through
+// to a 500 that hides its meaning.
+func TestEveryReadCodeHasAStatus(t *testing.T) {
+	for _, code := range readreason.Codes() {
+		if _, ok := readStatus[code]; !ok {
+			t.Errorf("%s has no HTTP status", code)
+		}
+	}
+	// Radar's own collection is never the caller's 401/403, and a limit of
+	// what it collects is never a retryable 503.
+	for _, code := range []readreason.Code{readreason.CollectorForbidden, readreason.CollectorCredentialsRejected, readreason.CollectorScopeLimited} {
+		if status := readStatusFor(code); status == http.StatusUnauthorized || status == http.StatusForbidden {
+			t.Errorf("%s answers %d, which reads as the caller's denial", code, status)
+		}
+	}
+	if readStatusFor(readreason.CollectorScopeLimited) == http.StatusServiceUnavailable {
+		t.Error("a collection limit must not invite a retry")
+	}
+}
+
+// useLoadingConfigMaps installs a cache that watches ConfigMaps in alpha and
+// gamma, where alpha has synced and gamma never answers.
+func useLoadingConfigMaps(t *testing.T) {
+	t.Helper()
+	client := fake.NewClientset(
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "alpha-cm"}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "gamma", Name: "gamma-cm"}},
+	)
+	client.PrependReactor("list", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "gamma" {
+			return true, nil, errors.New("gamma does not answer")
+		}
+		return false, nil, nil
+	})
+	t.Cleanup(func() {
+		k8s.ResetResourceCache()
+		if err := k8s.InitTestResourceCache(testFakeClient); err != nil {
+			t.Fatalf("restore package fixture cache: %v", err)
+		}
+	})
+	k8s.ResetResourceCache()
+	if err := k8s.InitTestResourceCacheFromConfig(k8score.CacheConfig{
+		Client:                  client,
+		ResourceTypes:           map[string]bool{"configmaps": true},
+		ResourceScopes:          map[string]k8score.ResourceScope{"configmaps": {Enabled: true, Namespace: "alpha"}},
+		ResourceScopeNamespaces: map[string][]string{"configmaps": {"alpha", "gamma"}},
+		DeferredTypes:           map[string]bool{"configmaps": true},
+		DeferredSyncTimeout:     time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !k8s.GetResourceCache().AssessKindRead("configmaps", []string{"alpha"}).Complete {
+		if time.Now().After(deadline) {
+			t.Fatal("alpha never synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A built-in kind watched namespace by namespace is listed, got and counted in
+// a namespace whose informer has synced while another is still loading; the
+// loading namespace is a gap rather than a reason to refuse the read.
+func TestResourceReadsArePerNamespaceForBuiltInKinds(t *testing.T) {
+	useLoadingConfigMaps(t)
+
+	var list testResourceListEnvelope
+	if resp := get(t, "/api/resources/configmaps?namespaces=alpha,gamma"); resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	} else {
+		assertOK(t, resp, &list)
+	}
+	pending := slices.IndexFunc(list.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.KindSyncPending })
+	if len(list.Items) != 1 || mustNested(t, list.Items[0], "metadata", "name") != "alpha-cm" || list.Coverage.Status != resourceapi.CoveragePartial ||
+		pending < 0 || !slices.Equal(list.Coverage.Gaps[pending].Namespaces.Sample, []string{"gamma"}) || !slices.Equal(list.Coverage.Read.Namespaces.Sample, []string{"alpha"}) {
+		t.Fatalf("list while gamma loads = %+v", list)
+	}
+
+	var only testResourceListEnvelope
+	assertOK(t, get(t, "/api/resources/configmaps?namespace=alpha"), &only)
+	if only.Coverage.Status != resourceapi.CoverageComplete || len(only.Items) != 1 {
+		t.Fatalf("a synced namespace alone is complete: %+v", only)
+	}
+
+	assertOK(t, get(t, "/api/resources/configmaps/alpha/alpha-cm"), nil)
+	missing := get(t, "/api/resources/configmaps/alpha/missing")
+	defer missing.Body.Close()
+	assertResourceReadError(t, missing, http.StatusNotFound, "object_not_found")
+	loading := get(t, "/api/resources/configmaps/gamma/gamma-cm")
+	defer loading.Body.Close()
+	assertResourceReadError(t, loading, http.StatusServiceUnavailable, "kind_sync_pending")
+
+	var counts ResourceCountsResponse
+	assertOK(t, get(t, "/api/resource-counts?namespaces=alpha,gamma"), &counts)
+	if counts.Counts["ConfigMap"] != 1 || counts.Coverage["ConfigMap"].Status != resourceapi.CoveragePartial {
+		t.Fatalf("a partial count is the synced namespaces' count, qualified: %+v %+v", counts.Counts, counts.Coverage["ConfigMap"])
+	}
+}
+
+// An unscoped list a restricted caller's access narrowed says so; a list of
+// namespaces the caller named does not, and a named namespace the caller
+// can't see is counted, never named back.
+func TestResourceListScopeProvenance(t *testing.T) {
+	client := fake.NewClientset(
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "a"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "beta", Name: "b"}},
+	)
+	useTestResourceCache(t, client)
+	env := newAuthTestServer(t)
+	env.srv.permCache.Set("scoped", nil, &auth.UserPermissions{AllowedNamespaces: []string{"alpha"}})
+	decode := func(resp *http.Response) testResourceListEnvelope {
+		t.Helper()
+		var body testResourceListEnvelope
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	implicit := decode(env.authGet(t, "/api/resources/services", "scoped", ""))
+	if implicit.Coverage.Status != resourceapi.CoverageComplete || !slices.Equal(implicit.Coverage.NarrowedBy, []resourceapi.Narrowing{resourceapi.NarrowedByCallerAccess}) ||
+		!slices.Equal(implicit.Coverage.Scope.Namespaces.Sample, []string{"alpha"}) {
+		t.Fatalf("narrowed implicit list = %+v", implicit.Coverage)
+	}
+
+	named := decode(env.authGet(t, "/api/resources/services?namespaces=alpha,secret-tenant", "scoped", ""))
+	hidden := slices.IndexFunc(named.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.NamespaceNotVisible })
+	if named.Coverage.Status != resourceapi.CoveragePartial || len(named.Coverage.NarrowedBy) != 0 || hidden < 0 ||
+		named.Coverage.Gaps[hidden].Namespaces.Count != 1 || len(named.Coverage.Gaps[hidden].Namespaces.Sample) != 0 {
+		t.Fatalf("named list = %+v", named.Coverage)
+	}
+	if raw, _ := json.Marshal(named); strings.Contains(string(raw), "secret-tenant") {
+		t.Fatalf("a namespace the caller can't see was named back: %s", raw)
+	}
+}

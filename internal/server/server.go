@@ -2255,16 +2255,32 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	// DiscoverNamespaces if needed). canRead below relies on it.
 	namespaces := s.parseNamespacesForUser(r)
 
-	requestedNamespaces := namespaces
-	finalNamespaces, status, msg, ok := s.preflightResourceList(r, kind, group, namespaces)
+	visible := namespaces
+	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+	finalNamespaces, _, msg, ok := s.preflightResourceList(r, kind, group, namespaces)
 	if !ok {
-		reason := readreason.RBACDenied
+		target := s.resourceListTarget(r, visible, nil, clusterScoped)
+		code := readreason.RBACDenied
 		if msg == "no namespace access" {
-			reason = readreason.NoNamespaceAccess
+			code = readreason.NoNamespaceAccess
+			// Every namespace the request named is outside the pin or the
+			// caller's view: say which, rather than "no access".
+			if len(target.gaps) > 0 {
+				codes := make([]readreason.Code, 0, len(target.gaps))
+				for _, gap := range target.gaps {
+					codes = append(codes, gap.Code)
+				}
+				code = readreason.Primary(codes)
+			}
 		}
-		s.writeErrorCode(w, status, string(reason), msg)
+		s.writeReadFailure(w, kind, &resourceReadFailure{code: code, message: msg}, &target)
 		return
 	}
+	var authorized []string
+	if !clusterScoped && !slices.Equal(finalNamespaces, visible) {
+		authorized = finalNamespaces
+	}
+	target := s.resourceListTarget(r, visible, authorized, clusterScoped)
 	namespaces = finalNamespaces
 
 	cache, ok := s.gateResourceRead(w, kind, group)
@@ -2279,12 +2295,12 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	}
 	key := informerKeyForKind(kind)
 	if key == "" || (group != "" && !k8s.TypedKindOwnsGroup(kind, group)) {
-		items, coverage, readErr := readDynamicResourceList(r, cache, kind, group, namespaces, limit)
+		items, read, gaps, readErr := readDynamicResourceList(r, cache, kind, group, namespaces, limit)
 		if readErr != nil {
-			s.writeCollectionFailure(w, kind, readErr)
+			s.writeReadFailure(w, kind, readErr, &target)
 			return
 		}
-		coverage = withCallerScopeGaps(coverage, requestedNamespaces, namespaces)
+		coverage := target.coverage(read, gaps)
 		if !s.checkResourceListSize(w, len(items), limit) {
 			return
 		}
@@ -2295,15 +2311,33 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 		s.writeResourceList(w, r, cache, tableMode, kind, group, result, coverage)
 		return
 	}
-	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
-	coverage, readNamespaces, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
+	plan, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
 	if err != nil {
-		s.writeCollectionFailure(w, kind, err)
+		s.writeReadFailure(w, kind, err, &target)
 		return
 	}
-	coverage = withCallerScopeGaps(coverage, requestedNamespaces, namespaces)
-	namespaces = readNamespaces
-	if !s.checkResourceListSize(w, typedListCount(cache, key, namespaces), limit) {
+	coverage := target.coverage(plan.read, plan.gaps)
+	namespaces = plan.read
+	// A kind still loading elsewhere is listed from the stores of the
+	// namespaces whose own informers have synced; its lister is withheld
+	// until it has loaded everywhere.
+	var partialRows []any
+	count := 0
+	if plan.whole {
+		count = typedListCount(cache, key, namespaces)
+	} else {
+		objs, ok := cache.ReadableObjects(key, namespaces)
+		if !ok {
+			s.writeReadFailure(w, kind, readFailuref(readreason.KindSyncPending, "%s are still loading, please retry shortly", key), &target)
+			return
+		}
+		partialRows = make([]any, 0, len(objs))
+		for _, obj := range objs {
+			partialRows = append(partialRows, obj)
+		}
+		count = len(partialRows)
+	}
+	if !s.checkResourceListSize(w, count, limit) {
 		return
 	}
 	var result any
@@ -2352,7 +2386,13 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	if key := informerKeyForKind(kind); key != "" {
 		kind = key
 	}
-	switch kind {
+	typedKind := kind
+	if partialRows != nil {
+		typedKind = ""
+	}
+	switch typedKind {
+	case "":
+		result = partialRows
 	case "pods":
 		if cache.Pods() == nil {
 			forbiddenMsg("pods")
@@ -2702,13 +2742,13 @@ func informerKeyForKind(kind string) string {
 	return ""
 }
 
-// gateResourceRead enforces per-kind readiness for the typed resource read
-// handlers and picks which cache serves the request. Post-connect that is
-// the promoted singleton — readiness must keep gating deferred/promoted kinds
-// syncing in background, or a partial store would serve as an empty or
-// truncated list. During initial sync it is the mid-sync handle, so kinds
-// become readable one by one instead of waiting behind the global connected
-// gate.
+// gateResourceRead picks which cache serves a typed resource read. Post-connect
+// that is the promoted singleton; during initial sync it is the mid-sync
+// handle, so kinds become readable one by one instead of waiting behind the
+// global connected gate. It does not refuse a kind still loading: callers
+// assess the read with typedReadCoverage, which serves the namespaces whose
+// informers have synced and reports the rest as gaps, so a partial store never
+// serves as an empty or truncated list.
 //
 // Returns (cache, true) when the read may proceed; otherwise writes the
 // response and returns (nil, false). Kinds outside the typed informer set —
@@ -2735,26 +2775,18 @@ func (s *Server) gateResourceRead(w http.ResponseWriter, kind, group string) (*k
 		return nil, false
 	}
 	switch readiness {
-	case k8s.KindPending:
-		s.writeErrorCode(w, http.StatusServiceUnavailable, "kind_sync_pending",
-			fmt.Sprintf("%s are still loading, please retry shortly", key))
-		return nil, false
-	case k8s.KindFailed:
-		s.writeErrorCode(w, http.StatusServiceUnavailable, "kind_sync_failed",
-			fmt.Sprintf("%s failed to load within the sync deadline", key))
-		return nil, false
 	case k8s.KindUnavailable:
 		// No informer for a typed-vocabulary kind (RBAC-disabled). The
 		// existing forbidden semantics need the fully-initialized stack —
 		// mid-sync there is no dynamic cache to fall through to, so answer
 		// "still loading" rather than 500 off a half-built path.
 		if k8s.GetResourceCache() == nil {
-			s.writeErrorCode(w, http.StatusServiceUnavailable, "kind_sync_pending",
+			s.writeErrorCode(w, http.StatusServiceUnavailable, string(readreason.KindSyncPending),
 				fmt.Sprintf("%s are still loading, please retry shortly", key))
 			return nil, false
 		}
 		return cache, true
-	default: // KindReady
+	default: // ready, or loading in some namespaces: typedReadCoverage decides
 		return cache, true
 	}
 }
@@ -2900,15 +2932,31 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A kind still loading elsewhere is read from this namespace's own store
+	// once its informer has synced; a miss there is a confirmed absence.
+	var readable any
 	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
 		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
 		target := []string{namespace}
 		if clusterScoped {
 			target = nil
 		}
-		if _, _, err := typedReadCoverage(cache, key, target, clusterScoped); err != nil {
+		plan, err := typedReadCoverage(cache, key, target, clusterScoped)
+		if err != nil {
 			s.writeCollectionFailure(w, kind, err)
 			return
+		}
+		if !plan.whole {
+			obj, found, ok := cache.ReadableObject(key, namespace, name)
+			switch {
+			case !ok:
+				s.writeCollectionFailure(w, kind, readFailuref(readreason.KindSyncPending, "%s are still loading, please retry shortly", key))
+				return
+			case !found:
+				s.writeErrorCode(w, http.StatusNotFound, string(readreason.ObjectNotFound), fmt.Sprintf("%s %q not found", key, name))
+				return
+			}
+			readable = obj
 		}
 	}
 	var resource any
@@ -2941,11 +2989,11 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 		resource, err = readDynamicResourceGet(r.Context(), cache, kind, group, namespace, name)
 		if err != nil {
 			if errors.Is(err, k8s.ErrUnknownDynamicKind) {
-				s.writeError(w, http.StatusBadRequest, err.Error())
+				s.writeErrorCode(w, http.StatusBadRequest, string(readreason.KindUnknown), err.Error())
 				return
 			}
 			if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
-				s.writeError(w, http.StatusNotFound, err.Error())
+				s.writeErrorCode(w, http.StatusNotFound, string(readreason.ObjectNotFound), err.Error())
 				return
 			}
 			log.Printf("[resources] Failed to get %s %s/%s (group=%s): %v", kind, namespace, name, group, err)
@@ -2977,7 +3025,13 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try typed cache for known resource types first
-	switch kind {
+	typedKind := kind
+	if readable != nil {
+		typedKind = ""
+	}
+	switch typedKind {
+	case "":
+		resource = readable
 	case "pods", "pod":
 		if cache.Pods() == nil {
 			forbiddenGet("pods")
@@ -3157,11 +3211,11 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 		resource, err = readDynamicResourceGet(r.Context(), cache, kind, group, namespace, name)
 		if err != nil {
 			if errors.Is(err, k8s.ErrUnknownDynamicKind) {
-				s.writeError(w, http.StatusBadRequest, err.Error())
+				s.writeErrorCode(w, http.StatusBadRequest, string(readreason.KindUnknown), err.Error())
 				return
 			}
 			if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
-				s.writeError(w, http.StatusNotFound, err.Error())
+				s.writeErrorCode(w, http.StatusNotFound, string(readreason.ObjectNotFound), err.Error())
 				return
 			}
 			s.writeCollectionFailure(w, kind, err)
@@ -3171,7 +3225,7 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
-			s.writeError(w, http.StatusNotFound, err.Error())
+			s.writeErrorCode(w, http.StatusNotFound, string(readreason.ObjectNotFound), err.Error())
 		} else {
 			s.writeCollectionFailure(w, kind, err)
 		}

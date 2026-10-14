@@ -49,8 +49,8 @@ func TestLimitRangeResourceAccess(t *testing.T) {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
 			}
 			if tt.want == http.StatusForbidden {
-				var body map[string]string
-				if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body["error"] == "" {
+				var body map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body["error"] == "" || body["error_code"] == "" {
 					t.Fatalf("expected explicit error, got %v (%v)", body, err)
 				}
 			} else if tt.verb == "list" {
@@ -83,10 +83,10 @@ func TestLimitRangeCacheCoverage(t *testing.T) {
 		want int
 	}{
 		{"/api/resources/limitranges?namespace=default", 200},
-		{"/api/resources/limitranges?namespace=other", 503},
+		{"/api/resources/limitranges?namespace=other", 409},
 		{"/api/resources/limitranges?namespaces=default,other", 200},
 		{"/api/resources/limitranges", 200},
-		{"/api/resources/limitranges/other/unknown", 503},
+		{"/api/resources/limitranges/other/unknown", 409},
 		{"/api/resources/limitranges/default/unknown", 404},
 	} {
 		t.Run(tt.path, func(t *testing.T) {

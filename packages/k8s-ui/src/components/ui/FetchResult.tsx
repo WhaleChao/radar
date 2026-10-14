@@ -3,6 +3,7 @@ import { ShieldOff, AlertTriangle, ServerCrash, LogIn, Copy, Check, RefreshCw, t
 import { clsx } from 'clsx'
 import { PaneLoader } from './PaneLoader'
 import { isFetchError } from '../../types/fetch-error'
+import { readActionFor } from '../../utils/read-actions'
 
 // FetchResult collapses (loading, error, no-data) into one rendered outcome:
 // loader while loading, a typed error surface when the fetch threw, or the
@@ -120,6 +121,11 @@ function classify(error: unknown, notFoundMessage: string): Classified {
         // deadline, so "Cluster unavailable" would send the reader the wrong way.
         if (errorCodeOf(error) === 'kind_sync_failed') {
           return { headline: "Couldn't load this view", detail: error.message, icon: AlertTriangle }
+        }
+        // Radar's own identity or collection can't serve the read: neither
+        // the cluster being down nor the reader's access.
+        if (readActionFor(errorCodeOf(error)) === 'collector_config') {
+          return { headline: "Radar can't read this", detail: error.message, icon: ShieldOff }
         }
         // The cluster is healthy and still loading — the retry policies keep
         // these surfaces polling, but a caller without one must not tell the

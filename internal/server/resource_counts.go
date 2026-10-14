@@ -62,6 +62,18 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespaces := s.parseNamespacesForUser(r)
+	// countTarget is a kind's target: the request's, with authorized the
+	// namespaces exact kind authorization allows of it.
+	requestTarget := s.requestListTarget(r, namespaces)
+	countTarget := func(authorized []string, clusterScoped bool) listTarget {
+		if clusterScoped {
+			return listTarget{clusterScoped: true}
+		}
+		if slices.Equal(authorized, namespaces) {
+			authorized = nil
+		}
+		return requestTarget.withKindAuthorization(namespaces, authorized)
+	}
 
 	cache, syncing := k8s.SnapshotCaches()
 	if cache == nil {
@@ -143,7 +155,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		markCounted(endpointSliceCountKey, total)
-		countCoverage[endpointSliceCountKey] = readCoverage(namespaces, namespaces, false, true, nil)
+		countCoverage[endpointSliceCountKey] = countTarget(nil, false).coverage(nil, nil)
 	}
 
 	for _, kl := range k8score.AllKindListers() {
@@ -157,45 +169,45 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		clusterScoped, _, _ := k8s.ClassifyKindScope(kl.Kind(), "")
-		// An unsynced informer has a partial (or empty) store — its count is
-		// not a fact yet. Unavailable keeps the sidebar badge at "–" and the
-		// large-list guard latched. A terminally-failed kind carries a reason
-		// so the client can hand it to the list endpoint, whose 503
-		// kind_sync_failed renders honestly (the guard would otherwise trap
-		// it on "count unavailable" forever).
-		switch cache.KindReadinessForKindName(kl.Kind()) {
-		case k8score.KindPending, k8score.KindFailed:
-			markUnavailable(kl.CountKey())
-			coverage, _, err := typedReadCoverage(cache, informerKeyForKind(kl.Kind()), kindNamespaces, clusterScoped)
-			var failure *resourceReadFailure
-			if errors.As(err, &failure) {
-				reasons[kl.CountKey()] = string(failure.reason)
-			}
-			if coverage.Status != "" {
-				countCoverage[kl.CountKey()] = coverage
-			}
-			continue
-		}
-		l := kl.Lister()(cache.ResourceCache)
-		if l == nil {
-			// No informer: Radar's SA can't read this kind (not installed, SA
-			// RBAC, or feature off) — a user-level grant won't surface it.
-			markForbidden(kl.CountKey(), reasonUnavailable)
-			continue
-		}
-
-		coverage, readNamespaces, scopeErr := typedReadCoverage(cache, informerKeyForKind(kl.Kind()), kindNamespaces, clusterScoped)
+		// A kind still loading as a whole is counted in the namespaces whose
+		// informers have synced, as a partial count; with none synced its
+		// count is not a fact yet and stays unavailable. A terminally-failed
+		// kind carries its code so the client can hand it to the list
+		// endpoint, whose kind_sync_failed renders honestly.
+		key := informerKeyForKind(kl.Kind())
+		target := countTarget(kindNamespaces, clusterScoped)
+		plan, scopeErr := typedReadCoverage(cache, key, kindNamespaces, clusterScoped)
 		if scopeErr != nil {
 			markUnavailable(kl.CountKey())
 			var failure *resourceReadFailure
 			if errors.As(scopeErr, &failure) {
-				reasons[kl.CountKey()] = string(failure.reason)
+				reasons[kl.CountKey()] = string(failure.code)
+				if len(failure.gaps) > 0 {
+					countCoverage[kl.CountKey()] = resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: target.scope(), NarrowedBy: target.narrowedBy, Gaps: append(slices.Clone(target.gaps), failure.gaps...)}
+				}
 			}
 			continue
 		}
-		n := k8score.ListCountNamespaced(l, readNamespaces)
+		var n int
+		if plan.whole {
+			l := kl.Lister()(cache.ResourceCache)
+			if l == nil {
+				// No informer: Radar's SA can't read this kind (not installed, SA
+				// RBAC, or feature off) — a user-level grant won't surface it.
+				markForbidden(kl.CountKey(), reasonUnavailable)
+				continue
+			}
+			n = k8score.ListCountNamespaced(l, plan.read)
+		} else {
+			count, ok := cache.ReadableCount(key, plan.read)
+			if !ok {
+				markUnavailable(kl.CountKey())
+				continue
+			}
+			n = count
+		}
 		markCounted(kl.CountKey(), n)
-		countCoverage[kl.CountKey()] = withCallerScopeGaps(coverage, namespaces, kindNamespaces)
+		countCoverage[kl.CountKey()] = target.coverage(plan.read, plan.gaps)
 	}
 
 	// 2. Discovery-backed resources.
@@ -275,7 +287,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				markCounted(key, total)
-				countCoverage[key] = readCoverage(countNamespaces, countNamespaces, !resource.namespaced, true, nil)
+				countCoverage[key] = countTarget(nil, !resource.namespaced).coverage(nil, nil)
 			}
 
 			// Deduplicate CRDs by group+kind, keeping the most stable served version.
@@ -324,11 +336,15 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 				if !crd.namespaced {
 					target = nil
 				}
-				coverage, readNamespaces, ready := dynamicCountCoverage(dynamicCache, crd.gvr, target, !crd.namespaced)
+				read, gaps, ready := dynamicCountCoverage(dynamicCache, crd.gvr, target, !crd.namespaced)
 				if ready {
-					if n, err := dynamicCache.Count(crd.gvr, readNamespaces); err == nil {
+					countIn := read
+					if countIn == nil {
+						countIn = target
+					}
+					if n, err := dynamicCache.Count(crd.gvr, countIn); err == nil {
 						markCounted(key, n)
-						countCoverage[key] = coverage
+						countCoverage[key] = countTarget(nil, !crd.namespaced).coverage(read, gaps)
 						continue
 					}
 				}
