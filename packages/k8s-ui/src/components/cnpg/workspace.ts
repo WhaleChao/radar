@@ -36,8 +36,15 @@ export type CNPGCoverageState = 'full' | 'partial' | 'denied' | 'notInstalled' |
 
 export interface CNPGKindCoverage {
   state: CNPGCoverageState
-  /** Denied namespaces, named only when the caller supplied the candidate list. */
+  /** Namespaces the caller's own access excludes, named only when the caller supplied the candidate list. */
   deniedNamespaces?: string[]
+  /**
+   * Namespaces Radar's collector does not collect; more access for the caller
+   * would not change them. Every Radar that tells the two apart sends this
+   * (possibly empty); an older Radar omits it and lists both under
+   * deniedNamespaces, so its partial coverage can't be blamed on either.
+   */
+  uncoveredNamespaces?: string[]
   /** For partial coverage: the namespaces that were read. */
   allowedNamespaces?: string[]
 }
@@ -212,17 +219,21 @@ export function coverageReadable(cov: CNPGKindCoverage, namespace?: string): boo
   if (cov.state === 'partial') {
     if (!namespace) return false
     if (cov.allowedNamespaces) return cov.allowedNamespaces.includes(namespace)
-    if (cov.deniedNamespaces) return !cov.deniedNamespaces.includes(namespace)
+    if (cov.deniedNamespaces) return !cov.deniedNamespaces.includes(namespace) && !cov.uncoveredNamespaces?.includes(namespace)
     return false
   }
   return false
 }
 
-function coverageUnavailableText(cov: CNPGKindCoverage, what: string): string {
+/** Why a kind can't be shown here: the caller's access, Radar's collection, or — from an older Radar that doesn't say — neither named. */
+function coverageUnavailableText(cov: CNPGKindCoverage, what: string, namespace?: string): string {
   switch (cov.state) {
     case 'denied':
-    case 'partial':
       return `No access to ${what}`
+    case 'partial':
+      if (namespace && cov.uncoveredNamespaces?.includes(namespace)) return `Radar doesn't collect ${what} here`
+      if (namespace && cov.uncoveredNamespaces && cov.deniedNamespaces?.includes(namespace)) return `No access to ${what}`
+      return `${what} not read here`
     case 'syncing':
       return 'Loading…'
     case 'error':
@@ -285,7 +296,7 @@ function scheduleFact(
 ): CNPGProtectionFacts['schedule'] {
   const ns = cluster.metadata?.namespace
   if (!coverageReadable(cov, ns)) {
-    return { text: coverageUnavailableText(cov, 'ScheduledBackups'), tone: 'unknown', names: [] }
+    return { text: coverageUnavailableText(cov, 'ScheduledBackups', ns), tone: 'unknown', names: [] }
   }
   const mine = schedules.filter((s) => s.metadata?.namespace === ns && specClusterName(s) === cluster.metadata?.name)
   if (mine.length === 0) return { text: 'No declarative schedule', tone: 'neutral', names: [] }
@@ -367,9 +378,9 @@ function lastBackupFact(
   if (!cfg.plugin && cfg.lastSuccessfulBackup) candidates.push({ at: cfg.lastSuccessfulBackup, source: 'Cluster status' })
   if (candidates.length === 0) {
     if (!coverageReadable(backupsCov, ns)) {
-      return { text: coverageUnavailableText(backupsCov, 'Backups'), tone: 'unknown' }
+      return { text: coverageUnavailableText(backupsCov, 'Backups', ns), tone: 'unknown' }
     }
-    if (storesUnreadable) return { text: coverageUnavailableText(storesUnreadable, 'ObjectStores'), tone: 'unknown' }
+    if (storesUnreadable) return { text: coverageUnavailableText(storesUnreadable, 'ObjectStores', ns), tone: 'unknown' }
     return { text: 'None observed', tone: 'unknown' }
   }
   const best = candidates.reduce((a, b) => (Date.parse(a.at) >= Date.parse(b.at) ? a : b))
@@ -468,7 +479,7 @@ function replicationFact(cluster: any, pods: CNPGInstance[], hibernated: boolean
   const desired = cluster?.spec?.instances
   if (desired === 1) return { text: 'Single instance', tone: 'neutral' }
   if (!coverageReadable(podsCov, cluster?.metadata?.namespace)) {
-    return { text: coverageUnavailableText(podsCov, 'Pods'), tone: 'unknown' }
+    return { text: coverageUnavailableText(podsCov, 'Pods', cluster?.metadata?.namespace), tone: 'unknown' }
   }
   const replicas = pods.filter((p) => p.role === 'replica')
   const readyReplicas = replicas.filter((p) => p.ready === true).length
@@ -633,7 +644,7 @@ export function buildCNPGFleet(resp: CNPGWorkspaceResponse): CNPGFleet {
             source: `ObjectStore ${window.store} status (earliest point)`,
           }
         : storesUnreadable
-          ? { text: coverageUnavailableText(storesCov, 'ObjectStores'), tone: 'unknown' }
+          ? { text: coverageUnavailableText(storesCov, 'ObjectStores', ns), tone: 'unknown' }
           : { text: 'Not reported', tone: 'unknown' },
       restoreValidation: restoreValidationFact(cluster, clusters, resp.objects.backups ?? [], coverageReadable(coverageOf(resp, 'backups'), ns)),
     }
