@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,10 +93,23 @@ func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []s
 		return resourceapi.Coverage{}, nil, &resourceReadFailure{503, readreason.CollectorScopeLimited, fmt.Sprintf("Radar's collector does not cover the requested scope for %s", resource)}
 	}
 	switch assessment.Readiness {
-	case k8score.KindPending:
-		return resourceapi.Coverage{}, nil, &resourceReadFailure{503, readreason.KindSyncPending, fmt.Sprintf("%s are still loading, please retry shortly", resource)}
-	case k8score.KindFailed:
-		return resourceapi.Coverage{}, nil, &resourceReadFailure{503, readreason.KindSyncFailed, fmt.Sprintf("%s failed to load within the sync deadline", resource)}
+	case k8score.KindPending, k8score.KindFailed:
+		reason := readreason.KindSyncPending
+		message := fmt.Sprintf("%s are still loading, please retry shortly", resource)
+		if assessment.Readiness == k8score.KindFailed {
+			reason = readreason.KindSyncFailed
+			message = fmt.Sprintf("%s failed to load within the sync deadline", resource)
+		}
+		gaps := []resourceapi.Gap{{Reason: reason}}
+		if len(assessment.Uncovered) > 0 {
+			preview := resourceapi.NamespacePreview(assessment.Uncovered, resourceapi.RESTNamespacePreview)
+			gaps = append(gaps, resourceapi.Gap{Reason: readreason.CollectorScopeLimited, Namespaces: preview})
+			message += fmt.Sprintf("; Radar's collector does not cover %d requested namespaces (%s)", preview.Total, strings.Join(preview.Names, ", "))
+			if preview.Omitted > 0 {
+				message += fmt.Sprintf("; %d more not shown", preview.Omitted)
+			}
+		}
+		return readCoverage(namespaces, []string{}, clusterScoped, false, gaps), nil, &resourceReadFailure{503, reason, message}
 	case k8score.KindUnavailable:
 		if permissions := cache.PermissionResult(); permissions != nil {
 			if scope, known := permissions.Scopes[resource]; known && !scope.Enabled {

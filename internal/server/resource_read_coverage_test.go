@@ -725,8 +725,39 @@ func TestResourceReadPreservesKnownExclusionBeforeInitialSync(t *testing.T) {
 	} {
 		coverage, read, err := typedReadCoverage(cache, "pods", tc.namespaces, false)
 		var failure *resourceReadFailure
-		if !errors.As(err, &failure) || failure.reason != tc.reason || read != nil || coverage.Status != "" {
+		if !errors.As(err, &failure) || failure.reason != tc.reason || read != nil {
 			t.Fatalf("%v: coverage=%+v read=%v error=%v; want %s", tc.namespaces, coverage, read, err, tc.reason)
 		}
+		if len(tc.namespaces) == 2 {
+			if !strings.Contains(failure.message, "beta") || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || coverage.Gaps[1].Reason != readreason.CollectorScopeLimited || !slices.Equal(coverage.Gaps[1].Namespaces.Names, []string{"beta"}) {
+				t.Fatalf("mixed target lost known exclusion: %+v %v", coverage, failure)
+			}
+		}
+
+	}
+}
+
+func TestPendingResourceCountsRetainKnownScopeGaps(t *testing.T) {
+	core, err := k8score.NewResourceCache(k8score.CacheConfig{Client: fake.NewClientset(), ResourceScopes: map[string]k8score.ResourceScope{"services": {Enabled: true}, "pods": {Enabled: true, Namespace: "alpha"}}, DeferredTypes: map[string]bool{"pods": true}, DebugSyncDelays: map[string]time.Duration{"pods": time.Hour}, DeferredSyncTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(core.Stop)
+	cache := k8s.GetResourceCache()
+	prior := cache.ResourceCache
+	cache.ResourceCache = core
+	defer func() { cache.ResourceCache = prior }()
+	w := httptest.NewRecorder()
+	(&Server{}).handleResourceCounts(w, httptest.NewRequest(http.MethodGet, "/api/resource-counts?namespaces=alpha,beta", nil))
+	var response ResourceCountsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	coverage := response.Coverage["Pod"]
+	if w.Code != 200 || !slices.Contains(response.Unavailable, "Pod") || response.Reasons["Pod"] != string(readreason.KindSyncPending) || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || !slices.Equal(coverage.Gaps[1].Namespaces.Names, []string{"beta"}) {
+		t.Fatalf("counts lost unread scope facts: status=%d %+v", w.Code, response)
+	}
+	if _, exists := response.Counts["Pod"]; exists {
+		t.Fatal("pending Pod count became an observation")
 	}
 }

@@ -8,7 +8,6 @@ import (
 
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/pkg/k8score"
-	"github.com/skyhook-io/radar/pkg/readreason"
 	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -147,29 +146,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, kl := range k8score.AllKindListers() {
-		// An unsynced informer has a partial (or empty) store — its count is
-		// not a fact yet. Unavailable keeps the sidebar badge at "–" and the
-		// large-list guard latched. A terminally-failed kind carries a reason
-		// so the client can hand it to the list endpoint, whose 503
-		// kind_sync_failed renders honestly (the guard would otherwise trap
-		// it on "count unavailable" forever).
-		switch cache.KindReadinessForKindName(kl.Kind()) {
-		case k8score.KindPending:
-			// Reasoned, so the client can render loading instead of a count
-			//-verification failure — deferred kinds sync after connect, so
-			// this state is not confined to the connecting phase.
-			markUnavailable(kl.CountKey())
-			reasons[kl.CountKey()] = string(readreason.KindSyncPending)
-			continue
-		case k8score.KindFailed:
-			markUnavailable(kl.CountKey())
-			reasons[kl.CountKey()] = string(readreason.KindSyncFailed)
-			continue
-		}
-		l := kl.Lister()(cache.ResourceCache)
-		if l == nil {
-			// No informer: Radar's SA can't read this kind (not installed, SA
-			// RBAC, or feature off) — a user-level grant won't surface it.
+		if cache.KindReadinessForKindName(kl.Kind()) == k8score.KindUnavailable {
 			markForbidden(kl.CountKey(), reasonUnavailable)
 			continue
 		}
@@ -179,6 +156,33 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		clusterScoped, _, _ := k8s.ClassifyKindScope(kl.Kind(), "")
+		// An unsynced informer has a partial (or empty) store — its count is
+		// not a fact yet. Unavailable keeps the sidebar badge at "–" and the
+		// large-list guard latched. A terminally-failed kind carries a reason
+		// so the client can hand it to the list endpoint, whose 503
+		// kind_sync_failed renders honestly (the guard would otherwise trap
+		// it on "count unavailable" forever).
+		switch cache.KindReadinessForKindName(kl.Kind()) {
+		case k8score.KindPending, k8score.KindFailed:
+			markUnavailable(kl.CountKey())
+			coverage, _, err := typedReadCoverage(cache, informerKeyForKind(kl.Kind()), kindNamespaces, clusterScoped)
+			var failure *resourceReadFailure
+			if errors.As(err, &failure) {
+				reasons[kl.CountKey()] = string(failure.reason)
+			}
+			if coverage.Status != "" {
+				countCoverage[kl.CountKey()] = coverage
+			}
+			continue
+		}
+		l := kl.Lister()(cache.ResourceCache)
+		if l == nil {
+			// No informer: Radar's SA can't read this kind (not installed, SA
+			// RBAC, or feature off) — a user-level grant won't surface it.
+			markForbidden(kl.CountKey(), reasonUnavailable)
+			continue
+		}
+
 		coverage, readNamespaces, scopeErr := typedReadCoverage(cache, informerKeyForKind(kl.Kind()), kindNamespaces, clusterScoped)
 		if scopeErr != nil {
 			markUnavailable(kl.CountKey())
