@@ -27,6 +27,7 @@ import (
 	aicontext "github.com/skyhook-io/radar/pkg/ai/context"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/readreason"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 )
 
@@ -139,12 +140,24 @@ type Options struct {
 	// excluded.
 	NamespaceCheckFailed bool
 	// ExcludedNamespaces are namespaces ns: terms named that the caller's RBAC
-	// leaves out; reported as namespace_excluded.
+	// leaves out; reported as namespace_not_visible.
 	ExcludedNamespaces []string
+	// MissingNamespaces are namespaces ns: terms named that don't exist,
+	// found only for a caller who can see every namespace; reported as
+	// namespace_not_found.
+	MissingNamespaces []string
 	// SelectionExcludedNamespaces are namespaces ns: terms named that the
 	// caller may see but the saved namespace pick or the --namespace-scope pin
-	// leaves out; reported as namespace_scope_limited.
+	// leaves out; reported as outside_namespace_selection, or
+	// outside_namespace_scope when Pinned.
 	SelectionExcludedNamespaces []string
+	// Pinned says Radar runs with --namespace-scope, so a namespace selection
+	// is the pin rather than the caller's saved pick. Handlers set it before
+	// ScopeNamespaces.
+	Pinned bool
+	// namespaceNarrowing is how the caller's access, the pin or the saved
+	// pick narrowed a query that named no namespace.
+	namespaceNarrowing []resourceapi.Narrowing
 	// seesAllNamespaces records that the caller's RBAC covers every namespace
 	// (ScopeNamespaces' ceiling was nil).
 	seesAllNamespaces bool
@@ -222,8 +235,13 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 			}
 			return false
 		}
-		cov.namespaces(readreason.NamespaceExcluded, opts.ExcludedNamespaces...)
-		cov.namespaces(readreason.NamespaceScopeLimited, opts.SelectionExcludedNamespaces...)
+		cov.namespaces(readreason.NamespaceNotVisible, opts.ExcludedNamespaces...)
+		cov.namespaces(readreason.NamespaceNotFound, opts.MissingNamespaces...)
+		selection := readreason.OutsideNamespaceSelection
+		if opts.Pinned {
+			selection = readreason.OutsideNamespaceScope
+		}
+		cov.namespaces(selection, opts.SelectionExcludedNamespaces...)
 		return !opts.NamespaceExcluded
 	}
 	// A broad ns: query asks for objects in those namespaces, which no
@@ -239,13 +257,14 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 		}
 		return q
 	}
+	var filterFailed []resourceapi.ObjectRef
 	recordFilterError := func(c candidate, err error) {
 		res.FilterErrors++
 		if res.FilterErrorSample == "" {
 			res.FilterErrorSample = err.Error()
 		}
-		if len(res.FilterFailedObjects) < 20 {
-			res.FilterFailedObjects = append(res.FilterFailedObjects, FailedObject{c.Kind, c.Namespace, c.Name})
+		if len(filterFailed) < maxFilterFailedObjects {
+			filterFailed = append(filterFailed, resourceapi.ObjectRef{Kind: c.Kind, Group: c.Group, Namespace: c.Namespace, Name: c.Name})
 		}
 	}
 	// Buffer hits along with the source object so summaryBuilder (topology
@@ -279,6 +298,14 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 		readiness := p.TypedCoverage(tk.Kind, opts.Namespaces)
 		if readiness == readreason.CollectorScopeLimited {
 			readiness = ""
+		}
+		// A kind watched namespace by namespace can be searched where its
+		// informers have synced while others still load; the rest is a gap.
+		var readable []string
+		if !clusterScoped && (readiness == readreason.KindSyncPending || readiness == readreason.KindSyncFailed) {
+			if r, ok := p.(typedNamespaceReader); ok {
+				readable = r.TypedReadable(tk.Kind, opts.Namespaces)
+			}
 		}
 		if readiness != "" && cov.quiet(readiness) {
 			continue
@@ -334,7 +361,9 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 		}
 		if readiness != "" {
 			cov.kind(tk.Kind, tk.Group, readiness)
-			continue
+			if listNs = readableWithin(listNs, readable); len(listNs) == 0 {
+				continue
+			}
 		}
 		if !clusterScoped && len(q.NSFilter) > 0 {
 			for _, ns := range listNs {
@@ -432,7 +461,7 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 		if !clusterScoped && !namespaced(kind, gvr.Group) {
 			continue
 		}
-		if settled && reason == readreason.CollectionNotSupported {
+		if settled && reason == readreason.KindNotWatchable {
 			cov.kind(kind, gvr.Group, reason)
 			continue
 		}
@@ -443,10 +472,7 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 			}
 		}
 		if settled {
-			gap := cov.kind(kind, gvr.Group, reason)
-			if gap != nil && reason == readreason.KindSyncFailed && observation.State == k8score.DynamicObservationDeferred {
-				gap.RetryWithKind = true
-			}
+			cov.kind(kind, gvr.Group, reason)
 			continue
 		}
 		namespaces := opts.Namespaces
@@ -497,7 +523,7 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 					// Radar's collector being refused one more namespace of a
 					// kind it already watches elsewhere is its collection
 					// scope, not a denial of the kind.
-					if outsideScope && reason == readreason.CollectorAccessDenied {
+					if outsideScope && reason == readreason.CollectorForbidden {
 						cov.namespaces(readreason.CollectorScopeLimited, ns)
 					} else {
 						cov.kind(kind, gvr.Group, reason)
@@ -587,7 +613,7 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 			key := strings.ToLower(requested)
 			if !covered[requested] && !unknownKinds[key] {
 				unknownKinds[key] = true
-				cov.kind(requested, "", readreason.UnknownKind)
+				cov.kind(requested, "", readreason.KindUnknown)
 				if incompleteDiscovery {
 					cov.catalog(readreason.ReadError)
 				}
@@ -597,8 +623,15 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	res.Unsearched = cov.result()
-	res.Partial = len(res.Unsearched) > 0 || res.FilterErrors > 0
+	gaps := cov.result()
+	if res.FilterErrors > 0 {
+		gaps = append(gaps, resourceapi.Gap{Code: readreason.FilterEvalFailed, Objects: resourceapi.Objects(filterFailed, res.FilterErrors, maxFilterFailedObjects)})
+		sortGaps(gaps)
+	}
+	res.Coverage = resourceapi.SearchCoverage{Status: resourceapi.CoverageComplete, NarrowedBy: cov.narrowedBy(opts.namespaceNarrowing), Gaps: gaps}
+	if len(gaps) > 0 {
+		res.Coverage.Status = resourceapi.CoveragePartial
+	}
 	if res.FilterErrors > 0 {
 		log.Printf("[search] CEL filter eval errors: %d rows; first=%s", res.FilterErrors, res.FilterErrorSample)
 	}

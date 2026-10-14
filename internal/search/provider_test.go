@@ -70,7 +70,7 @@ func TestCacheProviderUnavailableTypedUsesCollectorPermissions(t *testing.T) {
 	t.Cleanup(cache.Stop)
 	p := &CacheProvider{cache: &k8s.ResourceCache{ResourceCache: cache}, permissions: &k8s.ResourcePermissions{}}
 	for _, tk := range typedKinds {
-		if got := p.TypedCoverage(tk.Kind, nil); got != "collector_access_denied" {
+		if got := p.TypedCoverage(tk.Kind, nil); got != "collector_forbidden" {
 			t.Errorf("%s: %q", tk.Kind, got)
 		}
 	}
@@ -99,7 +99,7 @@ func TestCacheProviderNeverWarmsDirectReadBuiltins(t *testing.T) {
 		if got := p.DynamicObservation(gvr, ""); got.State != k8score.DynamicObservationUnsupported {
 			t.Errorf("%s observation: %+v", gvr.Resource, got)
 		}
-		if err := p.WarmDynamic(context.Background(), gvr, ""); listErrorReason(err) != "collection_not_supported" {
+		if err := p.WarmDynamic(context.Background(), gvr, ""); listErrorReason(err) != "kind_not_watchable" {
 			t.Errorf("%s warm: %v", gvr.Resource, err)
 		}
 	}
@@ -169,8 +169,8 @@ func TestDynamicReadinessIsJudgedPerNamespace(t *testing.T) {
 		if got := hitNames(res); !reflect.DeepEqual(got, []string{"Widget/a/robusta-a"}) {
 			t.Errorf("namespaces %v: hits %v, want a's widget while b is still loading", tc.namespaces, got)
 		}
-		if !reflect.DeepEqual(res.Unsearched, tc.want) || res.Partial != (len(tc.want) > 0) {
-			t.Errorf("namespaces %v: coverage %+v partial=%v, want %+v", tc.namespaces, res.Unsearched, res.Partial, tc.want)
+		if !reflect.DeepEqual(unsearched(res), tc.want) || partial(res) != (len(tc.want) > 0) {
+			t.Errorf("namespaces %v: coverage %+v partial=%v, want %+v", tc.namespaces, unsearched(res), partial(res), tc.want)
 		}
 	}
 }
@@ -213,13 +213,13 @@ func TestCacheProviderCatalogLoadsUntilCRDDiscoveryCompletes(t *testing.T) {
 		t.Fatalf("before CRD discovery: %v %v", gvrs, err)
 	}
 	res, _ := Search(context.Background(), p, Parse("kind:Gadget robusta"), Options{})
-	if want := []UnsearchedKind{{Kind: "*", Reason: "kind_sync_pending"}}; !reflect.DeepEqual(res.Unsearched, want) {
-		t.Fatalf("search before CRD discovery = %+v, want %+v", res.Unsearched, want)
+	if want := []UnsearchedKind{{Kind: "*", Reason: "kind_sync_pending"}}; !reflect.DeepEqual(unsearched(res), want) {
+		t.Fatalf("search before CRD discovery = %+v, want %+v", unsearched(res), want)
 	}
 	completeCRDDiscovery(t, dynamic)
 	res, _ = Search(context.Background(), p, Parse("kind:Gadget robusta"), Options{})
-	if want := []UnsearchedKind{{Kind: "Gadget", Reason: "unknown_kind"}}; !reflect.DeepEqual(res.Unsearched, want) {
-		t.Fatalf("search after CRD discovery = %+v, want %+v", res.Unsearched, want)
+	if want := []UnsearchedKind{{Kind: "Gadget", Reason: "kind_unknown"}}; !reflect.DeepEqual(unsearched(res), want) {
+		t.Fatalf("search after CRD discovery = %+v, want %+v", unsearched(res), want)
 	}
 }
 

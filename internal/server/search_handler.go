@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/skyhook-io/radar/internal/filter"
+	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/search"
 	"github.com/skyhook-io/radar/internal/summarycontext"
 )
@@ -40,7 +41,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	//
 	// Without globalNs=1, the per-user namespace-switcher pick (or the
 	// --namespace-scope namespace) narrows the scan; an `ns:` term naming a
-	// namespace it leaves out is reported as namespace_scope_limited.
+	// namespace it leaves out is reported as outside_namespace_selection, or
+	// outside_namespace_scope under the pin.
 	// globalNs=1 drops the cosmetic pick and scans the user's full RBAC
 	// ceiling (within the pin) — a "global" search whose only scope is the
 	// query's own `ns:` tokens. The omnibar sets it so a deliberately broad ⌘K
@@ -71,6 +73,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			return s.canReadDecision(r, group, resource, "", "list")
 		},
 	}
+	opts.Pinned = k8s.ForceNamespaceScope
 	opts.ScopeNamespaces(parsed, visible, ceiling)
 	opts.NamespaceCheckFailed = namespaceCheckFailed
 	scanNamespaces := opts.Namespaces

@@ -677,110 +677,122 @@ of typed kinds are skipped, so `kind:Event` does not duplicate core Events throu
 `events.k8s.io`. Third-party CRDs named Event are searched normally; only built-in
 Events are excluded from broad searches.
 
-Every response includes `partial` and an `unsearched` array of
-`{kind, group, reason, namespaces?, count?, retryWithKind?}`. Core resources use `group: ""`.
+Every response includes `coverage`: `{status, narrowedBy?, gaps}`, built from the
+same [gaps and codes](#resource-reads-coverage-and-errors) as resource lists. A
+gap names `kinds` (`{count, sample}` of `{kind, group}`, an omitted group being
+core), `namespaces`, or `objects`, never both kinds and namespaces; a gap with
+none of them reaches an unknown set of kinds.
 
-**`partial: true` means this result can't rule out a match for what you asked:
-something was loading or failed, or a kind or namespace you named couldn't be
-searched. `partial: false` means no such problem was reported; it is not proof
-that nothing exists outside your access or Radar's collection.** Result limits
-(`total` vs `total_matched`, MCP `narrowHint`) are separate.
+**`status: "partial"` means this result can't rule out a match for what you
+asked: something was loading or failed, a kind or namespace you named couldn't
+be searched, or the filter couldn't be evaluated on some objects. `complete`
+means no such problem was reported. A broad query searches only what your
+access and Radar's collection allow without listing each kind it skipped, so
+`narrowedBy` says when that happened (`caller_access`, `namespace_pin`,
+`namespace_selection`, `collection`): even a complete search is then no proof
+that nothing exists outside it.** Result limits (`total` vs `total_matched`, MCP
+`narrowHint`) are separate.
 
 What gets reported follows from that:
 
 - **Your access and Radar's setup are the scope of a search, not gaps in it.** A
-  kind-level access, setup or query reason (`rbac_denied`, `collector_access_denied`,
-  `collection_not_supported`, `unknown_kind`) is reported only for a kind a `kind:`
-  term names. A namespace reason is reported only for a namespace an `ns:` term (or
-  the MCP `namespace` argument) names. So `ns:` alone never yields per-kind entries,
-  and `kind:` alone never yields namespace or collection-scope entries.
-  `kind_not_watched` is never reported.
-- **Loading and failures are always reported, folded.** All `kind_sync_pending` kinds
-  become one `{kind: "*", group: "", reason: "kind_sync_pending", count: N}`, where N
-  counts distinct kinds. Each failure reason (`kind_sync_failed`, `read_error`,
-  `permission_check_failed`) names its first five kinds, by kind then group, and
-  folds the rest into `{kind: "*", reason, count: N}`, where N counts only the folded
-  kinds. A query with `kind:` terms names every kind it reports, exactly.
+  kind-level access, setup or query reason (`rbac_denied`, `collector_forbidden`,
+  `kind_not_watchable`, `kind_unknown`) is a gap only for a kind a `kind:` term
+  names; on a broad query it adds to `narrowedBy` instead. A namespace reason is a
+  gap only for a namespace an `ns:` term (or the MCP `namespace` argument) names.
+  So `ns:` alone never yields per-kind gaps, and `kind:` alone never yields
+  namespace or collection-scope gaps. `kind_not_watched` is never reported.
+- **Loading and failures are always reported, folded.** All `kind_sync_pending`
+  kinds become one gap whose `kinds` counts distinct kinds and names none. Each
+  failure reason (`kind_sync_failed`, `kind_watch_failed`, `read_error`,
+  `permission_check_failed`, `collector_credentials_rejected`) names its first five
+  kinds, by kind then group, and counts the rest. A query with `kind:` terms names
+  every kind it reports, exactly.
 - **Only kinds you may read count, and your access comes first.** Your own access is
   checked before a kind's loading, failed or collection state is reported, so a kind
   you can't list never shows up as loading for you, and a named kind that neither
-  you nor Radar can read is reported as `rbac_denied` (yours to fix). Radar's own
-  denial (`collector_access_denied`) is reported only when you could read the kind.
-  A kind search can't collect at all (`collection_not_supported`) is reported
-  without a permission check.
+  you nor Radar can read is `rbac_denied` (yours to fix). Radar's own denial
+  (`collector_forbidden`) is reported only when you could read the kind. A kind
+  search can't collect at all (`kind_not_watchable`) is reported without a
+  permission check.
 - **While discovery is loading** (API discovery, or the CRD discovery that decides
-  which custom kinds Radar watches), the response carries a `*` `kind_sync_pending`
-  entry without a `count` (the set of kinds isn't known yet) and no `unknown_kind`:
-  a `kind:` term that matched nothing may simply not be discovered yet. When API
-  discovery failed for some groups, an unmatched `kind:` term is still
-  `unknown_kind`, beside a `*` `read_error` without a `count`: the kind may live in
-  a group Radar couldn't discover. Broad searches don't report failed groups.
+  which custom kinds Radar watches), the response carries a `kind_sync_pending`
+  gap with no kinds (the set isn't known yet) and no `kind_unknown`: a `kind:`
+  term that matched nothing may simply not be discovered yet. When API discovery
+  failed for some groups, an unmatched `kind:` term is still `kind_unknown`, beside
+  a `read_error` gap with no kinds: the kind may live in a group Radar couldn't
+  discover. Broad searches don't report failed groups.
 - **A kind Radar doesn't watch yet is setup**, whether it was too large to watch
   eagerly or its access or size probe went unanswered or didn't finish; a `kind:`
-  term warms it, retrying the probe, and reports what happens. Only a watch that was granted but couldn't start reports
-  `kind_sync_failed` on every search. A probe the client-side rate limiter refused
-  never reached the API server, so it is neither a grant nor a denial: Radar never
-  watches a namespace on its strength, and a namespace its own credentials can't
-  list stays outside its collection (silent on broad searches,
-  `collector_scope_limited` when an `ns:` term names it).
+  term warms it, retrying the probe, and reports what happens. A watch that was
+  granted but couldn't start is `kind_watch_failed` on every search, and a `kind:`
+  search starts it again; a watch that started but hasn't finished loading by its
+  deadline is `kind_sync_failed`, which naming the kind can't restart. A probe the
+  client-side rate limiter refused never reached the API server, so it is neither a
+  grant nor a denial: Radar never watches a namespace on its strength, and a
+  namespace its own credentials can't list stays outside its collection (silent on
+  broad searches, `collector_scope_limited` when an `ns:` term names it).
 - **Search never waits on warm-up.** Kinds still loading are reported as
   `kind_sync_pending`, and the per-hit `summaryContext` (health, issue count,
   managedBy) is left out when it can't be built within about three seconds, as
   right after a restart while custom-resource discovery runs.
+- **A kind Radar watches namespace by namespace is searched where it has
+  loaded.** A namespace whose informer is still loading is a `kind_sync_pending`
+  gap for the kind, and the namespaces that are ready still contribute hits.
 - **When your namespace access couldn't be determined**, namespaced kinds are not
   searched (fail closed) and the result reports `permission_check_failed` (per named
-  kind, or one `*` entry), never `namespace_excluded`.
+  kind, or one gap with no kinds), never a namespace code.
 
-| Reason | Reported | Meaning | Next step |
+| Code | Reported | Meaning | Next step |
 |---|---|---|---|
 | `kind_sync_pending` | always (folded) | The kind or discovery is still loading, or warming ran out of time. | Retry in a few seconds. |
-| `kind_sync_failed` | always (folded) | The kind's initial sync failed, or a dynamic sync stalled. | Inspect Radar's connection and list/watch access. |
+| `kind_sync_failed` | always (folded) | The kind's initial load missed its deadline; Radar keeps trying. | Retry later; if it persists, inspect Radar's connection and list/watch access. |
+| `kind_watch_failed` | always (folded) | The kind's watch failed to start. | Search with `kind:` to start it again. |
 | `read_error` | always (folded) | An unclassified list or discovery failure. | Retry or investigate. |
 | `permission_check_failed` | always (folded) | Radar could not complete your permission check and failed closed. This is not a denial; authorized namespaces still contribute hits. | Retry. |
 | `rbac_denied` | named `kind:` | Your role cannot list the kind in some or all of the searched namespaces. | Ask for access; authorized namespaces still contribute hits. |
-| `collector_access_denied` | named `kind:` | Kubernetes refused Radar's own identity for the kind. | Fix Radar's access; granting the caller access does not help. |
-| `collection_not_supported` | named `kind:` | The kind cannot be watched, or Radar reads it directly instead of watching. | Use `list_resources`; warming will not help. |
-| `unknown_kind` | named `kind:` | A `kind:` term matched no kind in the discovered catalog: it isn't installed on this cluster, or it is misspelled. Reported in your spelling. | Check the spelling, and whether the API is installed here. |
-| `namespace_excluded` | named `ns:` | Your RBAC doesn't include the namespace; or, if you can see every namespace, it doesn't exist on this cluster. | Only a caller who can see every namespace may read it as "doesn't exist". |
-| `namespace_scope_limited` | named `ns:` | Radar's `--namespace-scope` pin leaves the namespace out, or on REST without `globalNs=1`, your saved namespace pick does. | Widen the pin, or pass `globalNs=1` to drop the pick. |
+| `collector_forbidden` | named `kind:` | Kubernetes refused Radar's own identity for the kind. | Fix Radar's access; granting the caller access does not help. |
+| `kind_not_watchable` | named `kind:` | The kind cannot be watched, or Radar reads it directly instead of watching. | Use `list_resources`; warming will not help. |
+| `kind_unknown` | named `kind:` | A `kind:` term matched no kind in the discovered catalog: it isn't installed on this cluster, or it is misspelled. Reported in your spelling. | Check the spelling, and whether the API is installed here. |
+| `namespace_not_found` | named `ns:` | The namespace doesn't exist on this cluster. Only a caller who can see every namespace is told this. | Check the name. |
+| `namespace_not_visible` | named `ns:` | The namespace isn't among the namespaces you can see, or doesn't exist; the code doesn't say which. | Use a namespace you can see, or ask for access. |
+| `outside_namespace_selection` | named `ns:` | Your saved namespace pick leaves the namespace out (REST without `globalNs=1`). | Pass `globalNs=1`, or change the pick. |
+| `outside_namespace_scope` | named `ns:` | Radar's `--namespace-scope` pin leaves the namespace out. | Use the pinned namespace. |
 | `collector_scope_limited` | named `ns:` | Radar's cache doesn't cover the namespace for at least one kind searched. | Widen Radar's collection. |
+| `filter_eval_failed` | when the filter fails | The `filter=` expression couldn't be evaluated on some objects Radar read. | Guard missing fields with `has()`. |
 
-The three namespace reasons use `kind: "*"`, one entry per reason, and `namespaces`
-lists the namespaces you named that were not searched for that reason; the entry
-never repeats per kind. For a caller whose RBAC covers every namespace, a named
-namespace that doesn't exist on the cluster is `namespace_excluded`, never searched
-to a silent empty answer or blamed on the pin or the pick (Radar watches Namespaces
-cluster-wide, even under the pin; when it can't list them, existence is unknown and
-the namespace is treated as existing). For anyone else existence is never checked,
-so a namespace outside your RBAC is `namespace_excluded` whether or not it exists. Kubernetes
-rejecting Radar's credentials (401) is reported as `collector_access_denied`, not
-`collector_unauthorized`: the collector's permission probes don't keep 401 apart from
-403.
+A namespace gap lists the namespaces you named that were not searched for that
+reason, once per code, never per kind. A named namespace that doesn't exist is
+`namespace_not_found` for a caller whose RBAC covers every namespace, never
+searched to a silent empty answer or blamed on the pin or the pick (Radar watches
+Namespaces cluster-wide, even under the pin; when it can't list them, existence is
+unknown and the namespace is treated as existing). For anyone else existence is
+never checked, so a namespace outside your RBAC is `namespace_not_visible` whether
+or not it exists. Kubernetes rejecting Radar's credentials during a list is
+reported as `collector_forbidden`: the collector's permission probes don't keep
+401 apart from 403. A credential rejection Radar did record is
+`collector_credentials_rejected`.
 
-A failed dynamic watch start carries `retryWithKind: true`: an explicit `kind:`
-search can retry starting that watch. Stalled watches and failed typed informers
-omit it because naming the kind cannot restart them. On a broad search, read-error
-hints and retryable watch-start hints suggest a `kind:` search to re-check; a search
-that already names the kind reports the failure without suggesting the same query.
+On a broad search, read-error and watch-start hints suggest a `kind:` search to
+re-check; a search that already names the kind reports the failure without
+suggesting the same query.
 
-On MCP, a partial result also carries `coverageHint`: an explanation per reason present,
-most actionable first (a typo, an unsearchable kind, a failing filter, loading), at
-most three sentences and then `+N more reasons.`. It is present whenever `partial` is
-true, whether or not the hit limit added a `narrowHint`, and REST never carries it.
+On MCP, a partial result also carries `coverageHint`: an explanation per reason
+present, most actionable first (a typo, an unsearchable kind, a failing filter,
+loading), at most three sentences and then `+N more reasons.`. A narrowed broad
+search with no hits carries one too, saying it doesn't rule out matches outside
+your access and Radar's collection. REST never carries it.
 
 ```json
-{"partial": true, "unsearched": [{"kind": "*", "group": "", "reason": "kind_sync_pending", "count": 37}],
+{"coverage": {"status": "partial", "gaps": [{"code": "kind_sync_pending", "kinds": {"count": 37, "sample": []}}]},
  "coverageHint": "37 kinds were still loading; retry in a few seconds before concluding absence.", …}
-{"partial": true, "unsearched": [{"kind": "Secret", "group": "", "reason": "rbac_denied"}],
+{"coverage": {"status": "partial", "gaps": [{"code": "rbac_denied", "kinds": {"count": 1, "sample": [{"kind": "Secret"}]}}]},
  "coverageHint": "Your access doesn't include all Secrets; this result says nothing about the rest.", …}
-{"partial": true, "unsearched": [{"kind": "*", "group": "", "reason": "namespace_excluded", "namespaces": ["payments-prd"]}],
- "coverageHint": "Namespace payments-prd wasn't searched: it isn't among the namespaces you can see, or doesn't exist.", …}
-{"partial": true, "unsearched": [{"kind": "CiliumNetworkPolicy", "group": "", "reason": "unknown_kind"}],
- "coverageHint": "Kind 'CiliumNetworkPolicy' isn't recognized on this cluster: it may not be installed here, or the name may be misspelled.", …}
+{"coverage": {"status": "partial", "gaps": [{"code": "namespace_not_found", "namespaces": {"count": 1, "sample": ["payments-prd"]}}]},
+ "coverageHint": "Namespace 'payments-prd' doesn't exist on this cluster.", …}
+{"coverage": {"status": "complete", "narrowedBy": ["caller_access"], "gaps": []},
+ "coverageHint": "No matches within what your access and Radar's collection cover; that does not rule out matches outside them.", …}
 ```
-
-For a caller who can see every namespace, the `namespace_excluded` hint reads
-"Namespace 'payments-prd' doesn't exist on this cluster."
 
 `ns:` (and the MCP `namespace` argument) restricts namespaced kinds. A broad `ns:`
 query covers namespaced objects only. A cluster-scoped kind named with `kind:`
@@ -795,8 +807,8 @@ keeps running, and the watch it grants still starts. A requested namespace can s
 its own watch even when another namespace is already cached. Unfinished warming
 reports `kind_sync_pending` and preserves cached hits from covered namespaces.
 Readiness is judged per namespace: a namespace whose watch is still loading reports
-`kind_sync_pending` (`kind_sync_failed` once it stalls) without hiding hits from
-namespaces that are ready.
+`kind_sync_pending` (`kind_sync_failed` once it misses its deadline) without hiding
+hits from namespaces that are ready.
 
 Ordinary namespaced kinds, including dynamic CRDs, use the same namespace visibility
 policy as resource lists. Secrets and typed Roles/RoleBindings use exact caller list
@@ -828,9 +840,10 @@ are zero or empty (`status.readyReplicas` on a Deployment with none ready), so g
 them with `has()`, and match a zero with `!has(x) || x == 0` under a kind check, since
 the bare form also matches every object without that field. Deployments with zero or
 unreported ready replicas:
-`kind == "Deployment" && (!has(status.readyReplicas) || status.readyReplicas == 0)`. Evaluation/activation errors set `partial: true`, preserve
-`filter_errors` and `filter_error_sample`, and return `filter_failed_objects`: the
-first 20 `{kind, namespace, name}` refs, with empty namespace at cluster scope.
+`kind == "Deployment" && (!has(status.readyReplicas) || status.readyReplicas == 0)`. Evaluation/activation errors make the result partial, preserve
+`filter_errors` and `filter_error_sample`, and add a `filter_eval_failed` gap whose
+`objects` name the first 20 `{kind, group, namespace, name}` refs (no namespace at
+cluster scope) and count them all.
 Surviving hits remain available. A valid false predicate is an ordinary non-match.
 
 For `issues`, `unchecked_sources` lists the issue sources Radar couldn't check for this answer, so their issues may be missing; don't read the response as healthy for them. Today the only source is `helm` (failed or stuck Helm releases), with reason `read_failed`. Treat any other value as unchecked too. Read `timing_summary` when present; it explains timing combinations that are easy to misread without schema context. The raw provenance fields remain available for filtering. `first_seen` is an evidence-backed lower bound, `onset_unknown` means no contributing signal has a known onset, and `resource_created_at` is resource-age context rather than issue age. A missing `first_seen` is exposed to CEL as `0`; require `first_seen != 0` for any age filter, and also require `onset_coverage_unknown == 0` when the whole row must have exact timing.

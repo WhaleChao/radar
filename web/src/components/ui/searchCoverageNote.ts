@@ -1,5 +1,5 @@
 import { englishPlural, isEnglishPlural } from '@skyhook-io/k8s-ui'
-import type { SearchCoverageEntry } from '../../api/client'
+import type { SearchCoverage } from '@skyhook-io/k8s-ui/types/read-coverage'
 import type { OmnibarNote, OmnibarNotePart } from './Omnibar'
 
 // While a search reports kinds still loading, the open omnibar re-queries every
@@ -10,7 +10,7 @@ import type { OmnibarNote, OmnibarNotePart } from './Omnibar'
 export const PENDING_RETRY_MS = 5000
 export const PENDING_RETRY_BUDGET_MS = 60000
 
-const FAILURE_REASONS = new Set(['kind_sync_failed', 'read_error', 'collector_unauthorized'])
+const FAILURE_REASONS = new Set(['kind_sync_failed', 'kind_watch_failed', 'read_error', 'collector_credentials_rejected'])
 const MAX_SENTENCES = 2
 const MAX_NAMES = 3
 const MAX_TARGET_NAMES = 5
@@ -23,11 +23,37 @@ export interface SearchCoverageNoteOptions {
   recheckKind?: (kind: string) => void
   /** Re-querying a still-loading search ran out of budget. */
   pendingExhausted?: boolean
-  /** The caller can see every namespace (no auth), so a named namespace left
-   *  out for the caller's access can only be one that doesn't exist. */
-  seesAllNamespaces?: boolean
   /** Returns how to open a kind's resource list, or undefined when the host can't. */
   openKindList?: (kind: string, group: string) => (() => void) | undefined
+}
+
+/** One kind or namespace a search couldn't cover, flattened from its gaps: a
+ *  named kind, or `*` for namespaces, for kinds counted beyond a gap's sample
+ *  (`count`), or for an unknown set of kinds (no count). */
+export interface SearchCoverageEntry {
+  kind: string
+  group: string
+  reason: string
+  namespaces?: string[]
+  count?: number
+}
+
+/** The entries of a search's coverage; filter failures are left to the hits. */
+export function searchCoverageEntries(coverage: SearchCoverage | undefined): SearchCoverageEntry[] {
+  const out: SearchCoverageEntry[] = []
+  for (const gap of coverage?.gaps ?? []) {
+    if (gap.objects) continue
+    if (gap.kinds) {
+      for (const k of gap.kinds.sample) out.push({ kind: k.kind, group: k.group ?? '', reason: gap.code })
+      const more = gap.kinds.count - gap.kinds.sample.length
+      if (more > 0) out.push({ kind: '*', group: '', reason: gap.code, count: more })
+    } else if (gap.namespaces) {
+      out.push({ kind: '*', group: '', reason: gap.code, namespaces: gap.namespaces.sample })
+    } else {
+      out.push({ kind: '*', group: '', reason: gap.code })
+    }
+  }
+  return out
 }
 
 /** Plural display form of a Kind name ("Secrets", "Ingresses", "Endpoints"). */
@@ -79,9 +105,10 @@ function failedKinds(entries: SearchCoverageEntry[], label: (e: SearchCoverageEn
 // the query named, whether results are still loading, and which kinds failed
 // to read. Access
 // and setup never come up on a broad search (Radar doesn't report them). An
-// older Radar sends no `unsearched`, and gets no note.
-export function searchCoverageNote(unsearched: SearchCoverageEntry[] | undefined, opts: SearchCoverageNoteOptions): OmnibarNote | undefined {
-  if (!unsearched?.length) return undefined
+// older Radar sends no coverage, and gets no note.
+export function searchCoverageNote(coverage: SearchCoverage | undefined, opts: SearchCoverageNoteOptions): OmnibarNote | undefined {
+  const unsearched = searchCoverageEntries(coverage)
+  if (!unsearched.length) return undefined
   const label = kindLabeler(unsearched, opts.hits ?? [])
   const named = (reason: string) => distinctKinds(unsearched.filter((e) => e.reason === reason))
   const names = (entries: SearchCoverageEntry[], conj: string, plural = true) => joinNames([...new Set(entries.map((e) => label(e, plural)))], conj)
@@ -92,7 +119,7 @@ export function searchCoverageNote(unsearched: SearchCoverageEntry[] | undefined
   if (unsearched.some((e) => e.reason === 'kind_sync_pending')) {
     say(opts.pendingExhausted ? 'Still loading — try again shortly.' : 'Still loading — results may change.')
   }
-  const unknown = named('unknown_kind')
+  const unknown = named('kind_unknown')
   // A read_error "*" without a count beside an unknown kind: some API groups
   // failed discovery, so the kind may exist there.
   const groupsUnread = unknown.length > 0 && unsearched.some((e) => e.kind === '*' && e.reason === 'read_error' && !e.count)
@@ -103,7 +130,7 @@ export function searchCoverageNote(unsearched: SearchCoverageEntry[] | undefined
     const warning = `Couldn't read ${text}; matches of ${one ? 'that kind' : 'those kinds'} may be missing.`
     const tokens = (opts.query ?? '').match(/(?:[^\s"]|"[^"]*(?:"|$))+/g) ?? []
     const namedKind = tokens.some((token) => /^(kind|k):.+/i.test(token.replaceAll('"', '')))
-    const retry = !namedKind && failed.find((e) => e.kind !== '*' && (e.reason === 'read_error' || e.retryWithKind))
+    const retry = !namedKind && failed.find((e) => e.kind !== '*' && (e.reason === 'read_error' || e.reason === 'kind_watch_failed'))
     if (retry) {
       const modifier = `kind:${retry.kind}`
       sentences.push(opts.recheckKind
@@ -119,7 +146,7 @@ export function searchCoverageNote(unsearched: SearchCoverageEntry[] | undefined
     const noun = `No ${unknown.length === 1 ? 'kind' : 'kinds'} named ${names(unknown, 'or', false)}`
     say(groupsUnread ? `${noun} found, but some API groups couldn't be read.` : `${noun} here — not installed, or misspelled?`)
   }
-  const unsupported = unsearched.filter((e) => e.kind !== '*' && e.reason === 'collection_not_supported')
+  const unsupported = unsearched.filter((e) => e.kind !== '*' && e.reason === 'kind_not_watchable')
   if (unsupported.length) {
     const first = unsupported[0]
     const pointer = `Open the ${label(first, true)} list instead.`
@@ -133,21 +160,20 @@ export function searchCoverageNote(unsearched: SearchCoverageEntry[] | undefined
   // searched; their reason says why.
   const namespaces = (reasons: string[]) => [...new Set(unsearched.filter((e) => reasons.includes(e.reason)).flatMap((e) => e.namespaces ?? []))].sort()
   const quoted = (list: string[]) => joinNames(list.map((ns) => `'${ns}'`), 'and')
-  const missing = namespaces(['namespace_excluded'])
-  if (missing.length) {
-    const one = missing.length === 1
-    say(opts.seesAllNamespaces
-      ? `${one ? 'Namespace' : 'Namespaces'} ${quoted(missing)} ${one ? "doesn't" : "don't"} exist on this cluster.`
-      : `${one ? 'Namespace' : 'Namespaces'} ${quoted(missing)} ${one ? "wasn't" : "weren't"} found in what you can see.`)
-  }
-  const outside = namespaces(['namespace_scope_limited', 'collector_scope_limited'])
-  if (outside.length) {
-    const one = outside.length === 1
-    say(`${one ? 'Namespace' : 'Namespaces'} ${quoted(outside)} ${one ? "wasn't" : "weren't"} searched: Radar here watches only some namespaces.`)
-  }
+  const namespaceSentence = (list: string[], one: string, many: string) => say(`${list.length === 1 ? 'Namespace' : 'Namespaces'} ${quoted(list)} ${list.length === 1 ? one : many}.`)
+  const absent = namespaces(['namespace_not_found'])
+  if (absent.length) namespaceSentence(absent, "doesn't exist on this cluster", "don't exist on this cluster")
+  const unseen = namespaces(['namespace_not_visible'])
+  if (unseen.length) namespaceSentence(unseen, "wasn't found in what you can see", "weren't found in what you can see")
+  const selection = namespaces(['outside_namespace_selection'])
+  if (selection.length) namespaceSentence(selection, "wasn't searched: your namespace selection leaves it out", "weren't searched: your namespace selection leaves them out")
+  const pinned = namespaces(['outside_namespace_scope'])
+  if (pinned.length) namespaceSentence(pinned, "wasn't searched: Radar is pinned to another namespace", "weren't searched: Radar is pinned to another namespace")
+  const uncollected = namespaces(['collector_scope_limited'])
+  if (uncollected.length) namespaceSentence(uncollected, "wasn't searched: Radar here watches only some namespaces", "weren't searched: Radar here watches only some namespaces")
   const denied = named('rbac_denied')
   if (denied.length) say(`Your access doesn't include all ${names(denied, 'or')}.`)
-  const collector = named('collector_access_denied')
+  const collector = named('collector_forbidden')
   if (collector.length) say(`Radar isn't allowed to read ${names(collector, 'or')} on this cluster.`)
 
 

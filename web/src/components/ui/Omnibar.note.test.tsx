@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Omnibar, type OmnibarHandle, type OmnibarNote } from './Omnibar'
 import { searchCoverageNote } from './searchCoverageNote'
+import { coverageOf } from './searchCoverage.fixtures'
 
 vi.mock('../../api/usage-data', () => ({ recordUsageEvent: vi.fn() }))
 
@@ -47,8 +48,8 @@ const findButton = (label: string) => [...document.body.querySelectorAll('button
 
 describe('Omnibar note', () => {
   const recoveryText = "Couldn't read Certificate; matches of that kind may be missing. Search kind:Certificate to re-check."
-  const namespace = searchCoverageNote([{ kind: '*', group: '', reason: 'collector_scope_limited', namespaces: ['rel-owner'] }], {})!
-  const loading = searchCoverageNote([{ kind: '*', group: '', reason: 'kind_sync_pending' }], {})!
+  const namespace = searchCoverageNote(coverageOf([{ kind: '*', group: '', reason: 'collector_scope_limited', namespaces: ['rel-owner'] }]), {})!
+  const loading = searchCoverageNote(coverageOf([{ kind: '*', group: '', reason: 'kind_sync_pending' }]), {})!
 
   it.each([
     ['alone', [], []],
@@ -62,7 +63,7 @@ describe('Omnibar note', () => {
     'renders the recovery action inside its sentence %s and adds its modifier', (_, before, after) => {
       const ref = createRef<OmnibarHandle>()
       const onQueryChange = vi.fn()
-      const recovery = searchCoverageNote([{ kind: 'Certificate', group: 'cert-manager.io', reason: 'read_error' }], {
+      const recovery = searchCoverageNote(coverageOf([{ kind: 'Certificate', group: 'cert-manager.io', reason: 'read_error' }]), {
         recheckKind: (kind) => ref.current?.addModifier({ key: 'kind', value: kind }),
       })!
       const parts = [...before, recovery, ...after]

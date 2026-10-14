@@ -2,6 +2,7 @@ import { canonicalResourceGroup } from '@skyhook-io/k8s-ui/utils/api-resources'
 import { knownKindForPluralWithGroup, pluralToKind } from '@skyhook-io/k8s-ui/utils/navigation'
 import { useEffect, useRef } from 'react'
 import type { KueueAdmissionResponse } from '@skyhook-io/k8s-ui/types/scheduling'
+import type { SearchCoverage } from '@skyhook-io/k8s-ui/types/read-coverage'
 import type { GitOpsWriteEvidence } from '@skyhook-io/k8s-ui/utils/gitops-write-guard'
 import type {
   AppHistory,
@@ -1961,29 +1962,13 @@ export interface SearchHit {
   clusterName?: string;
 }
 
-/** One entry of a search's coverage (`unsearched`): a kind or set of kinds the
- *  search couldn't fully cover, and why. Reasons come from Radar's
- *  `pkg/readreason`. `kind: "*"` stands for several kinds (`count` of them when
- *  known) or, with `namespaces`, for the named namespaces left out. */
-export interface SearchCoverageEntry {
-  /** A failed watch start can be retried by explicitly naming the kind. */
-  retryWithKind?: boolean;
-  kind: string;
-  group: string;
-  reason: string;
-  namespaces?: string[];
-  count?: number;
-}
-
 export interface SearchResult {
   hits: SearchHit[];
   total: number;
   searched: number;
   total_matched: number;
-  /** Absent from Radars that predate search coverage. true: the result can't
-   *  rule out a match for what was asked. */
-  partial?: boolean;
-  unsearched?: SearchCoverageEntry[];
+  /** Absent from Radars that predate search coverage, which say nothing about it. */
+  coverage?: SearchCoverage;
 }
 
 const SEARCH_MIN_QUERY = 2;

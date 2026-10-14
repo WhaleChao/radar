@@ -3441,6 +3441,7 @@ func handleSearch(ctx context.Context, req *mcp.CallToolRequest, input searchInp
 			return canReadInNamespaceDecision(ctx, group, resource, "", "list")
 		},
 	}
+	opts.Pinned = k8s.ForceNamespaceScope
 	opts.ScopeNamespaces(parsed, visible, ceiling)
 	opts.NamespaceCheckFailed = namespaceCheckFailed
 	scanNamespaces := opts.Namespaces
@@ -3475,8 +3476,10 @@ func handleSearch(ctx context.Context, req *mcp.CallToolRequest, input searchInp
 			result.Total, result.TotalMatched,
 		)
 	}
-	if result.Partial {
-		response.CoverageHint = coverageHint(result, ceiling == nil && !namespaceCheckFailed, len(parsed.KindFilter) > 0)
+	if result.Coverage.Status == resourceapi.CoveragePartial {
+		response.CoverageHint = coverageHint(result, len(parsed.KindFilter) > 0)
+	} else if len(result.Coverage.NarrowedBy) > 0 && len(result.Hits) == 0 {
+		response.CoverageHint = "No matches within what your access and Radar's collection cover; that does not rule out matches outside them."
 	}
 	return toJSONResult(response)
 }
