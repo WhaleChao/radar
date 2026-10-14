@@ -53,7 +53,9 @@ const (
 )
 
 // NameSet is a known, finite set of names: Count members, the first of them
-// (sorted) in Sample. Sample is shorter than Count only because of the cap.
+// (sorted) in Sample. Sample is shorter than Count because of the cap, or
+// empty when the names are withheld from the caller — a namespace they named
+// but can't see is counted, never named back.
 type NameSet struct {
 	Count  int      `json:"count"`
 	Sample []string `json:"sample"`
