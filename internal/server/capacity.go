@@ -757,6 +757,14 @@ func (s *Server) loadCapacityPods(r *http.Request, meta *capacityapi.ResponseMet
 				coverage.Scope = capacityapi.CoverageScopeExplicitNamespaces
 			}
 			coverage.Namespaces = append([]string{}, namespaces...)
+			if len(assessment.Uncovered) > 0 {
+				coverage.Namespaces = intersectNamespaces(cache.KindNamespaces("pods"), namespaces)
+				coverage.ReasonCode = "pod_cache_scope_partial"
+				coverage.Reason = "Pods are still loading; Radar does not cover every requested namespace"
+				if assessment.Readiness == k8s.KindFailed {
+					coverage.Reason = "Pods failed to load; Radar does not cover every requested namespace"
+				}
+			}
 		} else if !assessment.AllNamespaces && assessment.Readiness != k8s.KindUnavailable {
 			coverage.Scope = capacityapi.CoverageScopeExplicitNamespaces
 		}
