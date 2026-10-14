@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/readscope"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -117,7 +118,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 		covered[key] = true
 	}
 	countEndpointSlices := func() {
-		if noNamespaceAccess(namespaces) {
+		if readscope.NoNamespaceAccess(namespaces) {
 			markForbidden(endpointSliceCountKey, reasonRBACDenied)
 			return
 		}
@@ -237,7 +238,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 
 			for _, key := range browseOrder {
 				resource := browseResources[key]
-				if resource.namespaced && noNamespaceAccess(namespaces) {
+				if resource.namespaced && readscope.NoNamespaceAccess(namespaces) {
 					markForbidden(key, reasonRBACDenied)
 					continue
 				}
@@ -311,7 +312,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 
 			for _, key := range crdOrder {
 				crd := crds[key]
-				if crd.namespaced && noNamespaceAccess(namespaces) {
+				if crd.namespaced && readscope.NoNamespaceAccess(namespaces) {
 					markForbidden(key, reasonRBACDenied)
 					continue
 				}

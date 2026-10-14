@@ -23,6 +23,7 @@ import (
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/helm"
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/readscope"
 	gitopsinsights "github.com/skyhook-io/radar/pkg/gitops/insights"
 	"github.com/skyhook-io/radar/pkg/health"
 	"github.com/skyhook-io/radar/pkg/k8score"
@@ -391,7 +392,7 @@ func (s *Server) historyAnchorsForSource(r *http.Request, source *appSourceRef) 
 func (s *Server) gitOpsHistoryAnchors(r *http.Request, source *appSourceRef) ([]appHistoryAnchor, []string) {
 	if source.Namespace != "" {
 		allowed := s.getUserNamespaces(r, []string{source.Namespace})
-		if noNamespaceAccess(allowed) {
+		if readscope.NoNamespaceAccess(allowed) {
 			return nil, []string{fmt.Sprintf("No access to source namespace %q.", source.Namespace)}
 		}
 	}
