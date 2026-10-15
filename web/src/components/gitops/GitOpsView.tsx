@@ -75,7 +75,7 @@ import {
   useResource,
 } from '../../api/client'
 import { useAPIResources, GITOPS_KINDS } from '../../api/apiResources'
-import { combinedListStatus } from '../../api/resourceLists'
+import { combinedListStatus, lowerBound } from '../../api/resourceLists'
 import { useConnection } from '../../context/ConnectionContext'
 import { useRegisterShortcut } from '../../hooks/useKeyboardShortcuts'
 import { CodeViewer } from '../ui/CodeViewer'
@@ -322,7 +322,7 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
         error={rowsQuery.error}
         counts={countsQuery.data?.counts ?? {}}
         countsUnavailable={countsQuery.data?.unavailable}
-        countsPartial={Object.entries(countsQuery.data?.coverage ?? {}).filter(([, c]) => c.status === 'partial').map(([key]) => key)}
+        countsPartial={Object.entries(countsQuery.data?.coverage ?? {}).filter(([, c]) => lowerBound(c)).map(([key]) => key)}
         freshnessSlot={
           <FreshnessControl
             mode="auto"

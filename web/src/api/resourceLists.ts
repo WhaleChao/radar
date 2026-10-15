@@ -44,7 +44,15 @@ export function listSyncPending(coverage: ResourceCoverage | undefined): boolean
  * itself a complete answer.
  */
 export function combinedListStatus(coverage: ResourceCoverage[], failed: boolean, nothingToRead: boolean): 'complete' | 'partial' | 'unknown' {
-  if (failed || coverage.some(c => c.status === 'partial' || (c.status === 'complete' && c.narrowedBy?.includes('collection')))) return 'partial'
+  if (failed || coverage.some(lowerBound)) return 'partial'
   if (coverage.length === 0 ? nothingToRead : coverage.every(c => c.status === 'complete')) return 'complete'
   return 'unknown'
+}
+
+/**
+ * Whether a read's numbers are a lower bound for the cluster: it was partial,
+ * or Radar's collection narrowed it to the namespaces it collects.
+ */
+export function lowerBound(coverage: ResourceCoverage): boolean {
+  return coverage.status === 'partial' || (coverage.status === 'complete' && coverage.narrowedBy?.includes('collection') === true)
 }

@@ -807,7 +807,7 @@ export function GitOpsTableView({
         </div>
 
         {coverageStatus === 'partial' && (
-          <p role="status" className="px-4 py-2 text-xs text-warning-text border-b border-theme-border">Partial results. Some GitOps resources or sources could not be read.</p>
+          <p role="status" className="px-4 py-2 text-xs text-warning-text border-b border-theme-border">Partial results. Radar couldn't read every namespace for some GitOps resources or sources, so counts are lower bounds.</p>
         )}
 
         {/* pb-20 keeps the last row (and its three-dot menu) scrollable clear

@@ -3047,8 +3047,12 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 				relIdx = nil
 			}
 			relationships = topology.GetRelationshipsWithObject(kind, namespace, name, resource, cachedTopo,
-				k8s.NewTopologyResourceProvider(k8s.GetResourceCache()),
+				k8s.NewTopologyResourceProvider(cache),
 				k8s.NewTopologyDynamicProvider(k8s.GetDynamicResourceCache(), k8s.GetResourceDiscovery()), relIdx)
+		}
+		if readCache() != cache {
+			s.writeCollectionFailure(w, kind, errReadHandlesChanged)
+			return
 		}
 
 		s.writeJSON(w, topology.ResourceWithRelationships{

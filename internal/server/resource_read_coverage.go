@@ -492,6 +492,15 @@ func dynamicReadHandles(cache *k8s.ResourceCache, kind, group string) (*k8s.Dyna
 	return dynamicCache, gvr, nil
 }
 
+// unansweredProbeCode is why namespaces whose access check got no answer
+// weren't read: still being retried, or never answered.
+func unansweredProbeCode(observation k8score.DynamicResourceObservation) readreason.Code {
+	if observation.ProbeRetrying {
+		return readreason.KindSyncPending
+	}
+	return readreason.ReadError
+}
+
 func namespaceReadFailure(dynamicCache *k8s.DynamicResourceCache, gvr schema.GroupVersionResource, namespace string) *resourceReadFailure {
 	observation := dynamicCache.NamespaceObservation(gvr, namespace)
 	switch {
@@ -538,7 +547,8 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
 	direct := k8s.ShouldBypassDynamicInformer(gvr)
 	targets := namespaces
-	var collected []string
+	var collected, unanswered []string
+	var unansweredCode readreason.Code
 	if namespaces == nil {
 		if direct {
 			items, listErr := dynamicCache.ListDirectBounded(r.Context(), gvr, "", limit)
@@ -580,8 +590,12 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 				return dynamicList{}, failure
 			}
 			targets = observation.Namespaces
+			unanswered = observation.UnansweredNamespaces
+			unansweredCode = unansweredProbeCode(observation)
 		}
-		collected = slices.Compact(slices.Sorted(slices.Values(targets)))
+		// A namespace whose access check hasn't answered may be collected: it
+		// stays in the scope, as a gap.
+		collected = slices.Compact(slices.Sorted(slices.Values(slices.Concat(targets, unanswered))))
 	}
 	targets = slices.Compact(slices.Sorted(slices.Values(targets)))
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
@@ -659,6 +673,12 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 		}
 	}
 	narrowed := collected != nil || len(uncovered) > 0
+	if len(unanswered) > 0 {
+		failures[unansweredCode] = append(failures[unansweredCode], unanswered...)
+		if failureByCode[unansweredCode] == nil {
+			failureByCode[unansweredCode] = readFailuref(unansweredCode, "Radar has not established whether it can collect %s in some namespaces", gvr.Resource)
+		}
+	}
 	var gaps []resourceapi.Gap
 	for _, code := range slices.Sorted(maps.Keys(failures)) {
 		gaps = append(gaps, gapOf(code, failures[code]))
@@ -692,12 +712,22 @@ func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersi
 		return nil, nil, nil, nil, false
 	}
 	observation := cache.Observation(gvr)
+	watched := make(map[string]bool, len(observation.Namespaces))
+	for _, ns := range observation.Namespaces {
+		watched[ns] = true
+	}
+	unanswered := make(map[string]bool, len(observation.UnansweredNamespaces))
+	for _, ns := range observation.UnansweredNamespaces {
+		unanswered[ns] = true
+	}
+	// A namespace whose access check hasn't answered may be collected: it is
+	// a gap, never outside the collection.
 	collects := func(ns string) bool {
-		return observation.Scope != k8score.DynamicObservationScopeExplicitNamespaces || slices.Contains(observation.Namespaces, ns)
+		return observation.Scope != k8score.DynamicObservationScopeExplicitNamespaces || watched[ns] || unanswered[ns]
 	}
 	targets := namespaces
 	if targets == nil {
-		targets = observation.Namespaces
+		targets = slices.Concat(observation.Namespaces, observation.UnansweredNamespaces)
 	}
 	var loading, outside []string
 	read = []string{}
@@ -714,8 +744,19 @@ func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersi
 	if len(read) == 0 {
 		return nil, nil, nil, nil, false
 	}
+	var unchecked []string
+	loading = slices.DeleteFunc(loading, func(ns string) bool {
+		if unanswered[ns] {
+			unchecked = append(unchecked, ns)
+			return true
+		}
+		return false
+	})
 	if len(loading) > 0 {
 		gaps = append(gaps, gapOf(readreason.KindSyncPending, loading))
+	}
+	if len(unchecked) > 0 {
+		gaps = append(gaps, gapOf(unansweredProbeCode(observation), unchecked))
 	}
 	switch {
 	case namespaces == nil:

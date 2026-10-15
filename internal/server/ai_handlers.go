@@ -432,11 +432,19 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if skipContext {
+		if readCache() != cache {
+			s.writeCollectionFailure(w, kind, errReadHandlesChanged)
+			return
+		}
 		s.writeJSON(w, minified)
 		return
 	}
 
 	rc := s.buildAIResourceContext(r, obj, kind, namespace, name)
+	if readCache() != cache {
+		s.writeCollectionFailure(w, kind, errReadHandlesChanged)
+		return
+	}
 	s.writeJSON(w, map[string]any{
 		"resource":        minified,
 		"resourceContext": rc,
