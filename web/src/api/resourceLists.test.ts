@@ -46,6 +46,11 @@ describe('combinedListStatus', () => {
     expect(combinedListStatus([complete], true, false)).toBe('partial')
     expect(combinedListStatus([complete, partial], false, false)).toBe('partial')
   })
+  it("is partial when Radar's collection narrowed a read, since the view shows cluster totals", () => {
+    const narrowed = { ...complete, narrowedBy: ['collection'] }
+    expect(combinedListStatus([complete, narrowed], false, false)).toBe('partial')
+    expect(combinedListStatus([{ ...complete, narrowedBy: ['caller_access'] }], false, false)).toBe('complete')
+  })
   it('is complete only when every read was', () => {
     expect(combinedListStatus([complete, complete], false, false)).toBe('complete')
     expect(combinedListStatus([complete, { status: 'unknown' }], false, false)).toBe('unknown')

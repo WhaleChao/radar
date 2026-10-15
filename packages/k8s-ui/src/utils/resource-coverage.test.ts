@@ -51,7 +51,7 @@ describe('narrowed coverage note', () => {
     for (const narrowing of ['caller_access', 'namespace_pin', 'namespace_selection']) {
       expect(resourceNarrowedNotice({ ...collected, narrowedBy: [narrowing] })).toBeUndefined()
     }
-    expect(resourceNarrowedNotice({ ...collected, narrowedBy: ['caller_access', 'collection'] })).toContain('12 namespaces')
+    expect(resourceNarrowedNotice({ ...collected, narrowedBy: ['caller_access', 'collection'] })).toBe('Radar collects this kind only in 12 of your namespaces: alpha, beta, gamma and 9 more.')
     expect(resourceNarrowedNotice(complete)).toBeUndefined()
     expect(resourceNarrowedNotice({ ...collected, status: 'partial' })).toBeUndefined()
     expect(resourceNarrowedNotice({ status: 'unknown' })).toBeUndefined()
@@ -72,6 +72,10 @@ describe('empty lists and counts', () => {
     expect(resourceCountLabel(23, partial)).toBe('≥23')
     expect(resourceCountLabel(0, partial)).toBe('–')
     expect(isEmptyCount(0, partial)).toBe(false)
+  })
+  it("never hides a kind whose zero covers only the namespaces Radar collects", () => {
+    expect(isEmptyCount(0, collected)).toBe(false)
+    expect(resourceEmptyMessage('Pod', collected, false)).toBe('No Pod found in the namespaces Radar collects')
   })
   it('shows complete and unknown counts plainly, and hides their zeros', () => {
     expect(resourceCountLabel(23, complete)).toBe('23')

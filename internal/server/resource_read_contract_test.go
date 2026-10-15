@@ -199,3 +199,40 @@ func TestResourceGetDenialsAreCoded(t *testing.T) {
 	defer resp.Body.Close()
 	assertResourceReadError(t, resp, http.StatusServiceUnavailable, "permission_check_failed")
 }
+
+// A read of the whole target never counts the named namespaces withheld
+// from it: the scope does, the read set does not.
+func TestWholeTargetReadExcludesWithheldNamespaces(t *testing.T) {
+	target := listTarget{explicit: true, namespaces: []string{"alpha"}, withheld: 1,
+		gaps: []resourceapi.Gap{{Code: readreason.NamespaceNotVisible, Namespaces: &resourceapi.NameSet{Count: 1, Sample: []string{}}}}}
+	cov := target.coverage(nil, nil)
+	if cov.Scope.Namespaces.Count != 2 || cov.Read.Namespaces.Count != 1 || !slices.Equal(cov.Read.Namespaces.Sample, []string{"alpha"}) || cov.Status != resourceapi.CoveragePartial {
+		t.Fatalf("coverage = scope %+v read %+v status %s", cov.Scope.Namespaces, cov.Read.Namespaces, cov.Status)
+	}
+}
+
+// The AI list answers with a bare array, which can't say what it left out,
+// so it refuses a request it can read only part of: a named namespace the
+// caller can't see, or a collector that covers only some namespaces.
+func TestAIListRefusesWhatABareArrayCantQualify(t *testing.T) {
+	client := fake.NewClientset(&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "a"}})
+	useTestResourceCache(t, client)
+	env := newAuthTestServer(t)
+	env.srv.permCache.Set("scoped", nil, &auth.UserPermissions{AllowedNamespaces: []string{"alpha"}})
+	resp := env.authGet(t, "/api/ai/resources/services?namespaces=alpha,hidden", "scoped", "")
+	defer resp.Body.Close()
+	assertResourceReadError(t, resp, http.StatusForbidden, "namespace_not_visible")
+
+	k8s.ResetResourceCache()
+	if err := k8s.InitScopedTestResourceCacheNamespaces(client, map[string]k8score.ResourceScope{k8score.Services: {Enabled: true, Namespace: "alpha"}}, map[string][]string{k8score.Services: {"alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	narrowed := get(t, "/api/ai/resources/services")
+	defer narrowed.Body.Close()
+	assertResourceReadError(t, narrowed, http.StatusConflict, "collector_scope_limited")
+	named := get(t, "/api/ai/resources/services?namespace=alpha")
+	defer named.Body.Close()
+	if named.StatusCode != http.StatusOK {
+		t.Fatalf("a namespace Radar collects is answered whole: %d", named.StatusCode)
+	}
+}

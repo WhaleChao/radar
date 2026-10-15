@@ -62,6 +62,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	started := readCache()
 	namespaces, accessCheckFailed := s.parseNamespacesForUserWithStatus(r)
 	// countTarget is a kind's target: the request's, with the gaps exact kind
 	// authorization left in it.
@@ -79,6 +80,10 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 	}
 	if cache == nil {
 		s.writeNotConnected(w)
+		return
+	}
+	if cache != started {
+		s.writeCollectionFailure(w, "resource counts", errReadHandlesChanged)
 		return
 	}
 
@@ -201,7 +206,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 				markForbidden(kl.CountKey(), reasonUnavailable)
 				continue
 			}
-			n = k8score.ListCountNamespaced(l, plan.read)
+			n = typedListCount(cache, key, plan.read)
 		} else {
 			count, ok := cache.ReadableCount(key, plan.read)
 			if !ok {
@@ -343,7 +348,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 				if !crd.namespaced {
 					target = nil
 				}
-				read, collected, gaps, ready := dynamicCountCoverage(dynamicCache, crd.gvr, target, !crd.namespaced)
+				read, collected, uncovered, gaps, ready := dynamicCountCoverage(dynamicCache, crd.gvr, target, !crd.namespaced, requestTarget.explicit)
 				if ready {
 					countIn := read
 					if countIn == nil {
@@ -352,8 +357,8 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 					if n, err := dynamicCache.Count(crd.gvr, countIn); err == nil {
 						markCounted(key, n)
 						coverageTarget := countTarget(nil, !crd.namespaced)
-						if collected != nil {
-							coverageTarget = coverageTarget.narrowedByCollection(collected, nil)
+						if collected != nil || len(uncovered) > 0 {
+							coverageTarget = coverageTarget.narrowedByCollection(collected, uncovered)
 						}
 						countCoverage[key] = coverageTarget.coverage(read, gaps)
 						continue

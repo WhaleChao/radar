@@ -184,8 +184,14 @@ func (t listTarget) coverage(read []string, gaps []resourceapi.Gap) resourceapi.
 	gaps = append(slices.Clone(t.gaps), gaps...)
 	cov := resourceapi.Coverage{Status: resourceapi.CoverageComplete, Scope: t.scope(), NarrowedBy: t.narrowedBy, Gaps: gaps}
 	readScope := cov.Scope
-	if read != nil && !t.clusterScoped {
+	switch {
+	case t.clusterScoped:
+	case read != nil:
 		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(read, resourceapi.RESTSample)}
+	case t.namespaces != nil:
+		// The whole target was read, which never includes the named
+		// namespaces withheld from it.
+		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(t.namespaces, resourceapi.RESTSample)}
 	}
 	cov.Read = &readScope
 	if len(gaps) > 0 {
@@ -317,9 +323,15 @@ func (t listTarget) narrowedByCollection(collected, uncovered []string) listTarg
 	if t.namespaces == nil {
 		t.namespaces = collected
 	} else {
-		t.namespaces = slices.DeleteFunc(slices.Clone(t.namespaces), func(ns string) bool { return slices.Contains(uncovered, ns) })
+		dropped := make(map[string]bool, len(uncovered))
+		for _, ns := range uncovered {
+			dropped[ns] = true
+		}
+		t.namespaces = slices.DeleteFunc(slices.Clone(t.namespaces), func(ns string) bool { return dropped[ns] })
 	}
-	t.narrowedBy = append(slices.Clone(t.narrowedBy), resourceapi.NarrowedByCollection)
+	if !slices.Contains(t.narrowedBy, resourceapi.NarrowedByCollection) {
+		t.narrowedBy = append(slices.Clone(t.narrowedBy), resourceapi.NarrowedByCollection)
+	}
 	return t
 }
 
@@ -587,11 +599,9 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 			var items []*unstructured.Unstructured
 			var readErr error
 			if ctx.Err() != nil {
-				if direct {
-					readErr = collectionFailure(gvr.Resource, ctx.Err())
-				} else {
-					readErr = namespaceReadFailure(dynamicCache, gvr, namespace)
-				}
+				// The budget ran out before this namespace was tried: that
+				// says nothing about whether Radar collects it.
+				readErr = collectionFailure(gvr.Resource, ctx.Err())
 			} else if direct {
 				items, readErr = dynamicCache.ListDirectBounded(ctx, gvr, namespace, limit)
 			} else {
@@ -670,41 +680,53 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 }
 
 // dynamicCountCoverage reports which of namespaces (nil: every namespace) a
-// dynamic kind can be counted in now: read is nil when all of them. For every
-// namespace, collected is what Radar collects the kind in, which narrows the
-// count.
-func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersionResource, namespaces []string, clusterScoped bool) (read, collected []string, gaps []resourceapi.Gap, ok bool) {
+// dynamic kind can be counted in now: read is nil when all of them. A
+// namespace whose informer is still loading is a kind_sync_pending gap. One
+// Radar doesn't collect narrows a scope the request didn't name (collected
+// for every namespace, uncovered for a finite one) and is a gap in one it did.
+func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersionResource, namespaces []string, clusterScoped, explicit bool) (read, collected, uncovered []string, gaps []resourceapi.Gap, ok bool) {
 	if cache.IsNamespaceSynced(gvr, "") {
-		return nil, nil, nil, true
+		return nil, nil, nil, nil, true
 	}
 	if clusterScoped {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
+	}
+	observation := cache.Observation(gvr)
+	collects := func(ns string) bool {
+		return observation.Scope != k8score.DynamicObservationScopeExplicitNamespaces || slices.Contains(observation.Namespaces, ns)
 	}
 	targets := namespaces
 	if targets == nil {
-		targets = cache.Observation(gvr).Namespaces
+		targets = observation.Namespaces
 	}
-	var unread []string
+	var loading, outside []string
 	read = []string{}
 	for _, namespace := range targets {
-		if cache.IsNamespaceSynced(gvr, namespace) {
+		switch {
+		case cache.IsNamespaceSynced(gvr, namespace):
 			read = append(read, namespace)
-		} else {
-			unread = append(unread, namespace)
+		case collects(namespace):
+			loading = append(loading, namespace)
+		default:
+			outside = append(outside, namespace)
 		}
 	}
 	if len(read) == 0 {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
-	if namespaces == nil {
+	if len(loading) > 0 {
+		gaps = append(gaps, gapOf(readreason.KindSyncPending, loading))
+	}
+	switch {
+	case namespaces == nil:
 		collected = slices.Sorted(slices.Values(targets))
-		if len(unread) > 0 {
-			gaps = append(gaps, gapOf(readreason.KindSyncPending, unread))
-		}
-	} else if len(unread) > 0 {
-		gaps = append(gaps, gapOf(readreason.CollectorScopeLimited, unread))
+	case len(outside) == 0:
+	case explicit:
+		gaps = append(gaps, gapOf(readreason.CollectorScopeLimited, outside))
+	default:
+		uncovered = outside
 	}
-	return read, collected, gaps, true
+	return read, collected, uncovered, gaps, true
 }
 
 func readDynamicResourceGet(ctx context.Context, cache *k8s.ResourceCache, kind, group, namespace, name string) (*unstructured.Unstructured, error) {
@@ -719,6 +741,7 @@ func readDynamicResourceGet(ctx context.Context, cache *k8s.ResourceCache, kind,
 		}
 		return resource, err
 	}
+	syncedBefore := dynamicCache.IsNamespaceSynced(gvr, namespace)
 	resource, err := dynamicCache.Get(gvr, namespace, name)
 	if cache != k8s.GetResourceCache() || dynamicCache != k8s.GetDynamicResourceCache() {
 		return nil, errReadHandlesChanged
@@ -729,8 +752,18 @@ func readDynamicResourceGet(ctx context.Context, cache *k8s.ResourceCache, kind,
 	if apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
 		return nil, err
 	}
-	if (apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound)) && !dynamicCache.IsNamespaceSynced(gvr, namespace) {
-		return nil, namespaceReadFailure(dynamicCache, gvr, namespace)
+	if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
+		if !dynamicCache.IsNamespaceSynced(gvr, namespace) {
+			return nil, namespaceReadFailure(dynamicCache, gvr, namespace)
+		}
+		// A miss looked up before the informer finished syncing proves
+		// nothing; look again now that it has.
+		if !syncedBefore {
+			resource, err = dynamicCache.Get(gvr, namespace, name)
+			if cache != k8s.GetResourceCache() || dynamicCache != k8s.GetDynamicResourceCache() {
+				return nil, errReadHandlesChanged
+			}
+		}
 	}
 	return resource, err
 }

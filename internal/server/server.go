@@ -2250,9 +2250,8 @@ func (s *Server) preflightResourceList(r *http.Request, kind, group string, name
 		authz.gaps = append(authz.gaps, gapOf(readreason.PermissionCheckFailed, unchecked))
 	}
 	if len(allowed) == 0 {
-		failure := permissionFailure(len(unchecked) == 0, fmt.Sprintf("insufficient permissions to list %s", resource))
-		failure.gaps = authz.gaps
-		return authz, failure
+		// authz.gaps say which namespaces; the caller's target carries them.
+		return authz, permissionFailure(len(unchecked) == 0, fmt.Sprintf("insufficient permissions to list %s", resource))
 	}
 	return authz, nil
 }

@@ -169,6 +169,7 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	if !s.requireConnected(w) {
 		return
 	}
+	started := readCache()
 	kind := normalizeKind(chi.URLParam(r, "kind"))
 	group := r.URL.Query().Get("group")
 	level := parseVerbosity(r, aicontext.LevelSummary)
@@ -187,8 +188,10 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 		s.writeReadFailure(w, kind, noAccessFailure(failure, target, accessCheckFailed), &target)
 		return
 	}
-	// A bare list can't say which namespaces exact kind authorization withheld.
-	if len(authz.gaps) > 0 {
+	// A bare list can't say which named namespaces it left out or which ones
+	// exact kind authorization withheld, so this endpoint answers the whole
+	// request or nothing.
+	if len(target.gaps) > 0 {
 		s.writeIncompleteAIList(w, target, nil)
 		return
 	}
@@ -196,6 +199,10 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 
 	cache, ok := s.gateResourceRead(w, kind, group)
 	if !ok {
+		return
+	}
+	if cache != started {
+		s.writeReadFailure(w, kind, errReadHandlesChanged, &target)
 		return
 	}
 	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
@@ -206,8 +213,11 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 		}
 		// This agent endpoint still returns a bare list; partial scope cannot be
 		// represented by that contract, so require its entire requested scope.
-		// Radar's collection narrowing an unscoped request is not a gap: the
-		// list is every object Radar collects there, as before.
+		// Nor can it say Radar's collection narrowed it, so that is refused too.
+		if plan.collected != nil {
+			s.writeIncompleteAIList(w, target, []resourceapi.Gap{{Code: readreason.CollectorScopeLimited}})
+			return
+		}
 		if len(plan.gaps) > 0 || !plan.whole {
 			s.writeIncompleteAIList(w, target, plan.gaps)
 			return
@@ -270,6 +280,10 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 			summarycontext.AttachToTypedList(results, objs, builder)
 		}
 	}
+	if readCache() != cache {
+		s.writeReadFailure(w, kind, errReadHandlesChanged, &target)
+		return
+	}
 
 	s.writeJSON(w, results)
 }
@@ -294,8 +308,16 @@ func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8
 		s.writeReadFailure(w, kind, err, &target)
 		return
 	}
+	if list.narrowed {
+		s.writeIncompleteAIList(w, target, append(list.gaps, resourceapi.Gap{Code: readreason.CollectorScopeLimited}))
+		return
+	}
 	if len(list.gaps) > 0 {
 		s.writeIncompleteAIList(w, target, list.gaps)
+		return
+	}
+	if readCache() != cache {
+		s.writeReadFailure(w, kind, errReadHandlesChanged, &target)
 		return
 	}
 	allItems := list.rows
@@ -351,6 +373,8 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 		namespace = ""
 	}
 
+	started := readCache()
+
 	// Run the same RBAC preflight as handleGetResource — the AI endpoint
 	// returns the same resource bytes (just minified) and must gate on the
 	// same per-user SAR / namespace-access tuple. Without this, a user with
@@ -368,6 +392,10 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 
 	cache, ok := s.gateResourceRead(w, kind, group)
 	if !ok {
+		return
+	}
+	if cache != started {
+		s.writeCollectionFailure(w, kind, errReadHandlesChanged)
 		return
 	}
 	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
@@ -688,8 +716,12 @@ func (s *Server) writeIncompleteAIList(w http.ResponseWriter, target listTarget,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(readStatusFor(code))
+	message := "Radar cannot provide a complete list for the requested scope"
+	if code == readreason.CollectorScopeLimited {
+		message = "Radar collects this kind only in some namespaces, which a bare list can't say; name a namespace, or use /api/resources/{kind}, whose coverage says what it read"
+	}
 	s.writeJSON(w, resourceapi.ReadError{
-		Error:     "Radar cannot provide a complete list for the requested scope",
+		Error:     message,
 		ErrorCode: code,
 		Coverage:  &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: target.scope(), NarrowedBy: target.narrowedBy, Gaps: gaps},
 	})

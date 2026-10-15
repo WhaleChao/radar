@@ -48,19 +48,30 @@ export function resourceNarrowedNotice(coverage: ResourceCoverage | undefined): 
   const namespaces = coverage.scope.namespaces
   if (!namespaces) return 'Radar collects this kind only in some namespaces.'
   const preview = namespacePreview(namespaces)
-  return `Radar collects this kind only in ${pluralize(namespaces.count, 'namespace')}${preview ? `: ${preview}` : ''}.`
+  // With the caller's access also narrowing it, the scope is the part of their
+  // namespaces Radar collects, not everything Radar collects.
+  const where = coverage.narrowedBy.includes('caller_access')
+    ? `${namespaces.count.toLocaleString()} of your namespaces`
+    : pluralize(namespaces.count, 'namespace')
+  return `Radar collects this kind only in ${where}${preview ? `: ${preview}` : ''}.`
 }
 
 export function resourceEmptyMessage(kind: string, coverage: ResourceCoverage | undefined, hasRows: boolean): string {
   if (hasRows) return `No ${kind} match the current filters`
+  if (coverage?.status === 'complete' && coverage.narrowedBy?.includes('collection')) return `No ${kind} found in the namespaces Radar collects`
   if (coverage?.status === 'complete') return `No ${kind} found in the requested scope`
   if (coverage?.status === 'partial') return `No ${kind} found in the namespaces Radar could read`
   return `No ${kind} found`
 }
 
-/** A zero that hides its kind as empty. A partial zero proves nothing about the namespaces Radar couldn't read. */
+/**
+ * A zero that hides its kind as empty. A partial zero proves nothing about the
+ * namespaces Radar couldn't read, and one Radar's collection narrowed nothing
+ * about the namespaces it doesn't collect.
+ */
 export function isEmptyCount(count: number | null | undefined, coverage: ResourceCoverage | undefined): boolean {
-  return count === 0 && coverage?.status !== 'partial'
+  if (count !== 0 || coverage?.status === 'partial') return false
+  return !(coverage?.status === 'complete' && coverage.narrowedBy?.includes('collection'))
 }
 
 /** A partial count is a lower bound, and a partial zero is no count at all. */

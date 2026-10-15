@@ -38,11 +38,13 @@ export function listSyncPending(coverage: ResourceCoverage | undefined): boolean
 
 /**
  * One status for a view assembled from several list reads. A failed read makes
- * it partial; `nothingToRead` says discovery found no kind to read, which is
+ * it partial, and so does one Radar's collection narrowed: the view shows
+ * totals for the cluster, which a read of only the collected namespaces can't
+ * establish. `nothingToRead` says discovery found no kind to read, which is
  * itself a complete answer.
  */
 export function combinedListStatus(coverage: ResourceCoverage[], failed: boolean, nothingToRead: boolean): 'complete' | 'partial' | 'unknown' {
-  if (failed || coverage.some(c => c.status === 'partial')) return 'partial'
+  if (failed || coverage.some(c => c.status === 'partial' || (c.status === 'complete' && c.narrowedBy?.includes('collection')))) return 'partial'
   if (coverage.length === 0 ? nothingToRead : coverage.every(c => c.status === 'complete')) return 'complete'
   return 'unknown'
 }
