@@ -237,6 +237,7 @@ function coverageUnavailableText(cov: CNPGKindCoverage, what: string, namespace?
     case 'syncing':
       return 'Loading…'
     case 'error':
+      if (namespace && cov.uncoveredNamespaces?.includes(namespace)) return `Radar doesn't collect ${what} here`
       return `Could not read ${what}`
     default:
       return 'Not installed'

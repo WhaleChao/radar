@@ -48,6 +48,57 @@ func TestCacheProviderTypedCoverageUsesReadinessAndScope(t *testing.T) {
 	}
 }
 
+// A target read in full is not held back by another namespace of the kind
+// that is still loading, and Radar collecting the kind in only part of a
+// target is reported apart from readiness.
+func TestCacheProviderTypedCoverageJudgesOnlyTheTarget(t *testing.T) {
+	client := fake.NewClientset()
+	client.PrependReactor("list", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "gamma" {
+			return true, nil, errors.New("gamma does not answer")
+		}
+		return false, nil, nil
+	})
+	core, err := k8score.NewResourceCache(k8score.CacheConfig{
+		Client:                  client,
+		ResourceTypes:           map[string]bool{"configmaps": true},
+		ResourceScopes:          map[string]k8score.ResourceScope{"configmaps": {Enabled: true, Namespace: "alpha"}},
+		ResourceScopeNamespaces: map[string][]string{"configmaps": {"alpha", "gamma"}},
+		DeferredTypes:           map[string]bool{"configmaps": true},
+		DeferredSyncTimeout:     time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(core.Stop)
+	deadline := time.Now().Add(5 * time.Second)
+	for !core.AssessKindRead("configmaps", []string{"alpha"}).Complete {
+		if time.Now().After(deadline) {
+			t.Fatal("alpha never synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p := &CacheProvider{cache: &k8s.ResourceCache{ResourceCache: core}}
+	for _, tc := range []struct {
+		namespaces []string
+		reason     string
+		limited    bool
+	}{
+		{[]string{"alpha"}, "", false},
+		{[]string{"alpha", "gamma"}, "kind_sync_pending", false},
+		{[]string{"alpha", "beta"}, "collector_scope_limited", true},
+		{[]string{"gamma", "beta"}, "kind_sync_pending", true},
+		{nil, "kind_sync_pending", true},
+	} {
+		if got := p.TypedCoverage("ConfigMap", tc.namespaces); string(got) != tc.reason {
+			t.Errorf("%v: coverage %q, want %q", tc.namespaces, got, tc.reason)
+		}
+		if got := p.TypedCollectionLimited("ConfigMap", tc.namespaces); got != tc.limited {
+			t.Errorf("%v: limited %v, want %v", tc.namespaces, got, tc.limited)
+		}
+	}
+}
+
 func TestCacheProviderNilDynamic(t *testing.T) {
 	p := &CacheProvider{discovery: &k8s.ResourceDiscovery{}}
 	p.PrepareDynamicObservations(nil)

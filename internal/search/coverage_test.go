@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -159,6 +160,14 @@ func TestSearchDynamicCoverageDoesNotWarmDeniedAndRetainsGoodNamespaces(t *testi
 		res, _ = Search(context.Background(), p, Parse(tc.query), Options{})
 		if partial(res) != tc.wantPartial || (tc.wantPartial && (len(unsearched(res)) != 1 || unsearched(res)[0].Kind != tc.kind || string(unsearched(res)[0].Reason) != tc.reason || unsearched(res)[0].Count != tc.count)) {
 			t.Fatalf("dynamic state %s, query %q: %+v", tc.state, tc.query, res)
+		}
+		// A kind Radar is refused narrows a broad search; a kind no search can
+		// watch is outside every search and narrows none.
+		if tc.query == "" && tc.state == k8score.DynamicObservationDenied && !slices.Equal(res.Coverage.NarrowedBy, []resourceapi.Narrowing{resourceapi.NarrowedByCollection}) {
+			t.Fatalf("refused kind narrowedBy = %v", res.Coverage.NarrowedBy)
+		}
+		if tc.query == "" && tc.state == k8score.DynamicObservationUnsupported && len(res.Coverage.NarrowedBy) != 0 {
+			t.Fatalf("list-only kind narrowedBy = %v", res.Coverage.NarrowedBy)
 		}
 	}
 	p.observations[gvr] = k8score.DynamicResourceObservation{State: k8score.DynamicObservationSynced}

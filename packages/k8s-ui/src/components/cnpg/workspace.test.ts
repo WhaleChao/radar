@@ -118,6 +118,13 @@ describe('buildCNPGFleet', () => {
     expect(p.schedule.text).toBe("Radar doesn't collect ScheduledBackups here")
   })
 
+  it("names Radar's collection when it collects none of the selected namespaces", () => {
+    const p = buildCNPGFleet(
+      resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { scheduledBackups: { state: 'error', uncoveredNamespaces: ['db'] } } }),
+    ).rows[0].protection
+    expect(p.schedule.text).toBe("Radar doesn't collect ScheduledBackups here")
+  })
+
   it('blames neither when an older Radar mixes both causes under deniedNamespaces', () => {
     const p = buildCNPGFleet(
       resp({ clusters: [cluster('pg-a', 'db')] }, { coverage: { scheduledBackups: { state: 'partial', deniedNamespaces: ['db'] } } }),

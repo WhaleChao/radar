@@ -17,7 +17,8 @@ import { namedInventoryRows } from "../bodies/inventory";
 import type { InvestigationEvidenceTimelineItem } from "../types";
 import { evidenceRef, groupsOf, project, tool } from "../evidenceFixtures";
 
-// The list_resources results a partial read returns over MCP. internal/mcp
+// The list_resources results a partial read returns over MCP: narrowed to the
+// namespaces Radar collects (alpha, gamma), with gamma still loading. internal/mcp
 // pins them to the producer and internal/ai proves every agent backend hands
 // their joined text blocks to Findings unchanged; this suite projects that
 // text the way Findings does.
@@ -52,7 +53,7 @@ function projectCase(
   ]);
 }
 
-describe("a list Radar's collector read only in some namespaces", () => {
+describe("a list Radar read only in some of the namespaces it collects", () => {
   it("shows the rows it read with the namespaces they came from", () => {
     const projection = projectCase("partial", undefined, [
       tool("diagnose", "diagnose", {
@@ -73,10 +74,8 @@ describe("a list Radar's collector read only in some namespaces", () => {
     expect(
       inventory.latest.data.resources.map((row) => [row.namespace, row.name]),
     ).toEqual([["alpha", "alpha-object"]]);
-    expect(inventory.latest.summary).toBe(
-      "1 returned · only alpha, gamma read",
-    );
-    expect(inventory.latest.data.namespacesRead).toEqual(["alpha", "gamma"]);
+    expect(inventory.latest.summary).toBe("1 returned · only alpha read");
+    expect(inventory.latest.data.namespacesRead).toEqual(["alpha"]);
     expect(projection.limitations).toEqual([]);
     const coverageLimited = investigationEvidenceCoverageLimited(
       projection,
@@ -103,7 +102,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
     const projection = projectCase("partial and empty");
     expect(groupsOf(projection.groups, "inventory")).toEqual([]);
     expect(projection.limitations.map((item) => item.message)).toEqual([
-      'The listing returned nothing. Radar read services only in namespaces "alpha", "gamma". Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don\'t exist.',
+      'The listing returned nothing. This list covers only namespaces "alpha", "gamma" (the namespaces Radar collects services in). Radar read services only in namespace "alpha". Not read: namespace "gamma" (still loading). This result cannot show that services there don\'t exist.',
     ]);
     expect(investigationEvidenceCoverageLimited(projection, "Service")).toBe(
       true,
@@ -205,7 +204,7 @@ describe("a list Radar's collector read only in some namespaces", () => {
     const projection = projectCase("partial", ref);
     const evidence: DiagnosisEvidenceItem[] = [
       { namespace: "beta", claim: "Service api is missing from beta." },
-      { namespace: "gamma", claim: "Service api is missing from gamma." },
+      { namespace: "alpha", claim: "Service api is missing from alpha." },
       { namespace: undefined, claim: "No Service api exists." },
     ].map(({ namespace, claim }) => ({
       status: "linked",
@@ -244,10 +243,10 @@ describe("a list Radar's collector read only in some namespaces", () => {
     // beta was never read, so the listing cannot say api is missing there.
     expect(block).toContain("beta/api: beta was not read");
     expect(block).not.toContain("Not in this listing: beta/api");
-    // gamma was read and holds nothing: there the listing does show absence.
-    expect(block).toContain("Not in this listing: gamma/api");
+    // alpha was read and has no api: there the listing does show absence.
+    expect(block).toContain("Not in this listing: alpha/api");
     // An unqualified name was looked for only where the listing read.
-    expect(block).toContain("api: not in the namespaces read (alpha, gamma)");
+    expect(block).toContain("api: not in the namespaces read (alpha)");
     expect(block).not.toContain("Not in this listing: api<");
   });
 

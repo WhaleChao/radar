@@ -103,9 +103,8 @@ function failedKinds(entries: SearchCoverageEntry[], label: (e: SearchCoverageEn
 
 // Radar's ⌘K note for one search: what happened to the kinds and namespaces
 // the query named, whether results are still loading, and which kinds failed
-// to read. Access
-// and setup never come up on a broad search (Radar doesn't report them). An
-// older Radar sends no coverage, and gets no note.
+// to read. Access and setup never come up on a broad search (Radar doesn't
+// report them). An older Radar sends no coverage, and gets no note.
 export function searchCoverageNote(coverage: SearchCoverage | undefined, opts: SearchCoverageNoteOptions): OmnibarNote | undefined {
   const unsearched = searchCoverageEntries(coverage)
   if (!unsearched.length) return undefined
@@ -175,7 +174,8 @@ export function searchCoverageNote(coverage: SearchCoverage | undefined, opts: S
   if (denied.length) say(`Your access doesn't include all ${names(denied, 'or')}.`)
   const collector = named('collector_forbidden')
   if (collector.length) say(`Radar isn't allowed to read ${names(collector, 'or')} on this cluster.`)
-
+  const unwatched = named('kind_not_watched')
+  if (unwatched.length) say(`Radar doesn't watch ${names(unwatched, 'or')} on this cluster, so they weren't searched.`)
 
   if (!sentences.length) return undefined
   const shown = sentences.slice(0, MAX_SENTENCES)

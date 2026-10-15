@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { coverageEmpty } from './shared'
+import { coverageEmpty, partialLabel } from './shared'
 
 describe('coverageEmpty', () => {
   it("says whose gap a partial read is, when Radar says", () => {
@@ -16,5 +16,18 @@ describe('coverageEmpty', () => {
 
   it("blames neither for an older Radar's partial read", () => {
     expect(coverageEmpty({ state: 'partial', deniedNamespaces: ['a'] }, 'Poolers')).toBe('No Poolers visible. Some namespaces were not read.')
+  })
+})
+
+describe('partialLabel', () => {
+  it("names Radar's collection, not the caller, for uncollected namespaces", () => {
+    expect(partialLabel({ deniedNamespaces: [], uncoveredNamespaces: ['beta'] })).toBe("Radar doesn't collect some namespaces")
+  })
+  it("names the caller's access only when Radar says the rest is collected", () => {
+    expect(partialLabel({ deniedNamespaces: ['beta'], uncoveredNamespaces: [] })).toBe('no access in some namespaces')
+    expect(partialLabel({ deniedNamespaces: ['beta'], uncoveredNamespaces: ['gamma'] })).toBe("no access in some namespaces, and Radar doesn't collect others")
+  })
+  it('blames no one when an older Radar does not separate the two', () => {
+    expect(partialLabel({ deniedNamespaces: ['beta'] })).toBe('some namespaces not read')
   })
 })

@@ -122,15 +122,7 @@ func (p *CacheProvider) DynamicResources() ([]schema.GroupVersionResource, error
 func (p *CacheProvider) TypedCoverage(kind string, namespaces []string) readreason.Code {
 	resource := k8s.CanonicalBuiltinKind(kind)
 	assessment := p.cache.AssessKindRead(resource, namespaces)
-	if !isClusterScopedKind(kind) && len(namespaces) > 0 && len(assessment.Uncovered) == len(namespaces) {
-		return readreason.CollectorScopeLimited
-	}
-	switch assessment.Readiness {
-	case k8s.KindPending:
-		return readreason.KindSyncPending
-	case k8s.KindFailed:
-		return readreason.KindSyncFailed
-	case k8s.KindUnavailable:
+	if assessment.Readiness == k8s.KindUnavailable {
 		if apierrors.IsUnauthorized(p.probeErrors[resource]) {
 			return readreason.CollectorCredentialsRejected
 		}
@@ -139,11 +131,38 @@ func (p *CacheProvider) TypedCoverage(kind string, namespaces []string) readreas
 		}
 		return readreason.KindNotWatched
 	}
-	if !isClusterScopedKind(kind) && !assessment.Complete {
+	// A target read in full is not held back by another namespace of the
+	// kind that is still loading.
+	if assessment.Complete {
+		return ""
+	}
+	clusterScoped := isClusterScopedKind(kind)
+	if !clusterScoped && len(namespaces) > 0 && len(assessment.Uncovered) == len(namespaces) {
 		return readreason.CollectorScopeLimited
 	}
-
+	switch {
+	case len(assessment.Loading) > 0 || (assessment.AllNamespaces && assessment.Readiness == k8s.KindPending):
+		return readreason.KindSyncPending
+	case len(assessment.Failed) > 0 || (assessment.AllNamespaces && assessment.Readiness == k8s.KindFailed):
+		return readreason.KindSyncFailed
+	}
+	if !clusterScoped {
+		return readreason.CollectorScopeLimited
+	}
 	return ""
+}
+
+// TypedCollectionLimited reports that Radar collects kind in only part of
+// namespaces (nil: every namespace).
+func (p *CacheProvider) TypedCollectionLimited(kind string, namespaces []string) bool {
+	assessment := p.cache.AssessKindRead(k8s.CanonicalBuiltinKind(kind), namespaces)
+	return !assessment.AllNamespaces && (namespaces == nil || len(assessment.Uncovered) > 0)
+}
+
+// Current reports whether the provider still reads the connection Radar is
+// on: a search whose caches were replaced mid-read mixes two clusters.
+func (p *CacheProvider) Current() bool {
+	return p.cache == k8s.GetResourceCache() && p.dynamic == k8s.GetDynamicResourceCache() && p.discovery == k8s.GetResourceDiscovery()
 }
 
 // TypedReadable returns the namespaces of a namespace-scoped collector's kind

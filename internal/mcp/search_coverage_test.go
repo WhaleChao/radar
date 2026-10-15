@@ -94,8 +94,8 @@ func TestSearchKindRBACClusterFirstBoundsSARs(t *testing.T) {
 			t.Fatalf("allowed kind: %s %v", decision, scoped)
 		}
 	}
-	if checks != 3 {
-		t.Fatalf("SAR calls = %d, want 3 sensitive kinds", checks)
+	if checks != len(search.NamespacedSearchKinds) {
+		t.Fatalf("SAR calls = %d, want one per sensitive kind (%d)", checks, len(search.NamespacedSearchKinds))
 	}
 }
 
@@ -301,6 +301,8 @@ func TestCoverageHintTemplates(t *testing.T) {
 			"Radar couldn't check your access to Secret; retry."},
 		{"collector", hintResult{Unsearched: []hintEntry{gap("Node", "", readreason.CollectorForbidden)}},
 			"Radar isn't allowed to read Nodes on this cluster; granting you access won't help."},
+		{"not watched", hintResult{Unsearched: []hintEntry{gap("Role", "rbac.authorization.k8s.io", readreason.KindNotWatched)}},
+			"Radar doesn't watch Roles on this cluster, so they weren't searched."},
 		{"filter", hintResult{FilterErrors: 143, FilterErrorSample: "no such key: readyReplicas"},
 			"143 objects failed the filter (no such key: readyReplicas): Kubernetes omits fields that are 0 or empty, so guard them with has() and match a zero with kind == \"K\" && (!has(x) || x == 0)."},
 		{"ordered and capped", hintResult{FilterErrors: 1, FilterErrorSample: "no such key: x", Unsearched: []hintEntry{

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/search"
 	"github.com/skyhook-io/radar/internal/summarycontext"
+	"github.com/skyhook-io/radar/pkg/readreason"
 )
 
 // handleSearch serves GET /api/search.
@@ -106,6 +108,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := search.Search(r.Context(), provider, parsed, opts)
+	if err == nil && !provider.Current() {
+		err = search.ErrConnectionChanged
+	}
+	if errors.Is(err, search.ErrConnectionChanged) {
+		s.writeErrorCode(w, http.StatusConflict, string(readreason.ConnectionChanged), err.Error())
+		return
+	}
 	if err != nil {
 		// Log before writing per radar's CLAUDE.md convention. Today
 		// Search() never returns an error, but the moment that

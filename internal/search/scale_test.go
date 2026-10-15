@@ -190,18 +190,14 @@ func TestSearchClusterWideCacheStopsBetweenNamespaces(t *testing.T) {
 		dynamic:   &k8s.DynamicResourceCache{DynamicResourceCache: dc},
 		discovery: &k8s.ResourceDiscovery{ResourceDiscovery: discovery},
 	}}}
-	got, err := Search(t.Context(), p, Parse("kind:Widget robusta"), Options{Namespaces: []string{"a", "b"}, Include: IncludeNone})
-	if err != nil {
-		t.Fatal(err)
+	// A cache stopped mid-search belongs to a connection Radar left: the
+	// search fails rather than answering with part of it.
+	_, err = Search(t.Context(), p, Parse("kind:Widget robusta"), Options{Namespaces: []string{"a", "b"}, Include: IncludeNone})
+	if !errors.Is(err, ErrConnectionChanged) {
+		t.Fatalf("err = %v, want ErrConnectionChanged", err)
 	}
 	if !slices.Equal(p.reads, []string{"a"}) {
 		t.Fatalf("namespace reads = %v, want [a]", p.reads)
-	}
-	if got.Searched != 1 || !slices.Equal(hitNames(got), []string{"Widget/a/robusta-a"}) {
-		t.Fatalf("search included objects after shutdown: %+v", got)
-	}
-	if partial(got) || len(unsearched(got)) != 0 {
-		t.Fatalf("shutdown changed unwatched-kind coverage: %+v", got)
 	}
 }
 

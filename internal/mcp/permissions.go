@@ -350,30 +350,43 @@ func filterNamespacesByCanReadDecision(ctx context.Context, group, resource, ver
 	if len(namespaces) == 0 {
 		return namespaces, true
 	}
+	allowed, _, unchecked := partitionNamespacesByCanRead(ctx, group, resource, verb, namespaces)
+	return allowed, len(unchecked) == 0
+}
+
+// partitionNamespacesByCanRead splits namespaces by the caller's per-namespace
+// SAR: allowed, denied, and unchecked (the check itself failed). Each part is
+// sorted and non-nil.
+func partitionNamespacesByCanRead(ctx context.Context, group, resource, verb string, namespaces []string) (allowed, denied, unchecked []string) {
 	const maxConcurrent = 16
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	out := make([]string, 0, len(namespaces))
-	checkedAll := true
+	allowed, denied, unchecked = []string{}, []string{}, []string{}
 	for _, ns := range namespaces {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(ns string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			allowed, checked := canReadInNamespaceDecision(ctx, group, resource, ns, verb)
+			ok, checked := canReadInNamespaceDecision(ctx, group, resource, ns, verb)
 			mu.Lock()
-			checkedAll = checkedAll && checked
-			if allowed {
-				out = append(out, ns)
+			switch {
+			case ok:
+				allowed = append(allowed, ns)
+			case checked:
+				denied = append(denied, ns)
+			default:
+				unchecked = append(unchecked, ns)
 			}
 			mu.Unlock()
 		}(ns)
 	}
 	wg.Wait()
-	slices.Sort(out)
-	return out, checkedAll
+	slices.Sort(allowed)
+	slices.Sort(denied)
+	slices.Sort(unchecked)
+	return allowed, denied, unchecked
 }
 
 // retainAllowedObjects post-filters cache results for namespace-restricted users.

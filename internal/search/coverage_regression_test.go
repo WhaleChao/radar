@@ -94,8 +94,8 @@ func TestBroadSearchPermissionChecksDoNotScaleWithNamespacedCRDs(t *testing.T) {
 	if err != nil || partial(res) {
 		t.Fatalf("search: %+v %v", res, err)
 	}
-	if checks != 10 {
-		t.Fatalf("permission calls = %d; want 3 sensitive + 7 cluster-scoped", checks)
+	if checks != 11 {
+		t.Fatalf("permission calls = %d; want 4 sensitive + 7 cluster-scoped", checks)
 	}
 	if len(p.dynamicListNamespaces) != 2000 {
 		t.Fatalf("expected 200 CRDs across 10 visible namespaces, got %d lists", len(p.dynamicListNamespaces))

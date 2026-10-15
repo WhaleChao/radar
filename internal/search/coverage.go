@@ -15,11 +15,14 @@ import (
 	"github.com/skyhook-io/radar/pkg/resourceapi"
 )
 
-// NamespacedSearchKinds lists the sensitive typed kinds requiring exact caller RBAC.
+// NamespacedSearchKinds lists the typed kinds that need the caller's exact
+// list permission, not namespace visibility alone — LimitRanges as on the
+// resource list and get routes.
 var NamespacedSearchKinds = []struct{ Kind, Group, Resource string }{
 	{"Secret", "", "secrets"},
 	{"Role", "rbac.authorization.k8s.io", "roles"},
 	{"RoleBinding", "rbac.authorization.k8s.io", "rolebindings"},
+	{"LimitRange", "", "limitranges"},
 }
 
 // reasonClass groups coverage reasons by how a search reports them.
@@ -68,9 +71,11 @@ const maxNamedFailures = 5
 const maxFilterFailedObjects = 20
 
 // typedNamespaceReader is a Provider that can say which namespaces of a typed
-// kind are readable while others still load.
+// kind are readable while others still load, and whether Radar collects the
+// kind in only part of them.
 type typedNamespaceReader interface {
 	TypedReadable(kind string, namespaces []string) []string
+	TypedCollectionLimited(kind string, namespaces []string) bool
 }
 
 // readableWithin narrows a kind's list scope (nil: every namespace) to the
@@ -124,12 +129,16 @@ func newCoverage(q Query) *coverage {
 
 // quiet reports whether a kind-level reason goes unreported for this query,
 // so callers can skip work that could only produce it. A quiet reason still
-// narrowed the search, and is recorded as such.
+// narrowed the search, and is recorded as such — except a kind search can
+// never watch (Endpoints, Leases and other list-only APIs): those are outside
+// every search by definition, so they would narrow every one.
 func (c *coverage) quiet(reason readreason.Code) bool {
 	if classify(reason) != classScope || c.namedKinds {
 		return false
 	}
-	c.narrowed[narrowingFor(reason)] = true
+	if reason != readreason.KindNotWatchable {
+		c.narrowed[narrowingFor(reason)] = true
+	}
 	return true
 }
 
@@ -155,11 +164,21 @@ func (c *coverage) catalog(reason readreason.Code) {
 	c.unbounded[reason] = true
 }
 
-// namespaces records a namespace-level reason. Only namespaces the query names
-// are reported, merged into one gap per reason.
+// narrow records that a scope reason narrowed the search without a gap.
+func (c *coverage) narrow(reason readreason.Code) {
+	c.narrowed[narrowingFor(reason)] = true
+}
+
+// namespaces records a namespace-level reason. Namespaces the query names are
+// reported, merged into one gap per reason; any other namespace ("" for every
+// namespace) narrowed the search.
 func (c *coverage) namespaces(reason readreason.Code, namespaces ...string) {
 	for _, ns := range namespaces {
-		if !c.namedNamespaces[ns] || c.namespaceSeen[reason][ns] {
+		if !c.namedNamespaces[ns] {
+			c.narrow(reason)
+			continue
+		}
+		if c.namespaceSeen[reason][ns] {
 			continue
 		}
 		if c.namespaceSeen[reason] == nil {
@@ -315,6 +334,10 @@ func (o *Options) excludeMissingNamespaces(p Provider, q Query) {
 // errIncompleteDiscovery marks a dynamic catalog missing the API groups whose
 // discovery failed.
 var errIncompleteDiscovery = errors.New("some API groups could not be discovered")
+
+// ErrConnectionChanged ends a search whose caches were replaced while it ran:
+// its hits could mix two clusters.
+var ErrConnectionChanged = errors.New("Radar's cluster connection changed during this search (a context switch or reconnect); confirm which cluster Radar is connected to, then retry")
 
 // listErrorReason classifies a failed collector list or warm-up. The typed
 // cache reports a probe-disabled kind as a "forbidden:" error, and

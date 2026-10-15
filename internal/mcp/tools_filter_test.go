@@ -238,7 +238,7 @@ func TestHandleListResources_DeniedNamespace(t *testing.T) {
 
 	// A denied scope must be distinguishable from an empty namespace.
 	_, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: "pods", Namespace: "beta"})
-	if err == nil || !strings.Contains(err.Error(), "no_namespace_access:") {
+	if err == nil || !strings.Contains(err.Error(), "namespace_not_visible:") {
 		t.Fatalf("expected explicit caller denial, got %v", err)
 	}
 }
@@ -348,10 +348,10 @@ func TestHandleGetResource_DeniedNamespace(t *testing.T) {
 
 	_, _, err := handleGetResource(ctx, nil, getResourceInput{Kind: "pods", Namespace: "beta", Name: "beta-pod"})
 	if err == nil {
-		t.Fatal("expected no_namespace_access error for denied namespace, got nil")
+		t.Fatal("expected namespace_not_visible error for denied namespace, got nil")
 	}
-	if !strings.Contains(err.Error(), "no_namespace_access") {
-		t.Errorf("expected 'no_namespace_access' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "namespace_not_visible") {
+		t.Errorf("expected 'namespace_not_visible' in error, got: %v", err)
 	}
 }
 
@@ -580,6 +580,28 @@ func TestHandleListResources_Secrets_PartialNamespaceAccess(t *testing.T) {
 	_, coverage := partialListBody(t, result)
 	if !slices.Equal(coverage.GapNamespaces["rbac_denied"], []string{"beta"}) || !slices.Equal(coverage.Read, []string{"alpha"}) {
 		t.Errorf("withheld Secrets must be a gap: %+v", coverage)
+	}
+}
+
+// A Secret permission check that fails in one namespace doesn't discard the
+// namespaces already authorized: those are read, and the unchecked one is a
+// retryable gap rather than a denial.
+func TestHandleListResources_Secrets_UncheckedNamespaceIsAGap(t *testing.T) {
+	setupFakeCacheForFilterTests(t)
+	ctx := withRestrictedUser(t, "alice", []string{"alpha", "beta"})
+	seedSecretListCanI(t, "alice", []string{"alpha"}, nil)
+
+	result, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: "secrets"})
+	if err != nil {
+		t.Fatalf("handleListResources: %v", err)
+	}
+	body := extractText(t, result)
+	if !containsName(body, "alpha-secret") || containsName(body, "beta-secret") {
+		t.Fatalf("expected only alpha-secret: %s", body)
+	}
+	_, coverage := partialListBody(t, result)
+	if !slices.Equal(coverage.GapNamespaces["permission_check_failed"], []string{"beta"}) || len(coverage.GapNamespaces["rbac_denied"]) != 0 {
+		t.Errorf("an unchecked namespace must be a permission_check_failed gap: %+v", coverage)
 	}
 }
 

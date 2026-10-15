@@ -527,8 +527,11 @@ func (s *Server) cnpgTypedScope(r *http.Request, cache *k8s.ResourceCache, names
 		return cnpgKindAccess{state: cnpgCoverageDenied}, nil, nil, []string{}
 	}
 	assessment := cache.AssessKindRead(resource, allowed)
+	if namespaces != nil {
+		uncovered = slices.Sorted(slices.Values(assessment.Uncovered))
+	}
 	if len(assessment.Uncovered) > 0 && len(assessment.Uncovered) == len(allowed) {
-		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, []string{}
+		return cnpgKindAccess{state: cnpgCoverageError}, nil, uncovered, []string{}
 	}
 	switch assessment.Readiness {
 	case k8s.KindPending:
@@ -539,9 +542,6 @@ func (s *Server) cnpgTypedScope(r *http.Request, cache *k8s.ResourceCache, names
 	if !assessment.Complete && len(assessment.Read) == 0 {
 		log.Printf("[cnpg] %s cache does not cover the requested scope", resource)
 		return cnpgKindAccess{state: cnpgCoverageError}, nil, nil, []string{}
-	}
-	if namespaces != nil {
-		uncovered = slices.Sorted(slices.Values(assessment.Uncovered))
 	}
 	acc = accessFromScope(assessment.Read, partial || !assessment.Complete)
 	return acc, denied, uncovered, assessment.Read
