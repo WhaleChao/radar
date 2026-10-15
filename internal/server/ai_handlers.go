@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -178,29 +179,37 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	// SAR for cluster-only kinds, list-namespaces SAR for `kind=namespaces`,
 	// per-namespace and/or cluster-wide list-secrets SAR for `kind=secrets`).
 	// Caller denials stay explicit before reading or shaping any rows.
-	namespaces := s.parseNamespacesForUser(r)
-	finalNamespaces, status, msg, ok := s.preflightResourceList(r, kind, group, namespaces)
-	if !ok {
-		s.writeError(w, status, msg)
+	namespaces, accessCheckFailed := s.parseNamespacesForUserWithStatus(r)
+	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+	authz, failure := s.preflightResourceList(r, kind, group, namespaces)
+	target := s.resourceListTarget(r, namespaces, authz.gaps, clusterScoped)
+	if failure != nil {
+		s.writeReadFailure(w, kind, noAccessFailure(failure, target, accessCheckFailed), &target)
 		return
 	}
-	namespaces = finalNamespaces
+	// A bare list can't say which namespaces exact kind authorization withheld.
+	if len(authz.gaps) > 0 {
+		s.writeIncompleteAIList(w, target, nil)
+		return
+	}
+	namespaces = authz.namespaces
 
 	cache, ok := s.gateResourceRead(w, kind, group)
 	if !ok {
 		return
 	}
 	if key := informerKeyForKind(kind); key != "" && (group == "" || k8s.TypedKindOwnsGroup(kind, group)) {
-		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
-		plan, err := typedReadCoverage(cache, key, namespaces, clusterScoped)
+		plan, err := typedReadCoverage(cache, key, namespaces, clusterScoped, target.explicit)
 		if err != nil {
-			s.writeCollectionFailure(w, kind, err)
+			s.writeReadFailure(w, kind, err, &target)
 			return
 		}
 		// This agent endpoint still returns a bare list; partial scope cannot be
 		// represented by that contract, so require its entire requested scope.
+		// Radar's collection narrowing an unscoped request is not a gap: the
+		// list is every object Radar collects there, as before.
 		if len(plan.gaps) > 0 || !plan.whole {
-			s.writeIncompleteAIList(w, listTarget{clusterScoped: clusterScoped, namespaces: namespaces}, plan.gaps)
+			s.writeIncompleteAIList(w, target, plan.gaps)
 			return
 		}
 	}
@@ -214,7 +223,7 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	// cache has no informer for built-ins, so it would 400. Mirrors the
 	// group-aware dispatch in handleGetResource.
 	if group != "" && !k8s.TypedKindOwnsGroup(kind, group) {
-		s.aiListDynamic(w, r, cache, kind, namespaces, group, level, skipContext)
+		s.aiListDynamic(w, r, cache, kind, target, namespaces, group, level, skipContext)
 		return
 	}
 
@@ -222,7 +231,7 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	objs, err := k8s.FetchResourceList(cache, kind, namespaces)
 	if err == k8s.ErrUnknownKind {
 		// Fall through to dynamic cache for CRDs
-		s.aiListDynamic(w, r, cache, kind, namespaces, group, level, skipContext)
+		s.aiListDynamic(w, r, cache, kind, target, namespaces, group, level, skipContext)
 		return
 	}
 	if err != nil {
@@ -279,17 +288,17 @@ func issueIndexNamespaces(namespaces []string, kind, group string) []string {
 }
 
 // aiListDynamic handles the CRD/dynamic fallback for AI list.
-func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8s.ResourceCache, kind string, namespaces []string, group string, level aicontext.VerbosityLevel, skipContext bool) {
-	allItems, _, gaps, err := readDynamicResourceList(r, cache, kind, group, namespaces, resourceListHardLimit)
+func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8s.ResourceCache, kind string, target listTarget, namespaces []string, group string, level aicontext.VerbosityLevel, skipContext bool) {
+	list, err := readDynamicResourceList(r, cache, kind, group, namespaces, target.explicit, resourceListHardLimit)
 	if err != nil {
-		s.writeCollectionFailure(w, kind, err)
+		s.writeReadFailure(w, kind, err, &target)
 		return
 	}
-	if len(gaps) > 0 {
-		clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
-		s.writeIncompleteAIList(w, listTarget{clusterScoped: clusterScoped, namespaces: namespaces}, gaps)
+	if len(list.gaps) > 0 {
+		s.writeIncompleteAIList(w, target, list.gaps)
 		return
 	}
+	allItems := list.rows
 	if !s.checkResourceListSize(w, len(allItems), resourceListHardLimit) {
 		return
 	}
@@ -348,8 +357,12 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 	// no `get secrets` SAR could read Secret values via /api/ai/resources/…
 	// even though /api/resources/… correctly returns 403. Runs BEFORE the
 	// fetch so cluster-scoped denies don't leak existence by status code.
-	if status, msg, ok := s.preflightResourceGet(r, kind, namespace, name, group); !ok {
-		s.writeError(w, status, msg)
+	if failure := s.preflightResourceGet(r, kind, namespace, name, group); failure != nil {
+		s.writeReadFailure(w, kind, failure, nil)
+		return
+	}
+	if failure := outsideNamespacePin(namespace); failure != nil {
+		s.writeReadFailure(w, kind, failure, nil)
 		return
 	}
 
@@ -363,7 +376,7 @@ func (s *Server) handleAIGetResource(w http.ResponseWriter, r *http.Request) {
 		if clusterScoped {
 			target = nil
 		}
-		plan, err := typedReadCoverage(cache, key, target, clusterScoped)
+		plan, err := typedReadCoverage(cache, key, target, clusterScoped, true)
 		if err != nil {
 			s.writeCollectionFailure(w, kind, err)
 			return
@@ -444,7 +457,7 @@ func (s *Server) writeAIFetchError(w http.ResponseWriter, kind string, err error
 	case errors.Is(err, k8s.ErrUnknownDynamicKind):
 		s.writeError(w, http.StatusBadRequest, err.Error())
 	case strings.HasPrefix(err.Error(), "forbidden:"):
-		s.writeErrorCode(w, 503, "collector_access_denied", fmt.Sprintf("Radar's collector cannot read %s", kind))
+		s.writeErrorCode(w, readStatusFor(readreason.CollectorForbidden), string(readreason.CollectorForbidden), fmt.Sprintf("Radar's collector cannot read %s", kind))
 	default:
 		s.writeCollectionFailure(w, kind, err)
 	}
@@ -664,6 +677,7 @@ func (s *Server) computeAuditSummaryAndRows(r *http.Request, cache *k8s.Resource
 // its bare array has no way to say what is missing, so the code is the most
 // actionable gap's and the gaps travel in the error's coverage.
 func (s *Server) writeIncompleteAIList(w http.ResponseWriter, target listTarget, gaps []resourceapi.Gap) {
+	gaps = append(slices.Clone(target.gaps), gaps...)
 	codes := make([]readreason.Code, 0, len(gaps))
 	for _, gap := range gaps {
 		codes = append(codes, gap.Code)
@@ -677,6 +691,6 @@ func (s *Server) writeIncompleteAIList(w http.ResponseWriter, target listTarget,
 	s.writeJSON(w, resourceapi.ReadError{
 		Error:     "Radar cannot provide a complete list for the requested scope",
 		ErrorCode: code,
-		Coverage:  &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: target.scope(), Gaps: gaps},
+		Coverage:  &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: target.scope(), NarrowedBy: target.narrowedBy, Gaps: gaps},
 	})
 }

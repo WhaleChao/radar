@@ -80,6 +80,15 @@ func readFailuref(code readreason.Code, format string, args ...any) *resourceRea
 	return &resourceReadFailure{code: code, message: fmt.Sprintf(format, args...)}
 }
 
+// permissionFailure is a caller permission check that didn't allow the read:
+// a denial, or — when the check itself failed — a retryable non-answer.
+func permissionFailure(checked bool, denial string) *resourceReadFailure {
+	if !checked {
+		return readFailuref(readreason.PermissionCheckFailed, "Radar could not complete your permission check; retry when it is available")
+	}
+	return readFailuref(readreason.RBACDenied, "%s", denial)
+}
+
 // errReadHandlesChanged marks a read whose cache, dynamic cache or discovery
 // was replaced while it ran, so its rows may mix two clusters.
 var errReadHandlesChanged = errors.New("Radar's cluster connection changed during this read; confirm which cluster Radar is connected to, then retry")
@@ -119,10 +128,10 @@ func (s *Server) writeReadFailure(w http.ResponseWriter, resource string, err er
 		log.Printf("[resource-read] Failed to read %s: %v", resource, err)
 	}
 	body := resourceapi.ReadError{Error: failure.message, ErrorCode: failure.code}
-	if target != nil && (len(failure.gaps) > 0 || len(target.gaps) > 0) {
+	if target != nil {
 		gaps := append(slices.Clone(target.gaps), failure.gaps...)
-		if len(gaps) == 0 {
-			gaps = []resourceapi.Gap{{Code: failure.code}}
+		if !slices.ContainsFunc(gaps, func(gap resourceapi.Gap) bool { return gap.Code == failure.code }) {
+			gaps = append(gaps, resourceapi.Gap{Code: failure.code})
 		}
 		body.Coverage = &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: target.scope(), NarrowedBy: target.narrowedBy, Gaps: gaps}
 	}
@@ -145,9 +154,15 @@ func (s *Server) writeCollectionFailure(w http.ResponseWriter, resource string, 
 // denies the kind.
 type listTarget struct {
 	clusterScoped bool
-	namespaces    []string
-	narrowedBy    []resourceapi.Narrowing
-	gaps          []resourceapi.Gap
+	// explicit: the request named its namespaces.
+	explicit   bool
+	namespaces []string
+	// withheld counts named namespaces left out of namespaces because the
+	// caller can't see them or the pin excludes them: still in scope, never
+	// named back.
+	withheld   int
+	narrowedBy []resourceapi.Narrowing
+	gaps       []resourceapi.Gap
 }
 
 func (t listTarget) scope() resourceapi.Scope {
@@ -157,7 +172,9 @@ func (t listTarget) scope() resourceapi.Scope {
 	case t.namespaces == nil:
 		return resourceapi.Scope{Type: resourceapi.ScopeAllNamespaces}
 	default:
-		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(t.namespaces, resourceapi.RESTSample)}
+		names := resourceapi.Names(t.namespaces, resourceapi.RESTSample)
+		names.Count += t.withheld
+		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: names}
 	}
 }
 
@@ -181,13 +198,13 @@ func (t listTarget) coverage(read []string, gaps []resourceapi.Gap) resourceapi.
 }
 
 // resourceListTarget resolves a list's target from the request. visible is
-// parseNamespacesForUser's answer (nil: every namespace) and authorized what
-// exact kind authorization allows of it.
-func (s *Server) resourceListTarget(r *http.Request, visible, authorized []string, clusterScoped bool) listTarget {
+// parseNamespacesForUser's answer (nil: every namespace) and kindGaps what
+// exact kind authorization withholds of it.
+func (s *Server) resourceListTarget(r *http.Request, visible []string, kindGaps []resourceapi.Gap, clusterScoped bool) listTarget {
 	if clusterScoped {
 		return listTarget{clusterScoped: true}
 	}
-	return s.requestListTarget(r, visible).withKindAuthorization(visible, authorized)
+	return s.requestListTarget(r, visible).withGaps(kindGaps)
 }
 
 // requestListTarget is the part of a list's target that depends only on the
@@ -195,6 +212,7 @@ func (s *Server) resourceListTarget(r *http.Request, visible, authorized []strin
 func (s *Server) requestListTarget(r *http.Request, visible []string) listTarget {
 	t := listTarget{namespaces: visible}
 	if named := parseNamespaces(r.URL.Query()); named != nil {
+		t.explicit = true
 		// A named namespace the caller can't see is a gap counted but never
 		// named back: the caller knows what they asked for, and the response
 		// stays the same whether that namespace exists or not.
@@ -211,6 +229,7 @@ func (s *Server) requestListTarget(r *http.Request, visible []string) listTarget
 				hidden++
 			}
 		}
+		t.withheld = pinned + hidden
 		if pinned > 0 {
 			t.gaps = append(t.gaps, resourceapi.Gap{Code: readreason.OutsideNamespaceScope, Namespaces: &resourceapi.NameSet{Count: pinned, Sample: []string{}}})
 		}
@@ -230,18 +249,51 @@ func (s *Server) requestListTarget(r *http.Request, visible []string) listTarget
 	return t
 }
 
-// withKindAuthorization adds the namespaces exact kind authorization (Secrets,
-// Roles, RoleBindings) withholds from what the caller can otherwise see. They
-// were visible to the caller already, so naming them leaks nothing.
-func (t listTarget) withKindAuthorization(visible, authorized []string) listTarget {
-	t.gaps = slices.Clone(t.gaps)
-	if authorized != nil {
-		if visible == nil {
-			t.gaps = append(t.gaps, resourceapi.Gap{Code: readreason.RBACDenied})
-		} else if withheld := slices.DeleteFunc(slices.Clone(visible), func(ns string) bool { return slices.Contains(authorized, ns) }); len(withheld) > 0 {
-			t.gaps = append(t.gaps, resourceapi.Gap{Code: readreason.RBACDenied, Namespaces: resourceapi.Names(withheld, resourceapi.RESTSample)})
-		}
+// readCache is the typed cache a read would use now. A handler captures it
+// before authorizing and checks it again before answering, so authorization,
+// coverage and rows all come from the connection the request started on.
+func readCache() *k8s.ResourceCache {
+	active, syncing := k8s.SnapshotCaches()
+	if active != nil {
+		return active
 	}
+	return syncing
+}
+
+// outsideNamespacePin refuses a read of one namespace Radar's --namespace-scope
+// pin excludes: its cache holds nothing there, so a miss would read as absence.
+func outsideNamespacePin(namespace string) *resourceReadFailure {
+	if namespace != "" && k8s.ForceNamespaceScope && namespace != k8s.GetNamespaceScopeTarget() {
+		return readFailuref(readreason.OutsideNamespaceScope, "namespace %q is outside Radar's --namespace-scope pin", namespace)
+	}
+	return nil
+}
+
+// noAccessFailure says why a list the caller can read nothing of failed: the
+// namespaces it named are outside the pin or hidden, the caller's namespace
+// access couldn't be determined, or they have none.
+func noAccessFailure(failure *resourceReadFailure, target listTarget, accessCheckFailed bool) *resourceReadFailure {
+	if failure.code != readreason.NoNamespaceAccess {
+		return failure
+	}
+	if accessCheckFailed {
+		return readFailuref(readreason.PermissionCheckFailed, "Radar could not determine your namespace access; retry when the permission check is available")
+	}
+	if len(target.gaps) > 0 {
+		codes := make([]readreason.Code, 0, len(target.gaps))
+		for _, gap := range target.gaps {
+			codes = append(codes, gap.Code)
+		}
+		return &resourceReadFailure{code: readreason.Primary(codes), message: failure.message}
+	}
+	return failure
+}
+
+// withGaps adds the caller's own gaps within namespaces they can see: exact
+// kind authorization (Secrets, LimitRanges) denying the kind there, or a
+// check that couldn't complete. Naming them leaks nothing.
+func (t listTarget) withGaps(gaps []resourceapi.Gap) listTarget {
+	t.gaps = append(slices.Clone(t.gaps), gaps...)
 	return t
 }
 
@@ -253,12 +305,29 @@ type typedRead struct {
 	// kind still loading elsewhere is read from its namespaces' own stores.
 	whole bool
 	gaps  []resourceapi.Gap
+	// collected, when non-nil, is the part of an implicit target Radar
+	// collects the kind in: the read was narrowed to it. uncovered is what it
+	// left out of a finite target.
+	collected, uncovered []string
+}
+
+// narrowedByCollection narrows t to what Radar collects of it: collected when
+// t is every namespace, else t without uncovered.
+func (t listTarget) narrowedByCollection(collected, uncovered []string) listTarget {
+	if t.namespaces == nil {
+		t.namespaces = collected
+	} else {
+		t.namespaces = slices.DeleteFunc(slices.Clone(t.namespaces), func(ns string) bool { return slices.Contains(uncovered, ns) })
+	}
+	t.narrowedBy = append(slices.Clone(t.narrowedBy), resourceapi.NarrowedByCollection)
+	return t
 }
 
 // typedReadCoverage assesses what of namespaces (nil: every namespace) a typed
 // kind can be read in now, and why the rest can't. It fails only when nothing
-// can be read.
-func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []string, clusterScoped bool) (typedRead, error) {
+// can be read. Namespaces Radar doesn't collect are gaps when the request
+// named them (explicit); otherwise they narrow the read.
+func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []string, clusterScoped, explicit bool) (typedRead, error) {
 	a := cache.AssessKindRead(resource, namespaces)
 	pending := func(ns ...string) resourceapi.Gap {
 		return gapOf(readreason.KindSyncPending, ns)
@@ -289,11 +358,15 @@ func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []s
 		}
 	}
 	var gaps []resourceapi.Gap
-	if len(a.Uncovered) > 0 {
+	var collected []string
+	switch {
+	case explicit && len(a.Uncovered) > 0:
 		gaps = append(gaps, gapOf(readreason.CollectorScopeLimited, a.Uncovered))
-	}
-	if namespaces == nil && !a.AllNamespaces {
-		gaps = append(gaps, resourceapi.Gap{Code: readreason.CollectorScopeLimited})
+	case len(a.Uncovered) > 0 || (namespaces == nil && !a.AllNamespaces):
+		collected = slices.Sorted(slices.Values(slices.Concat(a.Read, a.Loading, a.Failed)))
+		if len(collected) == 0 {
+			gaps = append(gaps, gapOf(readreason.CollectorScopeLimited, a.Uncovered))
+		}
 	}
 	if len(a.Loading) > 0 {
 		gaps = append(gaps, pending(a.Loading...))
@@ -320,7 +393,7 @@ func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []s
 	if clusterScoped || (a.AllNamespaces && namespaces == nil) {
 		read = nil
 	}
-	return typedRead{read: read, whole: a.Readiness == k8s.KindReady, gaps: gaps}, nil
+	return typedRead{read: read, whole: a.Readiness == k8s.KindReady, gaps: gaps, collected: collected, uncovered: a.Uncovered}, nil
 }
 
 func gapOf(code readreason.Code, namespaces []string) resourceapi.Gap {
@@ -368,6 +441,10 @@ func listSize(items any) int {
 }
 
 func typedListCount(cache *k8s.ResourceCache, resource string, namespaces []string) int {
+	// ListCountNamespaced reads an empty slice as every namespace.
+	if namespaces != nil && len(namespaces) == 0 {
+		return 0
+	}
 	for _, kind := range k8score.AllKindListers() {
 		if informerKeyForKind(kind.Kind()) == resource {
 			return k8score.ListCountNamespaced(kind.Lister()(cache.ResourceCache), namespaces)
@@ -421,53 +498,85 @@ func namespaceReadFailure(dynamicCache *k8s.DynamicResourceCache, gvr schema.Gro
 	}
 }
 
+// dynamicList is what a dynamic kind's list read: its rows, the namespaces
+// read (nil: all of the target), and the gaps. When Radar's collection
+// narrowed a request that named no namespaces, narrowed is set, with collected
+// the namespaces it collects the kind in for an every-namespace target, and
+// uncovered what it left out of a finite one.
+type dynamicList struct {
+	rows                 []*unstructured.Unstructured
+	read                 []string
+	gaps                 []resourceapi.Gap
+	narrowed             bool
+	collected, uncovered []string
+}
+
 // readDynamicResourceList lists a dynamic kind in namespaces (nil: every
-// namespace). Each namespace is a separate read: one that fails is a gap,
-// and the list fails only when none succeeds — or when the list is over its
-// size budget, or the read handles changed, which invalidate the whole answer.
-// read is the namespaces read, nil when the whole target was.
-func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, group string, namespaces []string, limit int) (rows []*unstructured.Unstructured, read []string, gaps []resourceapi.Gap, err error) {
+// namespace). Each namespace is a separate read: one that fails is a gap, and
+// the list fails only when none succeeds — or when the list is over its size
+// budget, or the read handles changed, which invalidate the whole answer. A
+// namespace Radar doesn't collect, or is refused in, narrows a request that
+// named no namespaces (explicit false) instead of leaving a gap in it.
+func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, group string, namespaces []string, explicit bool, limit int) (dynamicList, error) {
 	dynamicCache, gvr, err := dynamicReadHandles(cache, kind, group)
 	if err != nil {
-		return nil, nil, nil, err
+		return dynamicList{}, err
 	}
+	current := func() bool { return cache == k8s.GetResourceCache() && dynamicCache == k8s.GetDynamicResourceCache() }
 	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
 	direct := k8s.ShouldBypassDynamicInformer(gvr)
 	targets := namespaces
-	residualUnknown := false
+	var collected []string
 	if namespaces == nil {
 		if direct {
 			items, listErr := dynamicCache.ListDirectBounded(r.Context(), gvr, "", limit)
 			if listErr == nil {
-				return items, nil, nil, nil
+				if !current() {
+					return dynamicList{}, errReadHandlesChanged
+				}
+				return dynamicList{rows: items}, nil
 			}
 			if !apierrors.IsForbidden(listErr) || clusterScoped {
-				return nil, nil, nil, listErr
+				return dynamicList{}, listErr
 			}
 			targets = dynamicCache.FallbackNamespaces()
 		} else {
+			// Rows read before the informer finished syncing are incomplete
+			// even if it finishes during the read, so a sync seen only after
+			// the read means reading again.
+			syncedBefore := dynamicCache.IsNamespaceSynced(gvr, "")
 			items, listErr := dynamicCache.ListContext(r.Context(), gvr, "")
 			if listErr != nil {
-				return nil, nil, nil, listErr
+				return dynamicList{}, listErr
 			}
-			if dynamicCache.IsNamespaceSynced(gvr, "") {
-				return items, nil, nil, nil
+			if !syncedBefore && dynamicCache.IsNamespaceSynced(gvr, "") {
+				syncedBefore = true
+				if items, listErr = dynamicCache.ListContext(r.Context(), gvr, ""); listErr != nil {
+					return dynamicList{}, listErr
+				}
+			}
+			if syncedBefore {
+				if !current() {
+					return dynamicList{}, errReadHandlesChanged
+				}
+				return dynamicList{rows: items}, nil
 			}
 			observation := dynamicCache.Observation(gvr)
 			if observation.Scope != k8score.DynamicObservationScopeExplicitNamespaces {
 				failure := namespaceReadFailure(dynamicCache, gvr, "")
 				failure.gaps = []resourceapi.Gap{{Code: failure.code}}
-				return nil, nil, nil, failure
+				return dynamicList{}, failure
 			}
 			targets = observation.Namespaces
 		}
-		residualUnknown = true
+		collected = slices.Compact(slices.Sorted(slices.Values(targets)))
 	}
 	targets = slices.Compact(slices.Sorted(slices.Values(targets)))
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	var mu sync.Mutex
-	read = []string{}
+	var rows []*unstructured.Unstructured
+	read := []string{}
 	failures := make(map[readreason.Code][]string)
 	failureByCode := make(map[readreason.Code]*resourceReadFailure)
 	tooLarge := false
@@ -486,9 +595,15 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 			} else if direct {
 				items, readErr = dynamicCache.ListDirectBounded(ctx, gvr, namespace, limit)
 			} else {
+				syncedBefore := dynamicCache.IsNamespaceSynced(gvr, namespace)
 				items, readErr = dynamicCache.ListBlockingContext(ctx, gvr, namespace, 3*time.Second)
-				if readErr == nil && !dynamicCache.IsNamespaceSynced(gvr, namespace) {
+				switch {
+				case readErr != nil:
+				case !dynamicCache.IsNamespaceSynced(gvr, namespace):
 					readErr = namespaceReadFailure(dynamicCache, gvr, namespace)
+				case !syncedBefore:
+					// The wait may have handed back rows from before the sync.
+					items, readErr = dynamicCache.ListContext(ctx, gvr, namespace)
 				}
 			}
 			mu.Lock()
@@ -515,19 +630,26 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 		})
 	}
 	_ = groupReads.Wait()
-	if cache != k8s.GetResourceCache() || dynamicCache != k8s.GetDynamicResourceCache() {
-		return nil, nil, nil, errReadHandlesChanged
+	if !current() {
+		return dynamicList{}, errReadHandlesChanged
 	}
 	if tooLarge || len(failures[readreason.ListTooLarge]) > 0 {
-		return nil, nil, nil, readFailuref(readreason.ListTooLarge, "Too many resources to load; select fewer namespaces")
+		return dynamicList{}, readFailuref(readreason.ListTooLarge, "Too many resources to load; select fewer namespaces")
 	}
-	if residualUnknown {
-		code := readreason.CollectorScopeLimited
-		if direct {
-			code = readreason.CollectorForbidden
+	// Radar not collecting, or being refused, a namespace the request didn't
+	// name narrows it, once something was read.
+	var uncovered []string
+	if !explicit && !clusterScoped && len(read) > 0 {
+		for _, code := range []readreason.Code{readreason.CollectorScopeLimited, readreason.CollectorForbidden} {
+			uncovered = append(uncovered, failures[code]...)
+			delete(failures, code)
 		}
-		gaps = append(gaps, resourceapi.Gap{Code: code})
+		if collected != nil {
+			collected = slices.DeleteFunc(collected, func(ns string) bool { return slices.Contains(uncovered, ns) })
+		}
 	}
+	narrowed := collected != nil || len(uncovered) > 0
+	var gaps []resourceapi.Gap
 	for _, code := range slices.Sorted(maps.Keys(failures)) {
 		gaps = append(gaps, gapOf(code, failures[code]))
 	}
@@ -538,22 +660,25 @@ func readDynamicResourceList(r *http.Request, cache *k8s.ResourceCache, kind, gr
 		if failure == nil {
 			failure = readFailuref(readreason.CollectorScopeLimited, "Radar has no readable scope for %s", kind)
 		}
-		return nil, nil, nil, &resourceReadFailure{code: failure.code, message: failure.message, gaps: gaps}
+		return dynamicList{}, &resourceReadFailure{code: failure.code, message: failure.message, gaps: gaps}
 	}
-	if !residualUnknown && len(failures) == 0 {
+	if !narrowed && len(failures) == 0 {
 		read = nil
 	}
-	return rows, read, gaps, nil
+	slices.Sort(read)
+	return dynamicList{rows: rows, read: read, gaps: gaps, narrowed: narrowed, collected: collected, uncovered: uncovered}, nil
 }
 
 // dynamicCountCoverage reports which of namespaces (nil: every namespace) a
-// dynamic kind can be counted in now: read is nil when all of them.
-func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersionResource, namespaces []string, clusterScoped bool) (read []string, gaps []resourceapi.Gap, ok bool) {
+// dynamic kind can be counted in now: read is nil when all of them. For every
+// namespace, collected is what Radar collects the kind in, which narrows the
+// count.
+func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersionResource, namespaces []string, clusterScoped bool) (read, collected []string, gaps []resourceapi.Gap, ok bool) {
 	if cache.IsNamespaceSynced(gvr, "") {
-		return nil, nil, true
+		return nil, nil, nil, true
 	}
 	if clusterScoped {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	targets := namespaces
 	if targets == nil {
@@ -569,14 +694,17 @@ func dynamicCountCoverage(cache *k8s.DynamicResourceCache, gvr schema.GroupVersi
 		}
 	}
 	if len(read) == 0 {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	if namespaces == nil {
-		gaps = append(gaps, resourceapi.Gap{Code: readreason.CollectorScopeLimited})
+		collected = slices.Sorted(slices.Values(targets))
+		if len(unread) > 0 {
+			gaps = append(gaps, gapOf(readreason.KindSyncPending, unread))
+		}
 	} else if len(unread) > 0 {
 		gaps = append(gaps, gapOf(readreason.CollectorScopeLimited, unread))
 	}
-	return read, gaps, true
+	return read, collected, gaps, true
 }
 
 func readDynamicResourceGet(ctx context.Context, cache *k8s.ResourceCache, kind, group, namespace, name string) (*unstructured.Unstructured, error) {

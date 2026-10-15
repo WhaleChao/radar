@@ -95,7 +95,9 @@ func TestResourceListCoverageDistinguishesEmptyAndUnread(t *testing.T) {
 			}{
 				{"?namespace=alpha", "namespaces", false, nil},
 				{"?namespaces=alpha,beta", "namespaces", true, []string{"beta"}},
-				{"", "all_namespaces", true, nil},
+				// An unscoped list is narrowed to what Radar collects, and
+				// complete within it.
+				{"", "namespaces", false, nil},
 				{"?namespaces=alpha,beta&table=1", "namespaces", true, []string{"beta"}},
 			} {
 				t.Run(tc.query, func(t *testing.T) {
@@ -114,6 +116,9 @@ func TestResourceListCoverageDistinguishesEmptyAndUnread(t *testing.T) {
 					}
 					if body.Coverage.Status != wantStatus || body.Coverage.Scope.Type != resourceapi.ScopeType(tc.requestedType) {
 						t.Fatalf("coverage = %+v", body.Coverage)
+					}
+					if narrowed := slices.Equal(body.Coverage.NarrowedBy, []resourceapi.Narrowing{resourceapi.NarrowedByCollection}); narrowed != (tc.query == "") {
+						t.Fatalf("narrowedBy = %v", body.Coverage.NarrowedBy)
 					}
 					if body.Coverage.Read.Namespaces == nil || !slices.Equal(body.Coverage.Read.Namespaces.Sample, []string{"alpha"}) {
 						t.Fatalf("read scope = %+v", body.Coverage.Read)
@@ -224,7 +229,9 @@ func TestResourceListCoverageContainsOnlyCallerVisibleNamespaces(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Coverage.Status != resourceapi.CoveragePartial || result.Coverage.Scope.Namespaces.Count != 2 || result.Coverage.Read.Namespaces.Count != 1 {
+	// The scope counts every namespace the request named; the one the caller
+	// can't see is counted, never named.
+	if result.Coverage.Status != resourceapi.CoveragePartial || result.Coverage.Scope.Namespaces.Count != 3 || !slices.Equal(result.Coverage.Scope.Namespaces.Sample, []string{"alpha", "beta"}) || result.Coverage.Read.Namespaces.Count != 1 {
 		t.Fatalf("coverage = %+v", result.Coverage)
 	}
 	resp = env.authGet(t, "/api/resources/pods?namespace=hidden-collector-namespace&table=1", "reader", "")
@@ -430,8 +437,11 @@ func TestResourceCountsHonorSpecialNamespacedListGates(t *testing.T) {
 	if counts.Counts["Secret"] != len(list.Items) || counts.Counts["Secret"] != 1 || coverage.Status != resourceapi.CoveragePartial || coverage.Scope.Namespaces == nil || !slices.Equal(coverage.Scope.Namespaces.Sample, []string{"alpha", "beta"}) || coverage.Read.Namespaces == nil || !slices.Equal(coverage.Read.Namespaces.Sample, []string{"alpha"}) || len(coverage.Gaps) != 1 || coverage.Gaps[0].Code != "rbac_denied" || coverage.Gaps[0].Namespaces == nil || !slices.Equal(coverage.Gaps[0].Namespaces.Sample, []string{"beta"}) {
 		t.Fatalf("Secret count did not use list's authorized scope: counts=%+v list=%+v", counts, list)
 	}
-	if _, exists := counts.Counts["LimitRange"]; exists || counts.Reasons["LimitRange"] != "rbac_denied" {
-		t.Fatalf("LimitRange count weakened list's full-scope gate: %+v", counts)
+	// LimitRanges are narrowed like Secrets: counted where the caller may
+	// list them, with the rest a gap.
+	limits := counts.Coverage["LimitRange"]
+	if counts.Counts["LimitRange"] != 1 || limits.Status != resourceapi.CoveragePartial || len(limits.Gaps) != 1 || limits.Gaps[0].Code != "rbac_denied" || !slices.Equal(limits.Gaps[0].Namespaces.Sample, []string{"beta"}) {
+		t.Fatalf("LimitRange count did not use list's authorized scope: %+v %+v", counts.Counts["LimitRange"], limits)
 	}
 }
 
@@ -704,7 +714,7 @@ func TestCancelledDirectNamespaceReadIsNotInformerLoading(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := httptest.NewRequest("GET", "/api/resources/leases?namespace=alpha", nil).WithContext(ctx)
-	_, _, _, err := readDynamicResourceList(req, k8s.GetResourceCache(), "leases", gvr.Group, []string{"alpha"}, 10)
+	_, err := readDynamicResourceList(req, k8s.GetResourceCache(), "leases", gvr.Group, []string{"alpha"}, true, 10)
 	var failure *resourceReadFailure
 	if !errors.As(err, &failure) || failure.code != readreason.ReadError || readStatusFor(failure.code) != 500 {
 		t.Fatalf("cancelled direct read = %v", err)
@@ -730,7 +740,7 @@ func TestResourceReadPreservesKnownExclusionBeforeInitialSync(t *testing.T) {
 		{[]string{"alpha", "beta"}, readreason.KindSyncPending},
 		{nil, readreason.KindSyncPending},
 	} {
-		plan, err := typedReadCoverage(cache, "pods", tc.namespaces, false)
+		plan, err := typedReadCoverage(cache, "pods", tc.namespaces, false, tc.namespaces != nil)
 		var failure *resourceReadFailure
 		if !errors.As(err, &failure) || failure.code != tc.reason || plan.read != nil {
 			t.Fatalf("%v: plan=%+v error=%v; want %s", tc.namespaces, plan, err, tc.reason)

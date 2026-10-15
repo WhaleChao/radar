@@ -55,8 +55,8 @@ func (s *Server) handleServiceEndpointSlices(w http.ResponseWriter, r *http.Requ
 	}
 
 	namespaces := s.parseNamespacesForUser(withNamespaceFilter(r, namespace))
-	if _, status, msg, ok := s.preflightResourceList(r, "endpointslices", endpointSliceGroup, namespaces); !ok {
-		s.writeError(w, status, msg)
+	if _, failure := s.preflightResourceList(r, "endpointslices", endpointSliceGroup, namespaces); failure != nil {
+		s.writeErrorCode(w, readStatusFor(failure.code), string(failure.code), failure.message)
 		return
 	}
 	cache, ok := s.gateResourceRead(w, "endpointslices", endpointSliceGroup)

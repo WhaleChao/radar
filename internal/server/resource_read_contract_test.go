@@ -162,4 +162,40 @@ func TestResourceListScopeProvenance(t *testing.T) {
 	if raw, _ := json.Marshal(named); strings.Contains(string(raw), "secret-tenant") {
 		t.Fatalf("a namespace the caller can't see was named back: %s", raw)
 	}
+	// The scope still counts it: the answer is about both namespaces named.
+	if named.Coverage.Scope.Namespaces.Count != 2 || !slices.Equal(named.Coverage.Scope.Namespaces.Sample, []string{"alpha"}) {
+		t.Fatalf("named scope = %+v", named.Coverage.Scope.Namespaces)
+	}
+}
+
+// Every way a resource GET is refused carries a code, so a client can tell
+// the caller's denial from a namespace they can't see or a failed check.
+func TestResourceGetDenialsAreCoded(t *testing.T) {
+	client := fake.NewClientset(
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "token"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "api"}},
+	)
+	useTestResourceCache(t, client)
+	env := newAuthTestServer(t)
+	perms := &auth.UserPermissions{AllowedNamespaces: []string{"alpha"}}
+	perms.SetCanI("get", "", "secrets", "alpha", false)
+	env.srv.permCache.Set("scoped", nil, perms)
+	for _, tc := range []struct {
+		path   string
+		status int
+		code   string
+	}{
+		{"/api/resources/secrets/alpha/token", http.StatusForbidden, "rbac_denied"},
+		{"/api/resources/services/beta/api", http.StatusForbidden, "namespace_not_visible"},
+		{"/api/ai/resources/secrets/alpha/token", http.StatusForbidden, "rbac_denied"},
+	} {
+		resp := env.authGet(t, tc.path, "scoped", "")
+		assertResourceReadError(t, resp, tc.status, tc.code)
+		resp.Body.Close()
+	}
+	// A caller whose namespace access couldn't be determined is told to
+	// retry, not that they have none.
+	resp := env.authGet(t, "/api/resources/services", "unknown-caller", "")
+	defer resp.Body.Close()
+	assertResourceReadError(t, resp, http.StatusServiceUnavailable, "permission_check_failed")
 }

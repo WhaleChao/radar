@@ -9,6 +9,7 @@ import (
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/readscope"
 	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/readreason"
 	"github.com/skyhook-io/radar/pkg/resourceapi"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -61,18 +62,15 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	namespaces := s.parseNamespacesForUser(r)
-	// countTarget is a kind's target: the request's, with authorized the
-	// namespaces exact kind authorization allows of it.
+	namespaces, accessCheckFailed := s.parseNamespacesForUserWithStatus(r)
+	// countTarget is a kind's target: the request's, with the gaps exact kind
+	// authorization left in it.
 	requestTarget := s.requestListTarget(r, namespaces)
-	countTarget := func(authorized []string, clusterScoped bool) listTarget {
+	countTarget := func(kindGaps []resourceapi.Gap, clusterScoped bool) listTarget {
 		if clusterScoped {
 			return listTarget{clusterScoped: true}
 		}
-		if slices.Equal(authorized, namespaces) {
-			authorized = nil
-		}
-		return requestTarget.withKindAuthorization(namespaces, authorized)
+		return requestTarget.withGaps(kindGaps)
 	}
 
 	cache, syncing := k8s.SnapshotCaches()
@@ -163,20 +161,26 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			markForbidden(kl.CountKey(), reasonUnavailable)
 			continue
 		}
-		kindNamespaces, _, _, allowed := s.preflightResourceList(r, normalizeKind(kl.Kind()), "", namespaces)
-		if !allowed {
-			markForbidden(kl.CountKey(), reasonRBACDenied)
+		authz, failure := s.preflightResourceList(r, normalizeKind(kl.Kind()), "", namespaces)
+		clusterScoped, _, _ := k8s.ClassifyKindScope(kl.Kind(), "")
+		if failure != nil {
+			if failure = noAccessFailure(failure, countTarget(authz.gaps, clusterScoped), accessCheckFailed); failure.code == readreason.PermissionCheckFailed {
+				markUnavailable(kl.CountKey())
+				reasons[kl.CountKey()] = string(failure.code)
+			} else {
+				markForbidden(kl.CountKey(), reasonRBACDenied)
+			}
 			continue
 		}
-		clusterScoped, _, _ := k8s.ClassifyKindScope(kl.Kind(), "")
+		kindNamespaces := authz.namespaces
 		// A kind still loading as a whole is counted in the namespaces whose
 		// informers have synced, as a partial count; with none synced its
 		// count is not a fact yet and stays unavailable. A terminally-failed
 		// kind carries its code so the client can hand it to the list
 		// endpoint, whose kind_sync_failed renders honestly.
 		key := informerKeyForKind(kl.Kind())
-		target := countTarget(kindNamespaces, clusterScoped)
-		plan, scopeErr := typedReadCoverage(cache, key, kindNamespaces, clusterScoped)
+		target := countTarget(authz.gaps, clusterScoped)
+		plan, scopeErr := typedReadCoverage(cache, key, kindNamespaces, clusterScoped, target.explicit)
 		if scopeErr != nil {
 			markUnavailable(kl.CountKey())
 			var failure *resourceReadFailure
@@ -207,6 +211,9 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			n = count
 		}
 		markCounted(kl.CountKey(), n)
+		if plan.collected != nil {
+			target = target.narrowedByCollection(plan.collected, plan.uncovered)
+		}
 		countCoverage[kl.CountKey()] = target.coverage(plan.read, plan.gaps)
 	}
 
@@ -336,7 +343,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 				if !crd.namespaced {
 					target = nil
 				}
-				read, gaps, ready := dynamicCountCoverage(dynamicCache, crd.gvr, target, !crd.namespaced)
+				read, collected, gaps, ready := dynamicCountCoverage(dynamicCache, crd.gvr, target, !crd.namespaced)
 				if ready {
 					countIn := read
 					if countIn == nil {
@@ -344,7 +351,11 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 					}
 					if n, err := dynamicCache.Count(crd.gvr, countIn); err == nil {
 						markCounted(key, n)
-						countCoverage[key] = countTarget(nil, !crd.namespaced).coverage(read, gaps)
+						coverageTarget := countTarget(nil, !crd.namespaced)
+						if collected != nil {
+							coverageTarget = coverageTarget.narrowedByCollection(collected, nil)
+						}
+						countCoverage[key] = coverageTarget.coverage(read, gaps)
 						continue
 					}
 				}
