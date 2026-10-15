@@ -102,7 +102,7 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
     const projection = projectCase("partial and empty");
     expect(groupsOf(projection.groups, "inventory")).toEqual([]);
     expect(projection.limitations.map((item) => item.message)).toEqual([
-      'The listing returned nothing. This list covers only namespaces "alpha", "gamma" (the namespaces Radar collects services in). Radar read services only in namespace "alpha". Not read: namespace "gamma" (still loading). This result cannot show that services there don\'t exist.',
+      'Radar found no services in namespace "alpha". Not read: namespace "gamma", because Radar is still loading services there (retry in a few seconds). Services may exist there that this list doesn\'t show. Other namespaces weren\'t read either: Radar collects services only in namespaces "alpha", "gamma"; whoever installed Radar can add namespaces with --namespaces through the chart\'s extraArgs, if its service account can list services there.',
     ]);
     expect(investigationEvidenceCoverageLimited(projection, "Service")).toBe(
       true,
@@ -122,8 +122,9 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
         namespaces: { count: 40, sample: namespaces.slice(0, 8) },
       },
       gaps: [{ code: "collector_scope_limited" }],
-      note: 'Radar read services only in namespaces "team-01", "team-02", "team-03", "team-04", "team-05", "team-06", "team-07", "team-08" and 32 more. Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don\'t exist.',
     };
+    const summary =
+      'These are the services in namespaces "team-01", "team-02", "team-03", "team-04", "team-05", "team-06", "team-07", "team-08" and 32 more only. Not read: part of the scope, because Radar doesn\'t collect services there. Services may exist there that this list doesn\'t show.';
     const rows = [
       { kind: "Service", name: "present", namespace: namespaces[0] },
       { kind: "Service", name: "observed", namespace: "team-39" },
@@ -132,7 +133,7 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
       tool(
         "list",
         "list_resources",
-        { coverage, items: rows },
+        { summary, coverage, items: rows },
         {
           summary: JSON.stringify({ kind: "services" }),
         },
@@ -184,18 +185,16 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
     expect(html).not.toContain("unread/api: unread was not read");
     expect(html).toContain("unread/api: read coverage is unknown");
     const empty = project([
-      tool("empty", "list_resources", { coverage, items: [] }),
+      tool("empty", "list_resources", { summary, coverage, items: [] }),
     ]);
-    expect(empty.limitations.map((item) => item.message)).toEqual([
-      `The listing returned nothing. ${coverage.note}`,
-    ]);
+    expect(empty.limitations.map((item) => item.message)).toEqual([summary]);
     expect(empty.limitations[0].message).not.toContain("team-09");
   });
 
   it("names the resource Radar read, not the alias the agent asked for", () => {
     const projection = projectCase("partial and empty, kind by alias");
     const [message] = projection.limitations.map((item) => item.message);
-    expect(message).toContain("Radar read services only in");
+    expect(message).toContain("Radar found no services in");
     expect(message).not.toMatch(/svcs/i);
   });
 
@@ -306,7 +305,11 @@ describe("a list Radar read all of", () => {
       tool(
         "list",
         "list_resources",
-        { coverage, items: rows },
+        {
+          summary: "These are all the services in every namespace.",
+          coverage,
+          items: rows,
+        },
         { summary: JSON.stringify({ kind: "services" }) },
       ),
     ]);
@@ -317,12 +320,16 @@ describe("a list Radar read all of", () => {
       tool(
         "empty",
         "list_resources",
-        { coverage, items: [] },
+        {
+          summary: "There are no services in any namespace.",
+          coverage,
+          items: [],
+        },
         { summary: JSON.stringify({ kind: "services" }) },
       ),
     ]);
     expect(empty.limitations.map((item) => item.message)).toEqual([
-      "No services resources: Radar read all of the requested scope.",
+      "There are no services in any namespace.",
     ]);
   });
 
@@ -339,13 +346,16 @@ describe("a list Radar read all of", () => {
         namespaces: { count: 2, sample: ["alpha", "beta"] },
       },
       gaps: [],
-      note: 'This list covers only namespaces "alpha", "beta" (your access). It says nothing about services in other namespaces.',
     };
+    const summary =
+      'These are the services in namespaces "alpha", "beta" only: your access covers only those namespaces. Other namespaces may have services this list doesn\'t show.';
+    const emptySummary =
+      'There are no services in namespaces "alpha", "beta": your access covers only those namespaces. Other namespaces may have services this list doesn\'t show.';
     const projection = project([
       tool(
         "list",
         "list_resources",
-        { coverage, items: rows },
+        { summary, coverage, items: rows },
         { summary: JSON.stringify({ kind: "services" }) },
       ),
     ]);
@@ -355,12 +365,12 @@ describe("a list Radar read all of", () => {
       tool(
         "empty",
         "list_resources",
-        { coverage, items: [] },
+        { summary: emptySummary, coverage, items: [] },
         { summary: JSON.stringify({ kind: "services" }) },
       ),
     ]);
     expect(empty.limitations.map((item) => item.message)).toEqual([
-      `The listing returned nothing. ${coverage.note}`,
+      emptySummary,
     ]);
   });
 
@@ -375,7 +385,7 @@ describe("a list Radar read all of", () => {
     );
   });
 
-  it("rejects a partial or narrowed list that does not explain itself", () => {
+  it("rejects a list that does not explain itself in words", () => {
     const projection = project([
       tool("list", "list_resources", {
         coverage: {

@@ -457,25 +457,41 @@ GitOps `diagnose` root reads apply the same readiness checks. Codes are defined
 in `pkg/readreason`, and the coverage types in `pkg/resourceapi`; REST resource
 reads and search use the same codes.
 
+### Words first
+
+An agent reading these results has not been trained on Radar's vocabulary, and
+a tool description can't carry a manual for it. So every result a model reads
+says in a sentence what the codes and coverage say as data: what the answer
+covers, what it can't show (a namespace Radar didn't read never reads as "none
+there"), and what to do next and who does it — retry, change the request, ask
+a cluster admin for access, or have whoever runs Radar widen what it collects.
+For a list that sentence is `summary`; for a failure it is `error`. Codes and
+coverage stay for code to branch on and never change spelling; the sentences
+may be reworded.
+
 ### Lists
 
-`list_resources` always returns one text block holding `{coverage, items}`,
-coverage first so it survives truncation that keeps only the head of a long
-result:
+`list_resources` always returns one text block holding
+`{summary, coverage, items}`, the summary first so it survives truncation that
+keeps only the head of a long result:
 
 ```json
 {
+  "summary": "These are the services in namespace \"alpha\" only. Not read: namespace \"gamma\", because Radar is still loading services there (retry in a few seconds). Services may exist there that this list doesn't show. Other namespaces weren't read either: your access covers only namespaces \"alpha\", \"gamma\".",
   "coverage": {
     "status": "partial",
     "scope": {"type": "namespaces", "namespaces": {"count": 2, "sample": ["alpha", "gamma"]}},
     "narrowedBy": ["caller_access"],
     "read": {"type": "namespaces", "namespaces": {"count": 1, "sample": ["alpha"]}},
-    "gaps": [{"code": "kind_sync_pending", "namespaces": {"count": 1, "sample": ["gamma"]}}],
-    "note": "This list covers only namespaces \"alpha\", \"gamma\" (your access). Radar read services only in namespace \"alpha\". Not read: namespace \"gamma\" (still loading). This result cannot show that services there don't exist."
+    "gaps": [{"code": "kind_sync_pending", "namespaces": {"count": 1, "sample": ["gamma"]}}]
   },
   "items": [{"kind": "Service", "name": "api", "namespace": "alpha"}]
 }
 ```
+
+- **`summary`** is always present. A list that covers the whole scope says so
+  ("These are all the services in every namespace."); anything less names what
+  was not read, why, and who can widen it.
 
 - **`scope`** is what the answer is about: `cluster` for a cluster-scoped kind,
   `all_namespaces`, or a namespace set. A namespace you name stays the scope
@@ -493,8 +509,6 @@ result:
 - **`gaps[]`** each carry a `code` and, when known, the `namespaces` affected.
   A gap without namespaces reaches an unknown part of the scope — for example,
   the namespaces outside a namespace-limited collector — never "none".
-- **`note`** is a sentence for the model reading the result, present whenever
-  the list is partial or narrowed.
 
 Namespace sets are `{count, sample}`: `sample` holds up to eight sorted names
 and `count` the size of the whole set, so a sample shorter than `count` is only
@@ -510,9 +524,12 @@ on an unscoped request those namespaces narrow it (`collection`) instead.
 Secrets and LimitRanges need your exact permission, not just namespace
 visibility: namespaces you can see but can't list them in are an
 `rbac_denied` gap (or `permission_check_failed` when the check didn't
-complete). Cluster-scoped kinds and unscoped Secret or LimitRange lists keep
-exact per-kind permission checks and fail with `rbac_denied`. Namespace lists
-use the full collector list after the list-namespaces permission check.
+complete). A caller whose access reaches every namespace is checked once,
+cluster-wide: an unscoped Secret or LimitRange list fails with `rbac_denied`
+unless they can list them everywhere, and the error says to name a namespace
+they can list them in. Cluster-scoped kinds keep exact per-kind permission
+checks and fail with `rbac_denied`. Namespace lists use the full collector list
+after the list-namespaces permission check.
 
 The browser namespace picker does not scope MCP requests.
 
@@ -524,7 +541,7 @@ text block are the same body:
 
 ```json
 {
-  "error": "Radar does not watch services in namespace \"beta\", which is outside the collector's scope; covered namespaces you can read: \"alpha,gamma\"; Radar collects services only in namespaces its kubeconfig identity can list, at most --max-scope-candidates of them (default 20); name more with --namespaces",
+  "error": "Radar doesn't collect services in namespace \"beta\", so it can't say what exists there. It collects services in namespaces \"alpha,gamma\". Whoever runs Radar can add namespaces with --namespaces, if its kubeconfig identity can list services there.",
   "error_code": "collector_scope_limited",
   "coverage": {
     "status": "partial",
@@ -568,11 +585,11 @@ The same table, as the action each code calls for, is
 `pkg/readreason/testdata/actions.json`.
 
 Collector errors omit the API server's response, which may name Radar's
-identity; the raw cause is logged server-side. Errors, gaps and notes name only
-namespaces the caller may read or named themselves.
+identity; the raw cause is logged server-side. Errors, gaps and summaries name
+only namespaces the caller may read or named themselves.
 
-Findings shows a list's coverage caveat, including for an empty partial or
-narrowed list. A placed story card distinguishes an unread subject namespace
+Findings shows a list's summary as its coverage caveat, including for an empty
+partial or narrowed list. A placed story card distinguishes an unread subject namespace
 from a missing object in a namespace that was read. A bare array comes from a
 Radar older than this contract and is never read as complete.
 
@@ -590,7 +607,7 @@ For `get_cost` and `get_rightsizing`, see [Cost and rightsizing evidence limits]
 | `diagnose` | Collect a bounded, point-in-time evidence bundle for one narrowed workload, GitOps reconciler, or network entry kind in a single call. It supports diagnosis but does not run an agent, provide an authoritative root-cause verdict, or exhaustively read every source. Pod/Deployment/StatefulSet/DaemonSet and Argo Rollout (`kind=Rollout`, `group=argoproj.io`) get minified resource + `resourceContext` + selected, capped current and previous container logs across pods + `crashCause` evidence that pairs active crashloop status with one highest-signal filtered log line (`logLineSelection` states how the line was chosen, in descending confidence: `fatal_pattern`, `traceback_header_only`, `last_matched_line`, `log_tail`) + filtered events + `startupBlockers`; Application/Kustomization/Flux HelmRelease get reconciler status + related parsed issues; Service/Ingress/HTTPRoute/GRPCRoute/Gateway get coverage-honest [reachability evidence](reachability.md): a `summary` (headline + tested/passed/failed/skipped counts over the intended routes), `routes` (per-route outcome + `confidence` - `indirect` = reached only via the API-server proxy, not the live-traffic path), `notTested` (with why + a copyable command), an optional named `brokenRoute` when established, and `path` (hops with static findings). Optional active reachability test (`probe: true`, bounded to a 3s total budget; a timeout returns an honest partial). The returned bundle is frozen from one call, but its sources are not read atomically; preserve its limits, errors, timestamps, and confidence. In `resourceContext`, `issueSummary` uses live-operational `critical`/`warning`, while `auditSummary` uses the Checks posture-remediation ladder `critical`/`high`/`medium`/`low` (current built-ins are `high`/`medium`) and is not evidence of an active outage. | `kind` (required: workload, GitOps reconciler, or network entry kind), `group` (optional API group; set it for CRDs or same-kind collisions, for example `argoproj.io` for `Rollout`; built-in groups are inferred when omitted), `namespace` (required), `name` (required), `probe` (optional: network kinds only - run DNS/TCP/TLS/HTTP probes as applicable; explicitly non-HTTP Service ports stop at TCP), `in_cluster` (optional on the full `/mcp` endpoint only, **MUTATING** - network kinds only: runs the applicable probe layers from inside the cluster by creating up to 5 short-lived, self-deleting probe pods under your RBAC; the only diagnose option with a side effect, requires `create jobs`, `list pods`, and `get pods/log`; forces `probe` on; omitted from and rejected by `/mcp-readonly`) |
 | `get_dashboard` | Cluster/namespace health overview — resource counts, failing pods, unhealthy workloads, warning-event groups (`warningGroups`, up to 20 recency-ordered; `totalWarningGroups`/`warningGroupsTruncated` signal when more exist), Helm status. Inventory-style triage before drilling in. | `namespace` (optional) |
 | `top_resources` | Live metrics ranked like `kubectl top | sort`, joined with K8s context (status, restarts, owner, requests/limits). Use for CPU/memory/OOM/load symptoms. | `kind` (optional: `pods` default, `workloads`, `nodes`), `namespace` (optional), `sort` (optional: `cpu` default, `memory`), `limit` (optional, default 20, max 100) |
-| `list_resources` | List resources of a kind with minified summaries + per-row `summaryContext` (managedBy / health / issueCount). Returns `{coverage, items}`: what the rows cover and what Radar did not read ([lists](#lists)). | `kind` (required), `group` (optional), `namespace` (optional), `context` (optional: default / `none`) |
+| `list_resources` | List resources of a kind with minified summaries + per-row `summaryContext` (managedBy / health / issueCount). Returns `{summary, coverage, items}`: a sentence saying what the rows cover and what Radar did not read, then the same as data ([lists](#lists)). | `kind` (required), `group` (optional), `namespace` (optional), `context` (optional: default / `none`) |
 | `search` | Find resources by content/term match (config keys, env refs, images, label values, CRD fields, status messages). Tokens AND'd; secret values never indexed. Supports `kind:`/`ns:`/`label:`/`image:` modifiers and CEL `filter`. | `query` (required), `filter` (optional CEL), `limit` (optional) |
 | `get_resource` | Inspect one known resource: minified spec, status, and metadata, plus default-on `resourceContext` with relationships and available resource-specific summaries. Operational issues and static audit posture remain distinct; audit findings are not evidence of an active outage. See [integration documentation](integrations.md) for controller-specific context and limits. Optional supplemental data adds events, metrics, recent changes, rollback revisions, detailed issue context, or a Node drain estimate. `include=drain-plan` reuses the read-only REST drain estimator with the caller’s credentials and the removal drawer’s explicit options; it returns up to 100 current pods, full summary counts, `drainPlanTotalPods` and `drainPlanPodsTruncated`. It evaluates Eviction API/PDB eligibility, not controller-specific policy or eviction history. `include=issues` returns up to three `relatedIssues`, with `relatedIssuesTotal` and `relatedIssuesTruncated`; this is independent of `context=none`. For logs use `get_pod_logs`, `get_workload_logs`, or `diagnose` for supported kinds. | `kind` (required), `name` (required), `namespace` (optional — omit for cluster-scoped kinds), `group` (optional, for ambiguous kinds), `include` (optional, comma-separated: `events,metrics,changes,revisions,issues,drain-plan`; `revisions` lists rollback targets for Deployment/StatefulSet/DaemonSet/Rollout), `context` (optional: `basic` default, `none` to omit `resourceContext`) |
 | `get_topology` | Whole-namespace/cluster topology graph (nodes + edges). Use `summary` format for LLM-friendly text chains. Once you have a suspect root, prefer `get_neighborhood`. | `namespace` (optional), `view` (optional: `traffic` or `resources`), `format` (optional: `graph` or `summary`) |

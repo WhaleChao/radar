@@ -4,10 +4,12 @@
 // MCP structuredContent and text), and coverage gaps as gaps[].code. Clients
 // branch on them, so a value never changes its spelling once shipped.
 //
-// The prefix says whose problem it is. No prefix: the caller's own access.
-// collector_: Radar's own Kubernetes identity. kind_: the kind's collection
-// state. Namespace codes: how the request's namespaces were targeted.
-// cluster_ and connection_: Radar's cluster connection.
+// A prefix says whose problem it is. collector_: Radar's own Kubernetes
+// identity. kind_: the kind's collection state. Namespace codes: how the
+// request's namespaces were targeted. cluster_ and connection_: Radar's
+// cluster connection. rbac_denied, no_namespace_access and
+// permission_check_failed are the caller's own access; the other unprefixed
+// codes describe the request or the answer itself.
 package readreason
 
 import "slices"
