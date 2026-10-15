@@ -288,17 +288,19 @@ func (o *Options) ScopeNamespaces(q Query, visible, ceiling []string) {
 		}
 	}
 	o.NamespaceExcluded = o.Namespaces != nil && len(o.Namespaces) == 0
+	// Every narrowing that applied to a search that named no namespace, as REST
+	// and MCP lists report it: the caller's access when it is restricted, and
+	// the pin, or else a selection that leaves namespaces out.
 	o.namespaceNarrowing = nil
 	if len(q.NSFilter) == 0 {
 		if ceiling != nil {
 			o.namespaceNarrowing = append(o.namespaceNarrowing, resourceapi.NarrowedByCallerAccess)
 		}
-		if visible != nil && (ceiling == nil || len(visible) < len(ceiling)) {
-			narrowing := resourceapi.NarrowedByNamespaceSelection
-			if o.Pinned {
-				narrowing = resourceapi.NarrowedByNamespacePin
-			}
-			o.namespaceNarrowing = append(o.namespaceNarrowing, narrowing)
+		switch {
+		case o.Pinned:
+			o.namespaceNarrowing = append(o.namespaceNarrowing, resourceapi.NarrowedByNamespacePin)
+		case visible != nil && (ceiling == nil || len(visible) < len(ceiling)):
+			o.namespaceNarrowing = append(o.namespaceNarrowing, resourceapi.NarrowedByNamespaceSelection)
 		}
 	}
 }

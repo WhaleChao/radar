@@ -100,8 +100,9 @@ func (rc *ResourceCache) AssessKindRead(resource string, requested []string) Kin
 	if target == nil {
 		target = covered
 	}
+	isCovered := namespaceSet(covered)
 	for _, namespace := range target {
-		if !slices.Contains(covered, namespace) {
+		if !isCovered[namespace] {
 			a.Uncovered = append(a.Uncovered, namespace)
 			continue
 		}
@@ -113,6 +114,16 @@ func (rc *ResourceCache) AssessKindRead(resource string, requested []string) Kin
 	}
 	a.Complete = requested != nil && len(a.Loading) == 0 && len(a.Failed) == 0 && len(a.Uncovered) == 0
 	return a
+}
+
+// namespaceSet indexes namespaces for membership checks: a collector's list
+// and a caller's target can each hold thousands.
+func namespaceSet(namespaces []string) map[string]bool {
+	set := make(map[string]bool, len(namespaces))
+	for _, ns := range namespaces {
+		set[ns] = true
+	}
+	return set
 }
 
 func (a *KindReadAssessment) assign(state KindReadiness, namespaces ...string) {
@@ -146,8 +157,9 @@ func (rc *ResourceCache) readableIndexers(resource string, namespaces []string) 
 		return reads, true
 	}
 	covered := rc.KindNamespaces(resource)
+	isCovered := namespaceSet(covered)
 	for _, namespace := range namespaces {
-		if covered != nil && !slices.Contains(covered, namespace) {
+		if covered != nil && !isCovered[namespace] {
 			return nil, false
 		}
 		st, ok := rc.storeFor(resource, namespace)

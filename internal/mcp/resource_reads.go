@@ -117,9 +117,6 @@ func resolveReadTarget(ctx context.Context, requested []string) (readTarget, err
 	if !ok {
 		return target, readErrorf(readreason.OutsideNamespaceScope, "requested namespace %q is excluded by Radar's --namespace-scope selection", namespaceForError(requested))
 	}
-	if !target.explicit && clamped != nil {
-		target.narrowedBy = append(target.narrowedBy, resourceapi.NarrowedByNamespacePin)
-	}
 	user, perms, checked := resolveUserPermsDecision(ctx)
 	if !checked {
 		return target, readErrorf(readreason.PermissionCheckFailed, "could not discover your Radar namespace access; retry when the permission check is available")
@@ -139,8 +136,16 @@ func resolveReadTarget(ctx context.Context, requested []string) (readTarget, err
 		}
 		return target, readErrorf(readreason.NoNamespaceAccess, "no Radar access to any namespace in the requested scope (Radar grants namespace access when your role can list pods or deployments there; re-checked every ~2 minutes)")
 	}
-	if !target.explicit && clamped == nil && allowed != nil {
-		target.narrowedBy = append(target.narrowedBy, resourceapi.NarrowedByCallerAccess)
+	// Every narrowing that applied to a request that named no namespace, as
+	// REST and search report it: the caller's access when it is restricted,
+	// and the pin.
+	if !target.explicit {
+		if pkgauth.FilterNamespacesForUser(nil, user, perms) != nil {
+			target.narrowedBy = append(target.narrowedBy, resourceapi.NarrowedByCallerAccess)
+		}
+		if clamped != nil {
+			target.narrowedBy = append(target.narrowedBy, resourceapi.NarrowedByNamespacePin)
+		}
 	}
 	target.namespaces = allowed
 	return target, nil
