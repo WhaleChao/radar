@@ -171,7 +171,9 @@ func notFoundSuggestion(ctx context.Context, kind, namespace, name string) strin
 // notFoundNext is what get_resource's agent can try after a miss: the same
 // name under another kind or namespace, else a search for it.
 func notFoundNext(ctx context.Context, kind, namespace, name string) string {
-	search := fmt.Sprintf("call search with query %q to look for it under every kind and namespace you can read", name)
+	// Naming the kind lets search reach kinds a broad search skips, such as
+	// deferred ones and Events.
+	search := fmt.Sprintf("call search with query %q to look for it in every namespace you can read", "kind:"+kind+" "+name)
 	if parts := notFoundAlternatives(ctx, kind, namespace, name); len(parts) > 0 {
 		return upperFirst(strings.Join(parts, "; ")) + ". Otherwise, " + search + "."
 	}
