@@ -15,8 +15,9 @@ import (
 const maxCoverageSentences = 3
 
 // hintEntry is one kind or namespace a search couldn't cover, flattened from
-// the result's gaps: a named kind, or "*" for namespaces, for kinds counted
-// beyond the gap's sample (Count), or for an unknown set (Count 0).
+// the result's gaps: a named kind, or "*" for namespaces, for kinds too many
+// to name (Count), or for an unknown set (Count 0). A search names every
+// namespace a query asked for, so namespace gaps are always listed.
 type hintEntry struct {
 	Kind, Group string
 	Reason      readreason.Code
@@ -30,15 +31,14 @@ func hintEntries(cov resourceapi.SearchCoverage) []hintEntry {
 		switch {
 		case gap.Objects != nil:
 			// Filter failures are explained from filter_errors.
+		case gap.Kinds != nil && gap.Kinds.Names == nil:
+			out = append(out, hintEntry{Kind: "*", Reason: gap.Code, Count: gap.Kinds.Count})
 		case gap.Kinds != nil:
-			for _, k := range gap.Kinds.Sample {
+			for _, k := range gap.Kinds.Names {
 				out = append(out, hintEntry{Kind: k.Kind, Group: k.Group, Reason: gap.Code})
 			}
-			if more := gap.Kinds.Count - len(gap.Kinds.Sample); more > 0 {
-				out = append(out, hintEntry{Kind: "*", Reason: gap.Code, Count: more})
-			}
 		case gap.Namespaces != nil:
-			out = append(out, hintEntry{Kind: "*", Reason: gap.Code, Namespaces: gap.Namespaces.Sample})
+			out = append(out, hintEntry{Kind: "*", Reason: gap.Code, Namespaces: gap.Namespaces.Names})
 		default:
 			out = append(out, hintEntry{Kind: "*", Reason: gap.Code})
 		}

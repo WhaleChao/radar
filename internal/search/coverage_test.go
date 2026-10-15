@@ -75,7 +75,7 @@ func TestSearchFilterFailuresAreBoundedAndSecretSafe(t *testing.T) {
 			failed = gap.Objects
 		}
 	}
-	if !partial(res) || res.FilterErrors != 25 || failed == nil || failed.Count != 25 || len(failed.Sample) != 20 || failed.Sample[0].Kind != "Pod" || res.FilterErrorSample == "" {
+	if !partial(res) || res.FilterErrors != 25 || failed == nil || failed.Count != 25 || failed.Names != nil || res.FilterErrorSample == "" {
 		t.Fatalf("failed refs: %+v", res)
 	}
 	p.typed = map[string][]runtime.Object{"secrets": {&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credential", Namespace: "team-a"}, Data: map[string][]byte{"token": []byte("sensitive")}, StringData: map[string]string{"other": "sensitive"}}}}
@@ -268,8 +268,8 @@ func TestBroadSearchNamesNoScopeReasons(t *testing.T) {
 }
 
 // Loading and failed kinds are always reported, folded: pending kinds become
-// one counted entry, and each failure reason names five kinds and counts the
-// rest.
+// one counted entry, and a failure reason names its kinds when there are at
+// most five and otherwise counts them.
 func TestBroadSearchFoldsTransientAndFailureReasons(t *testing.T) {
 	p := newCapProvider()
 	capFixture(p, "Pending", 22, syncing)
@@ -278,11 +278,9 @@ func TestBroadSearchFoldsTransientAndFailureReasons(t *testing.T) {
 
 	res, _ := Search(context.Background(), p, Parse("robusta"), Options{})
 	want := []UnsearchedKind{
-		{Kind: "*", Reason: readreason.KindSyncFailed, Count: 5},
+		{Kind: "*", Reason: readreason.KindSyncFailed, Count: 10},
 		{Kind: "*", Reason: readreason.KindSyncPending, Count: 22},
 	}
-	want = append(want, capNamed("Broken", 2, 0, 1, readreason.KindSyncFailed)...)
-	want = append(want, capNamed("Failed", 8, 0, 2, readreason.KindSyncFailed)...)
 	if !partial(res) || !reflect.DeepEqual(unsearched(res), want) {
 		t.Fatalf("folded coverage (%d entries): %+v\nwant %+v", len(unsearched(res)), unsearched(res), want)
 	}
@@ -308,15 +306,22 @@ func TestFailureFoldOrdersByKindThenGroup(t *testing.T) {
 		{Kind: "Gamma", Group: "a.example.io", Reason: readreason.ReadError},
 		{Kind: "Gamma", Group: "b.example.io", Reason: readreason.ReadError},
 	}
-	want := append([]UnsearchedKind{{Kind: "*", Reason: readreason.ReadError, Count: 2}}, all[:5]...)
-	for _, order := range [][]int{{0, 1, 2, 3, 4, 5, 6}, {6, 5, 4, 3, 2, 1, 0}, {3, 1, 6, 4, 0, 2, 5}} {
+	for _, order := range [][]int{{0, 1, 2, 3, 4}, {4, 3, 2, 1, 0}, {3, 1, 4, 0, 2}} {
 		cov := newCoverage(Parse("robusta"))
 		for _, i := range order {
 			cov.kind(all[i].Kind, all[i].Group, all[i].Reason)
 		}
-		if got := unsearched(Result{Coverage: resourceapi.SearchCoverage{Gaps: cov.result()}}); !reflect.DeepEqual(got, want) {
+		if got := unsearched(Result{Coverage: resourceapi.SearchCoverage{Gaps: cov.result()}}); !reflect.DeepEqual(got, all[:5]) {
 			t.Fatalf("input order %v: %+v", order, got)
 		}
+	}
+	// Past five, the reason counts its kinds and names none.
+	cov := newCoverage(Parse("robusta"))
+	for _, k := range all {
+		cov.kind(k.Kind, k.Group, k.Reason)
+	}
+	if got := unsearched(Result{Coverage: resourceapi.SearchCoverage{Gaps: cov.result()}}); !reflect.DeepEqual(got, []UnsearchedKind{{Kind: "*", Reason: readreason.ReadError, Count: 7}}) {
+		t.Fatalf("over the limit: %+v", got)
 	}
 }
 

@@ -28,14 +28,14 @@ func unsearched(res search.Result) []unsearchedEntry {
 		switch {
 		case gap.Objects != nil:
 		case gap.Kinds != nil:
-			for _, k := range gap.Kinds.Sample {
+			for _, k := range gap.Kinds.Names {
 				out = append(out, unsearchedEntry{Kind: k.Kind, Group: k.Group, Reason: gap.Code})
 			}
-			if more := gap.Kinds.Count - len(gap.Kinds.Sample); more > 0 {
+			if more := gap.Kinds.Count - len(gap.Kinds.Names); more > 0 {
 				out = append(out, unsearchedEntry{Kind: "*", Reason: gap.Code, Count: more})
 			}
 		case gap.Namespaces != nil:
-			out = append(out, unsearchedEntry{Kind: "*", Reason: gap.Code, Namespaces: gap.Namespaces.Sample})
+			out = append(out, unsearchedEntry{Kind: "*", Reason: gap.Code, Namespaces: gap.Namespaces.Names})
 		default:
 			out = append(out, unsearchedEntry{Kind: "*", Reason: gap.Code})
 		}

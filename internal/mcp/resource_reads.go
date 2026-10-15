@@ -31,6 +31,9 @@ type readError struct {
 	unread *gapSet
 	// coverage is attached by a list, which knows the read's scope.
 	coverage *resourceapi.Coverage
+	// next is what the agent can do itself to get an answer, when it depends
+	// on the request; otherwise the code decides (errorNext).
+	next string
 }
 
 func (e *readError) Error() string { return string(e.code) + ": " + e.err.Error() }
@@ -50,7 +53,11 @@ func readErrorResult(err error) (*mcp.CallToolResult, bool) {
 	if !errors.As(err, &re) {
 		return nil, false
 	}
-	body := resourceapi.ReadError{Error: re.err.Error(), ErrorCode: re.code, Coverage: re.coverage}
+	next := re.next
+	if next == "" {
+		next = errorNext(re.code)
+	}
+	body := mcpReadError{ReadError: resourceapi.ReadError{Error: re.err.Error(), ErrorCode: re.code, Coverage: re.coverage}, Next: next}
 	text, marshalErr := json.Marshal(body)
 	if marshalErr != nil {
 		return nil, false
@@ -63,11 +70,44 @@ func readErrorResult(err error) (*mcp.CallToolResult, bool) {
 	return result, true
 }
 
+// mcpReadError is the shared failure body plus `next`, which only MCP sends:
+// it is addressed to the agent, which REST's readers are not.
+type mcpReadError struct {
+	resourceapi.ReadError
+	Next string `json:"next,omitempty"`
+}
+
+// errorNext is what an agent can do itself after a failure with code, or ""
+// when only a person can change the outcome, and the error says who.
+func errorNext(code readreason.Code) string {
+	switch code {
+	case readreason.ClusterConnecting:
+		return "" // its message already says to retry shortly
+	case readreason.ReadError:
+		return "Retry in a few seconds; if it keeps failing, report the error to whoever runs Radar."
+	case readreason.KindWatchFailed:
+		return "Retry: the retry starts the watch again."
+	case readreason.NamespaceNotVisible:
+		return "Call list_namespaces to see the namespaces you can access."
+	case readreason.KindUnknown:
+		return "Check the spelling, or pass group for a custom resource; list_resources with kind=customresourcedefinitions lists the custom kinds installed here."
+	}
+	switch action, _ := readreason.ActionFor(code); action {
+	case readreason.ActionRetry:
+		return "Retry in a few seconds."
+	case readreason.ActionWait:
+		return "Retry in a minute."
+	case readreason.ActionCheckTarget:
+		return "Confirm which cluster Radar is connected to, then retry."
+	}
+	return ""
+}
+
 // errConnectionChanged rejects a read whose cache, dynamic cache or discovery
 // handle was replaced while it ran: its rows may mix two clusters, and a retry
 // may reach a different one.
 func errConnectionChanged() error {
-	return readErrorf(readreason.ConnectionChanged, "Radar's cluster connection changed during this read (a context switch or reconnect), so the result was discarded. Confirm which cluster Radar is connected to, then retry.")
+	return readErrorf(readreason.ConnectionChanged, "Radar's cluster connection changed during this read (a context switch or reconnect), so the result was discarded.")
 }
 
 // listEnvelope is every list_resources result, sent as the only text block.
@@ -76,8 +116,12 @@ func errConnectionChanged() error {
 // and their coverage must be one JSON value: a second block would be joined
 // into something neither accepts. The summary leads: it is what a model reads
 // first, and a reader that keeps only the head of a long result still has it.
+//
+// next, when present, is what the agent can do itself to complete the answer.
+// The summary stays a description a person can read too: Findings shows it.
 type listEnvelope struct {
 	Summary  string               `json:"summary"`
+	Next     string               `json:"next,omitempty"`
 	Coverage resourceapi.Coverage `json:"coverage"`
 	Items    []any                `json:"items"`
 }
@@ -87,7 +131,7 @@ func listResult(ctx context.Context, resource string, items []any, coverage reso
 	if items == nil {
 		items = []any{}
 	}
-	body, err := json.Marshal(listEnvelope{Summary: listSummary(ctx, resource, len(items), coverage), Coverage: coverage, Items: items})
+	body, err := json.Marshal(listEnvelope{Summary: listSummary(ctx, resource, len(items), coverage), Next: listNext(coverage), Coverage: coverage, Items: items})
 	if err != nil {
 		log.Printf("[mcp] Failed to marshal result: %v", err)
 		return nil, nil, fmt.Errorf("failed to marshal result: %w", err)
@@ -110,11 +154,11 @@ func resolveReadTarget(ctx context.Context, requested []string) (readTarget, err
 	target := readTarget{explicit: requested != nil}
 	clamped, ok := clampToNamespacePin(requested)
 	if !ok {
-		return target, readErrorf(readreason.OutsideNamespaceScope, "Radar is limited to other namespaces by its --namespace-scope setting, so it can't read namespace %q. Ask about a namespace Radar covers, or have whoever runs Radar change --namespace-scope.", namespaceForError(requested))
+		return target, readErrorf(readreason.OutsideNamespaceScope, "Radar is limited to other namespaces by its --namespace-scope setting, so it can't read namespace %q. Whoever runs Radar sets --namespace-scope.", namespaceForError(requested))
 	}
 	user, perms, checked := resolveUserPermsDecision(ctx)
 	if !checked {
-		return target, readErrorf(readreason.PermissionCheckFailed, "Radar couldn't check which namespaces you can access, so it read nothing. Retry in a few seconds.")
+		return target, readErrorf(readreason.PermissionCheckFailed, "Radar couldn't check which namespaces you can access, so it read nothing.")
 	}
 	allowed := pkgauth.FilterNamespacesForUser(clamped, user, perms)
 	if allowed != nil && len(allowed) == 0 {
@@ -127,7 +171,7 @@ func resolveReadTarget(ctx context.Context, requested []string) (readTarget, err
 			if len(clamped) > 1 {
 				scope = fmt.Sprintf("Namespaces %q don't exist or you can't access them", namespaceForError(clamped))
 			}
-			return target, readErrorf(readreason.NamespaceNotVisible, "%s, so Radar can't say what's in it. Check the name, or ask a cluster admin for access %s", scope, namespaceAccessRule)
+			return target, readErrorf(readreason.NamespaceNotVisible, "%s, so Radar can't say what's in it. If the name is right, a cluster admin can grant access %s", scope, namespaceAccessRule)
 		}
 		return target, readErrorf(readreason.NoNamespaceAccess, "You can't access any namespace in this request's scope, so Radar read nothing. A cluster admin can grant access %s", namespaceAccessRule)
 	}
@@ -208,12 +252,12 @@ func qualifiedResource(group, resource string) string {
 }
 
 func resourcePermissionError(checked bool, verb, group, resource, namespace string) error {
-	return resourcePermissionErrorHint(checked, verb, group, resource, namespace, "")
+	return resourcePermissionErrorNext(checked, verb, group, resource, namespace, "")
 }
 
-// resourcePermissionErrorHint is resourcePermissionError with a sentence about
-// what the caller can still ask for, added to a denial.
-func resourcePermissionErrorHint(checked bool, verb, group, resource, namespace, hint string) error {
+// resourcePermissionErrorNext is resourcePermissionError with what the caller
+// can still ask for after a denial.
+func resourcePermissionErrorNext(checked bool, verb, group, resource, namespace, next string) error {
 	scope := "across the cluster"
 	if strings.Contains(namespace, ",") {
 		scope = fmt.Sprintf("in namespaces %q", namespace)
@@ -222,13 +266,9 @@ func resourcePermissionErrorHint(checked bool, verb, group, resource, namespace,
 	}
 	name := qualifiedResource(group, resource)
 	if !checked {
-		return readErrorf(readreason.PermissionCheckFailed, "Radar couldn't check whether you can %s %s %s, so it read nothing. Retry in a few seconds.", verb, name, scope)
+		return readErrorf(readreason.PermissionCheckFailed, "Radar couldn't check whether you can %s %s %s, so it read nothing.", verb, name, scope)
 	}
-	msg := fmt.Sprintf("Your Kubernetes access doesn't allow you to %s %s %s, so Radar can't say what exists there. A cluster admin can grant that permission.", verb, name, scope)
-	if hint != "" {
-		msg += " " + hint
-	}
-	return readErrorf(readreason.RBACDenied, "%s", msg)
+	return &readError{code: readreason.RBACDenied, err: fmt.Errorf("Your Kubernetes access doesn't allow you to %s %s %s, so Radar can't say what exists there. A cluster admin can grant that permission.", verb, name, scope), next: next}
 }
 
 // gapSet collects the namespaces a read could not serve, by code. A code
@@ -333,7 +373,7 @@ func listScope(target readTarget, clusterScoped bool) resourceapi.Scope {
 	case target.namespaces == nil:
 		return resourceapi.Scope{Type: resourceapi.ScopeAllNamespaces}
 	default:
-		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(target.namespaces, resourceapi.MCPSample)}
+		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(target.namespaces, resourceapi.MCPSetLimit)}
 	}
 }
 
@@ -350,7 +390,7 @@ func listCoverageFor(clusterScoped bool, target readTarget, read []string, readA
 	}
 	readScope := cov.Scope
 	if !readAll && !clusterScoped {
-		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(read, resourceapi.MCPSample)}
+		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(read, resourceapi.MCPSetLimit)}
 	}
 	cov.Read = &readScope
 	if len(gaps) > 0 {
@@ -369,7 +409,7 @@ func withListCoverage(ctx context.Context, err error, target readTarget, cluster
 	if !errors.As(err, &re) || re.unread == nil {
 		return err
 	}
-	cov := &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: listScope(target, clusterScoped), Gaps: re.unread.gaps(ctx, resourceapi.MCPSample)}
+	cov := &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: listScope(target, clusterScoped), Gaps: re.unread.gaps(ctx, resourceapi.MCPSetLimit)}
 	if !clusterScoped {
 		cov.NarrowedBy = target.narrowedBy
 	}
@@ -477,67 +517,119 @@ func narrowingRemedy(resource string, by []resourceapi.Narrowing) string {
 	return out
 }
 
-// gapSentence says what part of a list's scope went unread, why, and what
-// reads it.
+// gapSentence says what part of a list's scope went unread, why, and who
+// other than the agent can change that. What the agent can do itself is
+// listNext's.
 func gapSentence(ctx context.Context, resource string, gap resourceapi.Gap) string {
 	where := "part of the scope"
 	if gap.Namespaces != nil {
 		where = namespacePhrase(gap.Namespaces)
 	}
-	why, next := gapReason(ctx, resource, gap.Code)
-	if next == "" {
+	why, who := gapReason(ctx, resource, gap.Code)
+	if who == "" {
 		return fmt.Sprintf("Not read: %s, because %s.", where, why)
 	}
-	return fmt.Sprintf("Not read: %s, because %s (%s).", where, why, next)
+	return fmt.Sprintf("Not read: %s, because %s (%s).", where, why, who)
 }
 
-// gapReason is why a code left part of a list unread and what reads it, as
-// clauses. A code without its own wording is described by its action.
-func gapReason(ctx context.Context, resource string, code readreason.Code) (why, next string) {
+// gapReason is why a code left part of a list unread, and who other than the
+// agent can change that ("" when retrying is enough), as clauses.
+func gapReason(ctx context.Context, resource string, code readreason.Code) (why, who string) {
 	switch code {
 	case readreason.CollectorScopeLimited:
 		return fmt.Sprintf("Radar doesn't collect %s there", resource), collectionRemedy(resource) + notYourAccessClause(ctx)
 	case readreason.CollectorForbidden:
 		return "Kubernetes refuses Radar's own identity there", identityRemedy(resource, " there", "list/watch") + notYourAccessClause(ctx)
 	case readreason.KindSyncPending:
-		return fmt.Sprintf("Radar is still loading %s there", resource), "retry in a few seconds"
+		return fmt.Sprintf("Radar is still loading %s there", resource), ""
 	case readreason.KindSyncFailed:
-		return fmt.Sprintf("Radar's load of %s there didn't finish in time", resource), "retry in a minute; if it persists, whoever runs Radar should check its cluster connection and list/watch permissions"
+		return fmt.Sprintf("Radar's load of %s there didn't finish in time", resource), "if it keeps failing, whoever runs Radar should check its cluster connection and list/watch permissions"
 	case readreason.KindWatchFailed:
-		return fmt.Sprintf("Radar's watch of %s there failed to start", resource), "retry, which starts it again"
+		return fmt.Sprintf("Radar's watch of %s there failed to start", resource), ""
 	case readreason.RBACDenied:
 		return fmt.Sprintf("your Kubernetes access doesn't allow listing %s there", resource), "a cluster admin can grant it"
 	case readreason.PermissionCheckFailed:
-		return "Radar couldn't check your access there", "retry in a few seconds"
+		return "Radar couldn't check your access there", ""
 	}
-	action, _ := readreason.ActionFor(code)
-	return fmt.Sprintf("Radar couldn't read %s there (%s)", resource, code), actionNext[action]
+	why = fmt.Sprintf("Radar couldn't read %s there (%s)", resource, code)
+	switch action, _ := readreason.ActionFor(code); action {
+	case readreason.ActionCallerAccess:
+		return why, "a cluster admin can grant you access"
+	case readreason.ActionCollectorConfig:
+		return why, "whoever runs Radar must change its access or configuration"
+	}
+	return why, ""
 }
 
-// actionNext is what to do about a code, by its action, as a clause.
-var actionNext = map[readreason.Action]string{
-	readreason.ActionRetry:           "retry in a few seconds",
-	readreason.ActionWait:            "retry later; if it persists, whoever runs Radar should look into it",
-	readreason.ActionRequestKind:     "retry",
-	readreason.ActionCheckTarget:     "confirm which cluster Radar is connected to, then retry",
-	readreason.ActionChangeRequest:   "change the request",
-	readreason.ActionCallerAccess:    "a cluster admin can grant you access",
-	readreason.ActionCollectorConfig: "whoever runs Radar must change its access or configuration",
+// listNext is what the agent can do itself to complete a list's answer, or ""
+// when nothing it does would change it. Two things qualify: retrying, for
+// parts that clear on their own; and naming one namespace, when the list
+// counts namespaces it couldn't name, so the agent can't tell whether the one
+// it cares about was read.
+func listNext(cov resourceapi.Coverage) string {
+	var steps []string
+	for _, when := range []string{"in a few seconds", "in a minute"} {
+		var where []string
+		unnamed := false
+		for _, gap := range cov.Gaps {
+			if retryAfter(gap.Code) != when {
+				continue
+			}
+			if gap.Namespaces == nil || gap.Namespaces.Names == nil {
+				unnamed = true
+				continue
+			}
+			where = append(where, gap.Namespaces.Names...)
+		}
+		switch {
+		case unnamed || len(where) > resourceapi.MCPSetLimit:
+			steps = append(steps, fmt.Sprintf("Retry %s to read what this list skipped.", when))
+		case len(where) > 0:
+			steps = append(steps, fmt.Sprintf("Retry %s to read %s.", when, namespacePhrase(resourceapi.Names(where, resourceapi.MCPSetLimit))))
+		}
+	}
+	if countsUnnamedNamespaces(cov) {
+		steps = append(steps, "To check one namespace, call list_resources again with namespace set to it.")
+	}
+	return strings.Join(steps, " ")
 }
 
+// retryAfter is when the same request may read what code left unread, or ""
+// when retrying alone won't.
+func retryAfter(code readreason.Code) string {
+	switch action, _ := readreason.ActionFor(code); action {
+	case readreason.ActionRetry, readreason.ActionRequestKind:
+		return "in a few seconds"
+	case readreason.ActionWait:
+		return "in a minute"
+	}
+	return ""
+}
+
+// countsUnnamedNamespaces reports a list whose scope, read or gaps count more
+// namespaces than they name.
+func countsUnnamedNamespaces(cov resourceapi.Coverage) bool {
+	unnamed := func(set *resourceapi.NameSet) bool { return set != nil && set.Names == nil }
+	if unnamed(cov.Scope.Namespaces) || (cov.Read != nil && unnamed(cov.Read.Namespaces)) {
+		return true
+	}
+	return slices.ContainsFunc(cov.Gaps, func(gap resourceapi.Gap) bool { return unnamed(gap.Namespaces) })
+}
+
+// namespacePhrase names a set of namespaces, or counts them when the set is
+// too large to list.
 func namespacePhrase(set *resourceapi.NameSet) string {
-	quoted := make([]string, len(set.Sample))
-	for i, ns := range set.Sample {
+	if set.Names == nil {
+		return fmt.Sprintf("%d namespaces", set.Count)
+	}
+	quoted := make([]string, len(set.Names))
+	for i, ns := range set.Names {
 		quoted[i] = fmt.Sprintf("%q", ns)
 	}
-	list := strings.Join(quoted, ", ")
-	if more := set.Count - len(set.Sample); more > 0 {
-		list += fmt.Sprintf(" and %d more", more)
-	}
 	if set.Count == 1 {
-		return "namespace " + list
+		return "namespace " + strings.Join(quoted, ", ")
 	}
-	return "namespaces " + list
+	return "namespaces " + strings.Join(quoted, ", ")
 }
 
 func upperFirst(s string) string {
@@ -730,11 +822,11 @@ func directRead(gvr schema.GroupVersionResource, verb string) bool {
 }
 
 func errKindLoading(resource string) error {
-	return readErrorf(readreason.KindSyncPending, "Radar is still loading %s, so it can't answer yet. Retry in a few seconds.", resource)
+	return readErrorf(readreason.KindSyncPending, "Radar is still loading %s, so it can't answer yet.", resource)
 }
 
 func errKindLoadFailed(resource string) error {
-	return readErrorf(readreason.KindSyncFailed, "Radar's load of %s didn't finish in time, so it can't answer yet. It keeps trying: retry in a minute, and if this persists, whoever runs Radar should check its cluster connection and list/watch permissions.", resource)
+	return readErrorf(readreason.KindSyncFailed, "Radar's load of %s didn't finish in time, so it can't answer yet. It keeps trying; if this persists, whoever runs Radar should check its cluster connection and list/watch permissions.", resource)
 }
 
 func errKindNotWatched(resource string) error {
@@ -886,15 +978,15 @@ func checkDynamicResourceReadFrom(ctx context.Context, kind, group, namespace, v
 		return false, readErr
 	}
 	if errors.Is(readErr, k8s.ErrUnknownDynamicKind) {
-		return false, readErrorf(readreason.KindUnknown, "Radar doesn't know a resource kind named %q in this cluster, so it read nothing. Check the spelling, pass group for a custom resource, or confirm its CRD is installed (%w).", kind, readErr)
+		return false, readErrorf(readreason.KindUnknown, "Radar doesn't know a resource kind named %q in this cluster, so it read nothing (%w).", kind, readErr)
 	}
 	if errors.Is(readErr, k8s.ErrDynamicNotReady) {
 		if k8s.GetConnectionStatus().State == k8s.StateConnecting {
-			return false, readErrorf(readreason.KindSyncPending, "Radar is still connecting to the cluster, so it can't read %s yet (%w). Retry in a few seconds.", kind, readErr)
+			return false, readErrorf(readreason.KindSyncPending, "Radar is still connecting to the cluster, so it can't read %s yet (%w).", kind, readErr)
 		}
 		if ok && dynamicCache != nil {
 			if observation := dynamicCache.Observation(gvr); observation.State == k8score.DynamicObservationDeferred && observation.ReasonCode == "watch_start_failed" {
-				return false, readErrorf(readreason.KindWatchFailed, "Radar's watch for %s failed to start, so it can't answer. Retry: retrying starts the watch again.", kind)
+				return false, readErrorf(readreason.KindWatchFailed, "Radar's watch for %s failed to start, so it can't answer.", kind)
 			}
 		}
 		return false, readErrorf(readreason.KindNotWatched, "Radar isn't collecting %s, so it can't list them or say which exist (%w). Whoever runs Radar must check that its identity can list/watch %s.", kind, readErr, kind)
@@ -916,7 +1008,7 @@ func checkDynamicResourceReadFrom(ctx context.Context, kind, group, namespace, v
 		if ok && dynamicCache != nil && !direct && dynamicCache.Observation(gvr).State == k8score.DynamicObservationUnsupported {
 			return false, readErrorf(readreason.KindNotWatchable, "Radar can't collect %s: its API doesn't support both list and watch, which Radar needs. Retrying won't help; read it directly from the Kubernetes API instead.", kind)
 		}
-		return false, readErrorf(readreason.ReadError, "Radar failed to %s %s, so it can't say what exists (%w). Retry in a few seconds; if it keeps failing, report this error.", verb, kind, readErr)
+		return false, readErrorf(readreason.ReadError, "Radar failed to %s %s, so it can't say what exists (%w).", verb, kind, readErr)
 	}
 	if !ok || dynamicCache == nil || direct {
 		return false, readErr
@@ -1034,8 +1126,8 @@ func narrowByExactAccess(ctx context.Context, target []string, resource, verb st
 	if target == nil {
 		granted, checked := canReadInNamespaceDecision(ctx, "", resource, "", verb)
 		if !granted {
-			return nil, gaps, resourcePermissionErrorHint(checked, verb, "", resource, "",
-				fmt.Sprintf("If you can %s %s in some namespaces, ask again with namespace set to one of them.", verb, resource))
+			return nil, gaps, resourcePermissionErrorNext(checked, verb, "", resource, "",
+				fmt.Sprintf("If you can %s %s in some namespaces, call list_resources again with namespace set to one of them.", verb, resource))
 		}
 		return nil, gaps, nil
 	}
@@ -1084,12 +1176,9 @@ func resourceGetError(ctx context.Context, err error, kind, namespace, name stri
 		if clusterScoped, _, _ := k8s.ClassifyKindScope(kind, ""); !clusterScoped && namespace != "" {
 			msg = fmt.Sprintf("No %s named %q exist in namespace %q.", kind, name, namespace)
 		}
-		if s := notFoundSuggestion(ctx, kind, namespace, name); s != "" {
-			msg += " " + upperFirst(s) + "."
-		}
-		return &readError{code: readreason.ObjectNotFound, err: errors.New(msg)}
+		return &readError{code: readreason.ObjectNotFound, err: errors.New(msg), next: notFoundNext(ctx, kind, namespace, name)}
 	}
-	return readErrorf(readreason.ReadError, "Radar failed to get %s %s/%s, so it can't say whether it exists (%w). Retry in a few seconds; if it keeps failing, report this error.", kind, namespace, name, err)
+	return readErrorf(readreason.ReadError, "Radar failed to get %s %s/%s, so it can't say whether it exists (%w).", kind, namespace, name, err)
 }
 
 func fetchMCPDynamicResource(ctx context.Context, cache *k8s.ResourceCache, kind, group, namespace, name string) (*unstructured.Unstructured, error) {

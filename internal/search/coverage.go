@@ -64,7 +64,7 @@ func narrowingFor(reason readreason.Code) resourceapi.Narrowing {
 }
 
 // maxNamedFailures bounds the kinds one reason names on a query with no kind:
-// terms; the rest are only counted.
+// terms; past it the reason only counts them.
 const maxNamedFailures = 5
 
 // maxFilterFailedObjects bounds the objects a filter_eval_failed gap names.
@@ -192,8 +192,8 @@ func (c *coverage) namespaces(reason readreason.Code, namespaces ...string) {
 // result renders the gaps, most actionable first. On a query that names kinds
 // every kind-level gap names all of them. Otherwise loading kinds are only
 // counted — at startup they can be most of the catalog — and each failure
-// reason names its first maxNamedFailures kinds by kind then group and counts
-// the rest. A reason that already reaches an unknown set of kinds needs no
+// reason names its kinds, by kind then group, when there are at most
+// maxNamedFailures, and otherwise only counts them. A reason that already reaches an unknown set of kinds needs no
 // count of loading kinds beside it.
 func (c *coverage) result() []resourceapi.Gap {
 	out := []resourceapi.Gap{}

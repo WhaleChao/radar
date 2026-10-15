@@ -424,23 +424,34 @@ func TestResourceReadToolErrorTransport(t *testing.T) {
 		arguments map[string]any
 		reason    string
 		detail    string
+		next      string
 	}{
-		{"list_resources", map[string]any{"kind": "nodes"}, "rbac_denied", "Your Kubernetes access doesn't allow you to list nodes across the cluster"},
-		{"get_resource", map[string]any{"kind": "nodes", "name": "hidden"}, "rbac_denied", "Your Kubernetes access doesn't allow you to get nodes across the cluster"},
-		{"get_resource", map[string]any{"kind": "pods", "name": "hidden"}, "namespace_required", "Pods live in namespaces: call get_resource again with namespace set."},
+		// Only a cluster admin can change a denial, so it carries no next.
+		{"list_resources", map[string]any{"kind": "nodes"}, "rbac_denied", "Your Kubernetes access doesn't allow you to list nodes across the cluster", ""},
+		{"get_resource", map[string]any{"kind": "nodes", "name": "hidden"}, "rbac_denied", "Your Kubernetes access doesn't allow you to get nodes across the cluster", ""},
+		{"get_resource", map[string]any{"kind": "pods", "name": "hidden"}, "namespace_required", "Pods live in namespaces, so get_resource needs one.",
+			`Call get_resource again with namespace set. If you don't know it, call search with query "hidden" to find it.`},
 	} {
 		result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: tc.name, Arguments: tc.arguments})
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertReadErrorWire(t, tc.name, wire(result), extractText(t, result), tc.reason, tc.detail)
+		body := wire(result)
+		assertReadErrorWire(t, tc.name, body, extractText(t, result), tc.reason, tc.detail)
+		if next, _ := body["structuredContent"].(map[string]any)["next"].(string); next != tc.next {
+			t.Fatalf("%s %s: next = %q, want %q", tc.name, tc.reason, next, tc.next)
+		}
 	}
 	// An absent object in a namespace Radar read is an answer with a code too.
 	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "get_resource", Arguments: map[string]any{"kind": "pods", "namespace": "alpha", "name": "absent"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertReadErrorWire(t, "get_resource absent", wire(result), extractText(t, result), "object_not_found", `No pods named "absent" exist in namespace "alpha".`)
+	body := wire(result)
+	assertReadErrorWire(t, "get_resource absent", body, extractText(t, result), "object_not_found", `No pods named "absent" exist in namespace "alpha".`)
+	if next, _ := body["structuredContent"].(map[string]any)["next"].(string); next != `Call search with query "absent" to look for it under every kind and namespace you can read.` {
+		t.Fatalf("a miss points at search: next = %q", next)
+	}
 	result, err = session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "list_resources", Arguments: map[string]any{"kind": "services", "context": "none"}})
 	if err != nil {
 		t.Fatal(err)
@@ -561,12 +572,13 @@ type wireCoverage struct {
 	Scope         []string
 	NarrowedBy    []string
 	Summary       string
+	Next          string
 }
 
 // listBody decodes a list_resources result, failing unless it is the
 // documented shape: one text block and nothing else, holding exactly
-// {"summary", "coverage", "items"} with the summary first, and coverage holding
-// the shared single-kind coverage.
+// {"summary", "next"?, "coverage", "items"} with the summary first, and
+// coverage holding the shared single-kind coverage.
 func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
 	t.Helper()
 	if result == nil || result.IsError || len(result.Content) != 1 || result.StructuredContent != nil {
@@ -578,8 +590,14 @@ func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wi
 		t.Fatalf("a list must lead with its summary, got %.80s", text)
 	}
 	var top map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(text), &top); err != nil || len(top) != 3 || top["items"] == nil || top["coverage"] == nil || top["summary"] == nil {
-		t.Fatalf("a list must be {\"summary\", \"coverage\", \"items\"}, got %s", text)
+	if err := json.Unmarshal([]byte(text), &top); err != nil || len(top) < 3 || len(top) > 4 || top["items"] == nil || top["coverage"] == nil || top["summary"] == nil || (len(top) == 4 && top["next"] == nil) {
+		t.Fatalf("a list must be {\"summary\", \"next\"?, \"coverage\", \"items\"}, got %s", text)
+	}
+	var next string
+	if top["next"] != nil {
+		if err := json.Unmarshal(top["next"], &next); err != nil || next == "" {
+			t.Fatalf("next, when present, must be a sentence, got %s", top["next"])
+		}
 	}
 	var summary string
 	if err := json.Unmarshal(top["summary"], &summary); err != nil || summary == "" {
@@ -595,21 +613,21 @@ func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wi
 		(coverage.Status == resourceapi.CoveragePartial) != (len(coverage.Gaps) > 0) {
 		t.Fatalf("invalid coverage: %s", top["coverage"])
 	}
-	out := wireCoverage{Status: string(coverage.Status), GapNamespaces: map[string][]string{}, ReadType: string(coverage.Read.Type), ScopeType: string(coverage.Scope.Type), Summary: summary}
+	out := wireCoverage{Status: string(coverage.Status), GapNamespaces: map[string][]string{}, ReadType: string(coverage.Read.Type), ScopeType: string(coverage.Scope.Type), Summary: summary, Next: next}
 	for _, gap := range coverage.Gaps {
 		out.Codes = append(out.Codes, string(gap.Code))
 		if gap.Namespaces != nil {
-			out.GapNamespaces[string(gap.Code)] = gap.Namespaces.Sample
+			out.GapNamespaces[string(gap.Code)] = gap.Namespaces.Names
 		}
 	}
 	if coverage.Read.Namespaces != nil {
-		out.Read = coverage.Read.Namespaces.Sample
+		out.Read = coverage.Read.Namespaces.Names
 		if !slices.IsSorted(out.Read) {
 			t.Fatalf("namespace samples must be sorted: %v", out.Read)
 		}
 	}
 	if coverage.Scope.Namespaces != nil {
-		out.Scope = coverage.Scope.Namespaces.Sample
+		out.Scope = coverage.Scope.Namespaces.Names
 	}
 	for _, n := range coverage.NarrowedBy {
 		out.NarrowedBy = append(out.NarrowedBy, string(n))
@@ -819,7 +837,8 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 					}
 					assertNoCollectorLeak(t, err, tc.hidden...)
 					rendered, ok := readErrorResult(err)
-					body, _ := rendered.StructuredContent.(resourceapi.ReadError)
+					mcpBody, _ := rendered.StructuredContent.(mcpReadError)
+					body := mcpBody.ReadError
 					if !ok || string(body.ErrorCode) != coverageReason(class) || body.Coverage == nil || body.Coverage.Read != nil || len(body.Coverage.Gaps) == 0 {
 						t.Fatalf("a failed list must carry its coverage, with nothing read: %+v", body)
 					}
@@ -996,23 +1015,34 @@ func TestListSummaryBoundsNamespaceProse(t *testing.T) {
 			coverage := listCoverageFor(false, readTarget{}, read, false, gaps)
 			expected := slices.Clone(read)
 			slices.Sort(expected)
-			if !slices.Equal(read, original) || coverage.Read.Namespaces.Count != count || !slices.Equal(coverage.Read.Namespaces.Sample, expected[:min(count, resourceapi.MCPSample)]) {
+			listed := count <= resourceapi.MCPSetLimit
+			if !slices.Equal(read, original) || coverage.Read.Namespaces.Count != count || listed != (coverage.Read.Namespaces.Names != nil) ||
+				(listed && !slices.Equal(coverage.Read.Namespaces.Names, expected)) {
 				t.Fatalf("namespace data changed: input %v, coverage %+v", read, coverage.Read.Namespaces)
 			}
-			quoted := make([]string, min(count, resourceapi.MCPSample))
+			quoted := make([]string, len(expected))
 			for i := range quoted {
 				quoted[i] = fmt.Sprintf("%q", expected[i])
 			}
 			where := "namespace " + quoted[0]
-			if count > 1 {
+			switch {
+			case !listed:
+				where = fmt.Sprintf("%d namespaces", count)
+			case count > 1:
 				where = "namespaces " + strings.Join(quoted, ", ")
-				if count > resourceapi.MCPSample {
-					where += fmt.Sprintf(" and %d more", count-resourceapi.MCPSample)
-				}
 			}
 			want := fmt.Sprintf("These are the services in %s only. Not read: part of the scope, because Radar doesn't collect services there (%s). Services may exist there that this list doesn't show.", where, collectionRemedy("services"))
 			if got := listSummary(context.Background(), "services", 1, coverage); got != want || coverage.Status != resourceapi.CoveragePartial {
 				t.Fatalf("summary = %q, want %q", got, want)
+			}
+			// The agent can't tell whether a namespace was read when the list
+			// counts namespaces it doesn't name.
+			wantNext := ""
+			if !listed {
+				wantNext = "To check one namespace, call list_resources again with namespace set to it."
+			}
+			if got := listNext(coverage); got != wantNext {
+				t.Fatalf("next = %q, want %q", got, wantNext)
 			}
 		})
 	}

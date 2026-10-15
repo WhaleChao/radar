@@ -28,8 +28,8 @@ export interface SearchCoverageNoteOptions {
 }
 
 /** One kind or namespace a search couldn't cover, flattened from its gaps: a
- *  named kind, or `*` for namespaces, for kinds counted beyond a gap's sample
- *  (`count`), or for an unknown set of kinds (no count). */
+ *  named kind, or `*` for namespaces, for kinds too many to name (`count`), or
+ *  for an unknown set of kinds (no count). */
 export interface SearchCoverageEntry {
   kind: string
   group: string
@@ -43,12 +43,13 @@ export function searchCoverageEntries(coverage: SearchCoverage | undefined): Sea
   const out: SearchCoverageEntry[] = []
   for (const gap of coverage?.gaps ?? []) {
     if (gap.objects) continue
-    if (gap.kinds) {
-      for (const k of gap.kinds.sample) out.push({ kind: k.kind, group: k.group ?? '', reason: gap.code })
-      const more = gap.kinds.count - gap.kinds.sample.length
-      if (more > 0) out.push({ kind: '*', group: '', reason: gap.code, count: more })
+    if (gap.kinds?.names) {
+      for (const k of gap.kinds.names) out.push({ kind: k.kind, group: k.group ?? '', reason: gap.code })
+    } else if (gap.kinds) {
+      out.push({ kind: '*', group: '', reason: gap.code, count: gap.kinds.count })
     } else if (gap.namespaces) {
-      out.push({ kind: '*', group: '', reason: gap.code, namespaces: gap.namespaces.sample })
+      // A search names every namespace its query asked for.
+      out.push({ kind: '*', group: '', reason: gap.code, namespaces: gap.namespaces.names ?? [] })
     } else {
       out.push({ kind: '*', group: '', reason: gap.code })
     }
