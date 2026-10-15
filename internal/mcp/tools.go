@@ -882,7 +882,7 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 		}
 		gaps.merge(secretGaps)
 	}
-	cache, plan, err := resourceReadCache(ctx, kind, group, readable)
+	cache, plan, err := resourceReadCache(ctx, kind, group, readable, target.explicit)
 	if err != nil {
 		// Secrets withheld from the caller are part of why nothing was read.
 		if !gaps.empty() && gaps.absorb(err) {
@@ -908,6 +908,9 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 	listScope := read
 	if readAll || clusterScoped {
 		listScope = nil
+	}
+	if plan.collected != nil && !clusterScoped {
+		target = target.narrowedToCollection(plan)
 	}
 	gaps.merge(plan.gaps)
 	var objs []runtime.Object
@@ -1012,15 +1015,15 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 	listed := false
 	if directGVR, ok := dynamicReadGVR(kind, group); unrestrictedAll && ok && k8s.ShouldBypassDynamicInformer(directGVR) {
 		// A direct kind has no informer to establish its coverage. When the
-		// collector is refused cluster-wide, read the namespaces custom
-		// resource informers fall back to; the rest is Radar's own refusal.
+		// collector is refused cluster-wide, it reads the namespaces custom
+		// resource informers fall back to, which narrows the read.
 		items, err := readDynamicScope(ctx, kind, group, "", "list", listAt(""))
 		switch {
 		case err == nil:
 			rawItems, listed = items, true
 		case isCollectorForbidden(err) && dynamicCache != nil && len(dynamicCache.FallbackNamespaces()) > 0:
 			namespaces = dynamicCache.FallbackNamespaces()
-			gaps.add(readreason.CollectorForbidden, err)
+			target = target.narrowedByCollection(namespaces, nil)
 		default:
 			return nil, nil, err
 		}
@@ -1031,7 +1034,7 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 		}
 		if observation := dynamicCache.Observation(gvr); observation.Scope == k8score.DynamicObservationScopeExplicitNamespaces {
 			namespaces = observation.Namespaces
-			gaps.add(readreason.CollectorScopeLimited, coverageError(ctx, collector, nil, namespaces, nil))
+			target = target.narrowedByCollection(namespaces, nil)
 		}
 	}
 
@@ -1044,7 +1047,12 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 		read = []string{}
 		var refused []string
 		var refusal error
+		uncollected := map[readreason.Code][]string{}
+		uncollectedErr := map[readreason.Code]error{}
 		for _, ns := range namespaces {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			items, err := readDynamicScope(ctx, kind, group, ns, "list", listAt(ns))
 			if err != nil {
 				code, classified := readErrorCodeOf(err)
@@ -1057,11 +1065,29 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 						refusal = collectorCause(err)
 					}
 				}
+				// A namespace Radar doesn't collect or is refused in narrows a
+				// read the caller didn't scope; one they named is a gap.
+				if (code == readreason.CollectorScopeLimited || code == readreason.CollectorForbidden) && !target.explicit && !clusterScoped {
+					uncollected[code] = append(uncollected[code], ns)
+					if uncollectedErr[code] == nil {
+						uncollectedErr[code] = err
+					}
+					continue
+				}
 				gaps.add(code, err, ns)
 				continue
 			}
 			read = append(read, ns)
 			rawItems = append(rawItems, items...)
+		}
+		if len(uncollected) > 0 {
+			if len(read) > 0 {
+				target = target.narrowedByCollection(nil, slices.Concat(uncollected[readreason.CollectorScopeLimited], uncollected[readreason.CollectorForbidden]))
+			} else {
+				for code, namespaces := range uncollected {
+					gaps.add(code, uncollectedErr[code], namespaces...)
+				}
+			}
 		}
 		if len(read) == 0 {
 			if len(refused) > 1 {
@@ -1177,7 +1203,7 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 	if !clusterScoped {
 		namespaces = []string{namespace}
 	}
-	cache, plan, err := resourceReadCache(ctx, kind, group, namespaces)
+	cache, plan, err := resourceReadCache(ctx, kind, group, namespaces, true)
 	if err != nil {
 		return nil, nil, err
 	}

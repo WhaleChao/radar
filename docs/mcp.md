@@ -467,11 +467,11 @@ result:
 {
   "coverage": {
     "status": "partial",
-    "scope": {"type": "namespaces", "namespaces": {"count": 3, "sample": ["alpha", "beta", "gamma"]}},
+    "scope": {"type": "namespaces", "namespaces": {"count": 2, "sample": ["alpha", "gamma"]}},
     "narrowedBy": ["caller_access"],
-    "read": {"type": "namespaces", "namespaces": {"count": 2, "sample": ["alpha", "gamma"]}},
-    "gaps": [{"code": "collector_scope_limited", "namespaces": {"count": 1, "sample": ["beta"]}}],
-    "note": "This list covers only namespaces \"alpha\", \"beta\", \"gamma\" (your access). Radar read services only in namespaces \"alpha\", \"gamma\". Not read: namespace \"beta\" (outside the namespaces Radar collects). This result cannot show that services there don't exist."
+    "read": {"type": "namespaces", "namespaces": {"count": 1, "sample": ["alpha"]}},
+    "gaps": [{"code": "kind_sync_pending", "namespaces": {"count": 1, "sample": ["gamma"]}}],
+    "note": "This list covers only namespaces \"alpha\", \"gamma\" (your access). Radar read services only in namespace \"alpha\". Not read: namespace \"gamma\" (still loading). This result cannot show that services there don't exist."
   },
   "items": [{"kind": "Service", "name": "api", "namespace": "alpha"}]
 }
@@ -481,12 +481,14 @@ result:
   `all_namespaces`, or a namespace set. A namespace you name stays the scope
   even when Radar can't read it.
 - **`narrowedBy`** says why an unscoped request covers less than every
-  namespace: `caller_access` (the namespaces your access allows) or
-  `namespace_pin` (Radar's `--namespace-scope`). It is absent when nothing
-  narrowed the request.
-- **`status`** is relative to `scope`: `complete` means Radar read all of it, so
-  missing rows are absent *within that scope*; `partial` means `gaps` names what
-  it did not read. A complete list with `narrowedBy` is still not the cluster.
+  namespace: `caller_access` (the namespaces your access allows),
+  `namespace_pin` (Radar's `--namespace-scope`), or `collection` (the
+  namespaces Radar collects the kind in, when its identity can't list it
+  cluster-wide). It is absent when nothing narrowed the request.
+- **`status`** is relative to `scope`: `complete` means Radar's watch of every
+  namespace in it has loaded, so missing rows are absent from what Radar
+  observes *within that scope*; `partial` means `gaps` names what it did not
+  read. A complete list with `narrowedBy` is still not the cluster.
 - **`read`** is what Radar read within `scope`.
 - **`gaps[]`** each carry a `code` and, when known, the `namespaces` affected.
   A gap without namespaces reaches an unknown part of the scope — for example,
@@ -498,11 +500,12 @@ Namespace sets are `{count, sample}`: `sample` holds up to eight sorted names
 and `count` the size of the whole set, so a sample shorter than `count` is only
 abbreviated. `items` is `[]` when the namespaces read hold nothing.
 
-Each namespace is read on its own. A namespace Radar's collector doesn't
-collect, a namespace it was refused in, or a namespace whose informer is still
-loading becomes a gap, and the other namespaces' rows are still returned. This
-holds for built-in kinds too: when Radar watches a kind namespace by namespace,
-a namespace whose informer has synced is read even while another is loading.
+Each namespace is read on its own. A namespace whose informer is still loading
+becomes a gap, and the other namespaces' rows are still returned. This holds
+for built-in kinds too: when Radar watches a kind namespace by namespace, a
+namespace whose informer has synced is read even while another is loading. A
+namespace you name that Radar doesn't collect, or was refused in, is a gap too;
+on an unscoped request those namespaces narrow it (`collection`) instead.
 
 Namespaces you can see but whose Secrets you can't list are an `rbac_denied`
 gap on a Secret list. Cluster-scoped kinds and unrestricted Secret lists keep
@@ -539,7 +542,8 @@ otherwise the code says why it couldn't look.
 | Code | Meaning | What resolves it |
 |---|---|---|
 | `rbac_denied` | Your own RBAC denies the exact operation. | Your access |
-| `no_namespace_access` | No requested namespace passes your namespace membership check (list Pods or Deployments there). | Your access |
+| `no_namespace_access` | Your access reaches no namespace in the request's scope (Radar checks list Pods or Deployments there). | Your access |
+| `namespace_not_visible` | A namespace you named is not among those you can see, or does not exist; the code doesn't say which. | Check the name, or your access |
 | `permission_check_failed` | Radar could not complete your permission check. | Retry |
 | `collector_forbidden` | Kubernetes refused Radar's service account or kubeconfig identity. | Radar's access — granting yours does not help |
 | `collector_credentials_rejected` | Kubernetes rejected Radar's credentials. | Refresh Radar's credentials |

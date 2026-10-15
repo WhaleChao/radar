@@ -28,9 +28,19 @@ export interface CNPGScreenProps {
 
 const COVERAGE_LABEL: Record<string, string> = {
   denied: 'no access',
-  partial: 'no access in some namespaces',
   syncing: 'still loading',
   error: 'could not be read',
+}
+
+// A partial kind names whose gap it is: the caller's access, Radar's
+// collection, or — from an older Radar that doesn't say — neither.
+export function partialLabel(cov: { deniedNamespaces?: string[]; uncoveredNamespaces?: string[] }): string {
+  const denied = (cov.deniedNamespaces?.length ?? 0) > 0
+  const uncovered = (cov.uncoveredNamespaces?.length ?? 0) > 0
+  if (denied && uncovered) return "no access in some namespaces, and Radar doesn't collect others"
+  if (uncovered) return "Radar doesn't collect some namespaces"
+  if (denied && cov.uncoveredNamespaces) return 'no access in some namespaces'
+  return 'some namespaces not read'
 }
 
 export function CNPGWorkspaceHeader({ title, subtitle, actions }: { title: string; subtitle?: ReactNode; actions?: ReactNode }) {
@@ -55,12 +65,13 @@ export function CoverageNotice({ fleet, data }: { fleet: CNPGFleet; data: CNPGWo
   if (fleet.incompleteKinds.length === 0) return null
   const parts = fleet.incompleteKinds.map((k) => {
     const cov = data.coverage[k]
-    const label = COVERAGE_LABEL[cov?.state ?? ''] ?? cov?.state
+    const uncollected = cov?.state === 'error' && (cov.uncoveredNamespaces?.length ?? 0) > 0
+    const label = cov?.state === 'partial' ? partialLabel(cov) : uncollected ? "Radar doesn't collect it in these namespaces" : (COVERAGE_LABEL[cov?.state ?? ''] ?? cov?.state)
     return `${CNPG_KIND_BY_KEY[k].kind} (${label})`
   })
   return (
     <Notice>
-      Some CloudNativePG data is not readable: {parts.join(', ')}. Facts built on it read “No access” or “unknown” rather than none, and counts are lower bounds.
+      Some CloudNativePG data is not readable: {parts.join(', ')}. Facts built on it say why they can’t be shown rather than reading as none, and counts are lower bounds.
     </Notice>
   )
 }

@@ -126,21 +126,43 @@ func resolveReadTarget(ctx context.Context, requested []string) (readTarget, err
 	}
 	allowed := pkgauth.FilterNamespacesForUser(clamped, user, perms)
 	if allowed != nil && len(allowed) == 0 {
-		// Name only what the caller asked for: unscoped, clamped is the
-		// --namespace-scope target, which this caller cannot read.
-		scope := "any namespace in the requested scope"
-		if len(requested) == 1 {
-			scope = fmt.Sprintf("namespace %q", clamped[0])
-		} else if len(requested) > 1 {
-			scope = fmt.Sprintf("namespaces %q", namespaceForError(clamped))
+		// A namespace the caller named and can't see may not exist either;
+		// the code doesn't say which. Unscoped, clamped is the
+		// --namespace-scope target, which this caller cannot read: name only
+		// what the caller asked for.
+		if target.explicit {
+			scope := fmt.Sprintf("namespace %q", clamped[0])
+			if len(clamped) > 1 {
+				scope = fmt.Sprintf("namespaces %q", namespaceForError(clamped))
+			}
+			return target, readErrorf(readreason.NamespaceNotVisible, "%s is not among the namespaces you can see, or does not exist (Radar grants namespace access when your role can list pods or deployments there; re-checked every ~2 minutes)", scope)
 		}
-		return target, readErrorf(readreason.NoNamespaceAccess, "no Radar access to %s (Radar grants namespace access when your role can list pods or deployments there; re-checked every ~2 minutes)", scope)
+		return target, readErrorf(readreason.NoNamespaceAccess, "no Radar access to any namespace in the requested scope (Radar grants namespace access when your role can list pods or deployments there; re-checked every ~2 minutes)")
 	}
 	if !target.explicit && clamped == nil && allowed != nil {
 		target.narrowedBy = append(target.narrowedBy, resourceapi.NarrowedByCallerAccess)
 	}
 	target.namespaces = allowed
 	return target, nil
+}
+
+// narrowedToCollection is t narrowed to what plan's kind is collected in. A
+// finite target keeps the namespaces read elsewhere withheld (such as Secrets
+// the caller can't list); only the ones Radar doesn't collect leave it.
+func (t readTarget) narrowedToCollection(plan *typedRead) readTarget {
+	return t.narrowedByCollection(plan.collected, plan.uncovered)
+}
+
+// narrowedByCollection narrows t to collected when it is every namespace, or
+// else removes uncovered from it.
+func (t readTarget) narrowedByCollection(collected, uncovered []string) readTarget {
+	if t.namespaces == nil {
+		t.namespaces = collected
+	} else {
+		t.namespaces = slices.DeleteFunc(slices.Clone(t.namespaces), func(ns string) bool { return slices.Contains(uncovered, ns) })
+	}
+	t.narrowedBy = append(slices.Clone(t.narrowedBy), resourceapi.NarrowedByCollection)
+	return t
 }
 
 // resourceReadNamespaces returns the namespaces a read of requested may reach
@@ -350,10 +372,18 @@ func namespacePhrase(set *resourceapi.NameSet) string {
 func listNote(resource string, cov resourceapi.Coverage) string {
 	var b strings.Builder
 	if len(cov.NarrowedBy) > 0 && cov.Scope.Namespaces != nil {
-		why := "your access"
-		if slices.Contains(cov.NarrowedBy, resourceapi.NarrowedByNamespacePin) {
-			why = "Radar's --namespace-scope pin"
+		var whys []string
+		for _, n := range cov.NarrowedBy {
+			switch n {
+			case resourceapi.NarrowedByCallerAccess:
+				whys = append(whys, "your access")
+			case resourceapi.NarrowedByNamespacePin:
+				whys = append(whys, "Radar's --namespace-scope pin")
+			case resourceapi.NarrowedByCollection:
+				whys = append(whys, "the namespaces Radar collects "+resource+" in")
+			}
 		}
+		why := strings.Join(whys, "; ")
 		fmt.Fprintf(&b, "This list covers only %s (%s). ", namespacePhrase(cov.Scope.Namespaces), why)
 	}
 	if cov.Status != resourceapi.CoveragePartial {
@@ -401,13 +431,21 @@ type typedRead struct {
 	// kind still loading elsewhere is read from its namespaces' own stores.
 	whole bool
 	gaps  gapSet
+	// collected, when non-nil, is the part of an implicit target Radar
+	// collects: the read was narrowed to it. uncovered is what it left out of
+	// a finite target.
+	collected, uncovered []string
 }
 
 // resourceReadCache returns the cache to read kind from and, for a typed kind,
 // what of namespaces (nil: every namespace) it can serve now and why the rest
 // is unread. It fails only when nothing can be read. Dynamic kinds learn their
 // coverage by reading, so they get no plan.
-func resourceReadCache(ctx context.Context, kind, group string, namespaces []string) (*k8s.ResourceCache, *typedRead, error) {
+//
+// Namespaces Radar doesn't collect are a gap when the request named them
+// (explicit); otherwise they narrow the read, like the --namespace-scope pin,
+// and collected is set to what remains.
+func resourceReadCache(ctx context.Context, kind, group string, namespaces []string, explicit bool) (*k8s.ResourceCache, *typedRead, error) {
 	gvr, builtin := k8s.BuiltinGVRAnyGroup(kind)
 	typed := builtin && (group == "" || group == gvr.Group) && k8s.TypedKindOwnsGroup(kind, gvr.Group)
 	if !typed {
@@ -463,11 +501,17 @@ func resourceReadCache(ctx context.Context, kind, group string, namespaces []str
 		return nil, nil, plan.gaps.failure()
 	}
 	target := collectorTarget{resource: gvr.Resource, group: gvr.Group, action: "list/watch"}
-	if len(a.Uncovered) > 0 {
+	uncovered := len(a.Uncovered) > 0 || (namespaces == nil && !a.AllNamespaces)
+	switch {
+	case explicit && len(a.Uncovered) > 0:
 		plan.gaps.add(readreason.CollectorScopeLimited, coverageError(ctx, target, a.Uncovered, cache.KindNamespaces(gvr.Resource), nil), a.Uncovered...)
-	}
-	if namespaces == nil && !a.AllNamespaces {
-		plan.gaps.add(readreason.CollectorScopeLimited, coverageError(ctx, target, nil, a.Read, nil))
+	case uncovered:
+		plan.collected = slices.Concat(a.Read, a.Loading, a.Failed)
+		slices.Sort(plan.collected)
+		plan.uncovered = a.Uncovered
+		if len(plan.collected) == 0 {
+			plan.gaps.add(readreason.CollectorScopeLimited, coverageError(ctx, target, a.Uncovered, cache.KindNamespaces(gvr.Resource), nil))
+		}
 	}
 	if len(a.Loading) > 0 {
 		plan.gaps.add(readreason.KindSyncPending, pending, a.Loading...)
@@ -798,17 +842,20 @@ func narrowSecrets(ctx context.Context, target []string, verb string) ([]string,
 		}
 		return nil, gaps, nil
 	}
-	namespaces, checked := filterNamespacesByCanReadDecision(ctx, "", "secrets", verb, target)
-	if !checked {
-		return nil, gaps, resourcePermissionError(false, verb, "", "secrets", namespaceForError(target))
+	allowed, denied, unchecked := partitionNamespacesByCanRead(ctx, "", "secrets", verb, target)
+	if len(denied) > 0 {
+		gaps.add(readreason.RBACDenied, resourcePermissionError(true, verb, "", "secrets", namespaceForError(denied)), denied...)
 	}
-	if len(namespaces) == 0 {
-		return nil, gaps, resourcePermissionError(true, verb, "", "secrets", namespaceForError(target))
+	if len(unchecked) > 0 {
+		gaps.add(readreason.PermissionCheckFailed, resourcePermissionError(false, verb, "", "secrets", namespaceForError(unchecked)), unchecked...)
 	}
-	if withheld := slices.DeleteFunc(slices.Clone(target), func(ns string) bool { return slices.Contains(namespaces, ns) }); len(withheld) > 0 {
-		gaps.add(readreason.RBACDenied, resourcePermissionError(true, verb, "", "secrets", namespaceForError(withheld)), withheld...)
+	if len(allowed) == 0 {
+		if gaps.empty() {
+			return nil, gaps, resourcePermissionError(true, verb, "", "secrets", namespaceForError(target))
+		}
+		return nil, gaps, gaps.failure()
 	}
-	return namespaces, gaps, nil
+	return allowed, gaps, nil
 }
 
 func resourceKindName(kind, group string) string {

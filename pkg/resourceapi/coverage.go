@@ -45,17 +45,18 @@ const (
 	NarrowedByNamespacePin Narrowing = "namespace_pin"
 	// NarrowedByNamespaceSelection: the caller's saved namespace selection.
 	NarrowedByNamespaceSelection Narrowing = "namespace_selection"
-	// NarrowedByCollection: what Radar collects. Only a broad search uses it:
-	// it searches what Radar can read and does not list each kind or
-	// namespace it skipped. A single-kind read reports collection limits as
-	// gaps instead.
+	// NarrowedByCollection: what Radar collects — the namespaces it can list a
+	// kind in when its identity can't list it cluster-wide, and on a broad
+	// search also the kinds it doesn't watch, which a search skips without
+	// listing each one. A namespace the request names that Radar doesn't
+	// collect is a gap, not a narrowing.
 	NarrowedByCollection Narrowing = "collection"
 )
 
 // NameSet is a known, finite set of names: Count members, the first of them
 // (sorted) in Sample. Sample is shorter than Count because of the cap, or
-// empty when the names are withheld from the caller — a namespace they named
-// but can't see is counted, never named back.
+// because names are withheld from the caller — a namespace they named but
+// can't see is counted, never named back.
 type NameSet struct {
 	Count  int      `json:"count"`
 	Sample []string `json:"sample"`

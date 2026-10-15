@@ -18,9 +18,10 @@ type Code string
 const (
 	// RBACDenied: the caller's own RBAC denies the exact operation requested.
 	RBACDenied Code = "rbac_denied"
-	// NoNamespaceAccess: no requested namespace passes Radar's namespace
-	// membership check for the caller (the caller can list pods or
-	// deployments there).
+	// NoNamespaceAccess: the caller's access reaches no namespace in the
+	// request's scope (Radar's membership check: the caller can list pods or
+	// deployments there). A namespace the caller named and can't see is
+	// NamespaceNotVisible.
 	NoNamespaceAccess Code = "no_namespace_access"
 	// PermissionCheckFailed: Radar could not complete the caller's permission
 	// check. It is not a denial, and a retry can succeed.

@@ -212,7 +212,7 @@ func TestResourceReadsPermissionAndScopeFailures(t *testing.T) {
 			} else {
 				_, _, err = handleGetResource(ctx, nil, getResourceInput{Kind: kind, Namespace: ns, Name: "hidden"})
 			}
-			want := "no_namespace_access:"
+			want := "namespace_not_visible:"
 			if kind == "secrets" {
 				want = "rbac_denied:"
 			}
@@ -302,8 +302,8 @@ func TestResourceReadsReportFailedAndDisabledTypedKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows, coverage := partialListBody(t, result); len(rows) != 0 || !slices.Equal(coverage.Read, []string{"alpha"}) {
-		t.Fatalf("unscoped collector-covered list must report its coverage: %s", extractText(t, result))
+	if rows, coverage := narrowedListBody(t, result); len(rows) != 0 || !slices.Equal(coverage.Read, []string{"alpha"}) || !slices.Equal(coverage.Scope, []string{"alpha"}) {
+		t.Fatalf("unscoped collector-covered list must be narrowed to what Radar collects: %s", extractText(t, result))
 	}
 }
 
@@ -626,6 +626,17 @@ func partialListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]
 	return rows, coverage
 }
 
+// narrowedListBody decodes a list the caller didn't scope that Radar's
+// collection narrowed: complete within the namespaces Radar collects.
+func narrowedListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
+	t.Helper()
+	rows, coverage := completeListBody(t, result)
+	if !slices.Contains(coverage.NarrowedBy, "collection") || coverage.ScopeType != "namespaces" || !strings.Contains(coverage.Note, "the namespaces Radar collects") {
+		t.Fatalf("want a list narrowed by collection, got %+v", coverage)
+	}
+	return rows, coverage
+}
+
 // completeListBody decodes a list Radar read all of, within its scope.
 func completeListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
 	t.Helper()
@@ -741,14 +752,14 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 		allowed   []string
 		namespace string
 		rows      []string
-		// unrestricted marks an all-namespaces read the collector could serve
-		// only in alpha and gamma: a gap with no namespaces, because the rest
-		// of the cluster is unknown to the caller and to Radar.
+		// unrestricted marks an all-namespaces read the collector serves only
+		// in alpha and gamma: the read is narrowed to them.
 		unrestricted bool
-		// read and gapped describe a partial read of a finite scope: the
-		// namespaces read, and the ones missing for coverageReason.
-		read, gapped []string
-		narrowed     bool
+		// read and uncollected describe a caller's namespaces only some of
+		// which Radar collects: the read is narrowed to read.
+		read        []string
+		uncollected bool
+		narrowed    bool
 		// wantErr is a read that served nothing.
 		wantErr []string
 		// coverage is the coverage text every class with known coverage
@@ -767,8 +778,8 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 		{name: "restricted caller fully covered", caller: "restricted", allowed: []string{"alpha", "gamma"}, rows: []string{"alpha-object"}, narrowed: true},
 		{name: "restricted caller covered and empty", caller: "restricted", allowed: []string{"gamma"}, rows: []string{}, narrowed: true},
 		{name: "explicit covered and empty", namespace: "gamma", rows: []string{}},
-		{name: "restricted partial overlap", caller: "restricted", allowed: []string{"alpha", "beta"}, rows: []string{"alpha-object"}, narrowed: true, read: []string{"alpha"}, gapped: []string{"beta"}},
-		{name: "restricted partial overlap with an empty covered namespace", caller: "restricted", allowed: []string{"gamma", "beta"}, rows: []string{}, narrowed: true, read: []string{"gamma"}, gapped: []string{"beta"}},
+		{name: "restricted partial overlap", caller: "restricted", allowed: []string{"alpha", "beta"}, rows: []string{"alpha-object"}, narrowed: true, read: []string{"alpha"}, uncollected: true},
+		{name: "restricted partial overlap with an empty covered namespace", caller: "restricted", allowed: []string{"gamma", "beta"}, rows: []string{}, narrowed: true, read: []string{"gamma"}, uncollected: true},
 		{name: "no overlap", caller: "restricted", allowed: []string{"beta"}, wantErr: []string{`namespace "beta"`}, coverage: []string{anyHidden}, typedOnly: true, hidden: []string{"alpha", "gamma"}},
 		{name: "no overlap across namespaces", caller: "restricted", allowed: []string{"beta", "delta"}, wantErr: []string{`namespaces "beta,delta"`}, coverage: []string{anyHidden}, typedOnly: true, hidden: []string{"alpha", "gamma"}},
 		{name: "explicit uncovered", namespace: "beta", wantErr: []string{`namespace "beta"`}, coverage: []string{`covered namespaces you can read: "alpha,gamma"`}},
@@ -816,12 +827,14 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 				rows, coverage := listBody(t, result)
 				switch {
 				case tc.unrestricted:
-					if coverage.Status != "partial" || !slices.Equal(coverage.Codes, []string{partialCoverageReason(class)}) || coverage.GapNamespaces[partialCoverageReason(class)] != nil || !slices.Equal(coverage.Read, []string{"alpha", "gamma"}) || coverage.ScopeType != "all_namespaces" {
-						t.Fatalf("coverage = %+v, want %s over alpha and gamma", coverage, partialCoverageReason(class))
+					if coverage.Status != "complete" || len(coverage.Codes) != 0 || !slices.Equal(coverage.NarrowedBy, []string{"collection"}) || !slices.Equal(coverage.Read, []string{"alpha", "gamma"}) || !slices.Equal(coverage.Scope, []string{"alpha", "gamma"}) {
+						t.Fatalf("coverage = %+v, want narrowed by collection to alpha and gamma", coverage)
 					}
-				case tc.gapped != nil:
-					if coverage.Status != "partial" || !slices.Equal(coverage.Codes, []string{coverageReason(class)}) || !slices.Equal(coverage.GapNamespaces[coverageReason(class)], tc.gapped) || !slices.Equal(coverage.Read, tc.read) {
-						t.Fatalf("coverage = %+v, want read %v and %s in %v", coverage, tc.read, coverageReason(class), tc.gapped)
+				case tc.uncollected:
+					// The caller didn't name beta: Radar not collecting it narrows
+					// the read rather than leaving a gap in it.
+					if coverage.Status != "complete" || len(coverage.Codes) != 0 || !slices.Equal(coverage.NarrowedBy, []string{"caller_access", "collection"}) || !slices.Equal(coverage.Read, tc.read) || !slices.Equal(coverage.Scope, tc.read) {
+						t.Fatalf("coverage = %+v, want read and scope %v narrowed by caller_access and collection", coverage, tc.read)
 					}
 					assertNoCollectorLeak(t, errors.New(coverage.Note), tc.hidden...)
 				default:
@@ -829,7 +842,7 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 						t.Fatalf("coverage = %+v, want complete", coverage)
 					}
 				}
-				if tc.narrowed != slices.Equal(coverage.NarrowedBy, []string{"caller_access"}) {
+				if tc.narrowed != slices.Contains(coverage.NarrowedBy, "caller_access") {
 					t.Fatalf("narrowedBy = %v, want caller_access: %v", coverage.NarrowedBy, tc.narrowed)
 				}
 				if got := rowNames(rows); !slices.Equal(got, tc.rows) {
@@ -930,6 +943,43 @@ func setupListCoverageFixture(t *testing.T, class coverageClass, limited bool, o
 	return gvr.Resource
 }
 
+// setupLoadingServicesFixture watches Services in alpha and gamma, where alpha
+// has synced and gamma never answers, with a Service in each of objects'
+// namespaces: an unscoped read is narrowed to alpha and gamma and partial,
+// with gamma still loading.
+func setupLoadingServicesFixture(t *testing.T, objects ...string) {
+	t.Helper()
+	var objs []runtime.Object
+	for _, ns := range objects {
+		objs = append(objs, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ns + "-object", Namespace: ns}})
+	}
+	client := fake.NewClientset(objs...)
+	client.PrependReactor("list", "services", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "gamma" {
+			return true, nil, errors.New("gamma does not answer")
+		}
+		return false, nil, nil
+	})
+	if err := k8s.InitTestResourceCacheFromConfig(k8score.CacheConfig{
+		Client:                  client,
+		ResourceTypes:           map[string]bool{"services": true},
+		ResourceScopes:          map[string]k8score.ResourceScope{"services": {Enabled: true, Namespace: "alpha"}},
+		ResourceScopeNamespaces: map[string][]string{"services": {"alpha", "gamma"}},
+		DeferredTypes:           map[string]bool{"services": true},
+		DeferredSyncTimeout:     time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k8s.ResetTestState)
+	deadline := time.Now().Add(5 * time.Second)
+	for !k8s.GetResourceCache().AssessKindRead("services", []string{"alpha"}).Complete {
+		if time.Now().After(deadline) {
+			t.Fatal("alpha never synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestListNoteBoundsNamespaceProse(t *testing.T) {
 	for _, count := range []int{1, 3, 8, 9, 40, 1000} {
 		t.Run(fmt.Sprintf("%d", count), func(t *testing.T) {
@@ -995,12 +1045,12 @@ func TestListResourcesReportsCollectorCoverage(t *testing.T) {
 					var rows []map[string]any
 					if tc.limited {
 						var coverage wireCoverage
-						rows, coverage = partialListBody(t, result)
-						if !slices.Equal(coverage.Codes, []string{partialCoverageReason(class)}) || !slices.Equal(coverage.Read, []string{"alpha", "gamma"}) {
-							t.Fatalf("coverage = %+v, want %s over alpha and gamma", coverage, partialCoverageReason(class))
+						rows, coverage = narrowedListBody(t, result)
+						if !slices.Equal(coverage.NarrowedBy, []string{"collection"}) || !slices.Equal(coverage.Read, []string{"alpha", "gamma"}) || !slices.Equal(coverage.Scope, []string{"alpha", "gamma"}) {
+							t.Fatalf("coverage = %+v, want narrowed by collection to alpha and gamma", coverage)
 						}
-						if want := fmt.Sprintf(`Radar read %s only in namespaces "alpha", "gamma". Not read: other namespaces`, kind); !strings.HasPrefix(coverage.Note, want) {
-							t.Fatalf("note must name the kind and the namespaces read, got %q", coverage.Note)
+						if want := fmt.Sprintf(`This list covers only namespaces "alpha", "gamma" (the namespaces Radar collects %s in). It says nothing about %s in other namespaces.`, kind, kind); coverage.Note != want {
+							t.Fatalf("note must name the kind and the namespaces collected, got %q", coverage.Note)
 						}
 						assertNoCollectorLeak(t, errors.New(extractText(t, result)))
 					} else {
@@ -1048,7 +1098,7 @@ func TestListResourcesPartialCoverageTransport(t *testing.T) {
 	}
 	for _, tc := range fixture.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			setupListCoverageFixture(t, coverageTyped, true, tc.Objects...)
+			setupLoadingServicesFixture(t, tc.Objects...)
 			session := connectTo(t, newServer(false))
 			result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "list_resources", Arguments: tc.Arguments})
 			if err != nil {
@@ -1292,7 +1342,7 @@ func TestResourceReadsNamespaceDenialAttribution(t *testing.T) {
 	ctx := withRestrictedUser(t, "attribution-reader", []string{"alpha"})
 	for _, kind := range []string{"pods", "widgets"} {
 		_, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: kind, Namespace: "beta"})
-		for _, text := range []string{"no_namespace_access:", "no Radar access", "beta", "list pods or deployments", "~2 minutes"} {
+		for _, text := range []string{"namespace_not_visible:", "not among the namespaces you can see", "beta", "list pods or deployments", "~2 minutes"} {
 			if err == nil || !strings.Contains(err.Error(), text) {
 				t.Fatalf("missing %s: %v", text, err)
 			}
@@ -2066,7 +2116,8 @@ func TestResourceReadsTypedReadinessIsPerNamespace(t *testing.T) {
 	}
 	rows, coverage := partialListBody(t, result)
 	if !slices.Equal(rowNames(rows), []string{"alpha-cm"}) || !slices.Equal(coverage.Read, []string{"alpha"}) ||
-		!slices.Equal(coverage.GapNamespaces["kind_sync_pending"], []string{"gamma"}) || !slices.Contains(coverage.Codes, "collector_scope_limited") {
+		!slices.Equal(coverage.GapNamespaces["kind_sync_pending"], []string{"gamma"}) || !slices.Equal(coverage.Codes, []string{"kind_sync_pending"}) ||
+		!slices.Equal(coverage.NarrowedBy, []string{"collection"}) || !slices.Equal(coverage.Scope, []string{"alpha", "gamma"}) {
 		t.Fatalf("unscoped read while gamma loads = %v %+v", rowNames(rows), coverage)
 	}
 
