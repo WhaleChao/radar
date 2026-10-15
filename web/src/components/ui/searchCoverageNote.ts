@@ -99,6 +99,8 @@ function failedKinds(entries: SearchCoverageEntry[], label: (e: SearchCoverageEn
   const more = Math.max(names.length - MAX_NAMES, 0) + stars.reduce((n, e) => n + (e.count ?? 0), 0)
   const shown = names.slice(0, MAX_NAMES)
   if (!more) return { text: joinNames(shown, 'or'), one: shown.length === 1 }
+  // Kinds too many to name are only counted.
+  if (!shown.length) return { text: `${more} ${more === 1 ? 'kind' : 'kinds'}`, one: more === 1 }
   return { text: `${shown.join(', ')} and ${more} more ${more === 1 ? 'kind' : 'kinds'}`, one: false }
 }
 
@@ -131,7 +133,10 @@ export function searchCoverageNote(coverage: SearchCoverage | undefined, opts: S
     const tokens = (opts.query ?? '').match(/(?:[^\s"]|"[^"]*(?:"|$))+/g) ?? []
     const namedKind = tokens.some((token) => /^(kind|k):.+/i.test(token.replaceAll('"', '')))
     const retry = !namedKind && failed.find((e) => e.kind !== '*' && (e.reason === 'read_error' || e.reason === 'kind_watch_failed'))
-    if (retry) {
+    const unnamedRetry = !namedKind && !retry && failed.some((e) => e.kind === '*' && e.count && (e.reason === 'read_error' || e.reason === 'kind_watch_failed'))
+    if (unnamedRetry) {
+      say(`${warning} Search kind:<name> to re-check one.`)
+    } else if (retry) {
       const modifier = `kind:${retry.kind}`
       sentences.push(opts.recheckKind
         ? { text: `${warning} Search`, action: { label: modifier, suffix: ' to re-check.', keepOpen: true, onSelect: () => opts.recheckKind?.(retry.kind) } }

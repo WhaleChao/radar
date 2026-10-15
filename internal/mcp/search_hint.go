@@ -169,17 +169,30 @@ func entriesHint(unsearched []hintEntry, filterErrors int, filterErrorSample str
 			if sentence := tmpl.sentence(entries, unsearched); sentence != "" {
 				sentences = append(sentences, sentence)
 				if !namedKinds && slices.Contains(tmpl.reasons, readreason.ReadError) {
+					// Naming a kind restarts its watch; a broad search doesn't.
+					// Kinds too many to name leave the agent to name the one
+					// it needs.
+					counted := false
 					for _, entry := range entries {
-						if entry.Kind != "*" && (entry.Reason == readreason.ReadError || entry.Reason == readreason.KindWatchFailed) {
-							retryIndex = len(sentences) - 1
-							_, n := kindsLabel(entries)
-							if n == 1 {
-								retry = fmt.Sprintf("Retry with kind:%s before concluding absence.", entry.Kind)
-							} else {
-								retry = fmt.Sprintf("Retry with kind:%s for a kind you need before concluding absence.", entry.Kind)
-							}
-							break
+						if entry.Reason != readreason.ReadError && entry.Reason != readreason.KindWatchFailed {
+							continue
 						}
+						if entry.Kind == "*" {
+							counted = counted || entry.Count > 0
+							continue
+						}
+						if _, n := kindsLabel(entries); n == 1 {
+							retry = fmt.Sprintf("Retry with kind:%s before concluding absence.", entry.Kind)
+						} else {
+							retry = fmt.Sprintf("Retry with kind:%s for a kind you need before concluding absence.", entry.Kind)
+						}
+						break
+					}
+					if retry == "" && counted {
+						retry = "Retry with kind:<Kind> for a kind you need before concluding absence."
+					}
+					if retry != "" {
+						retryIndex = len(sentences) - 1
 					}
 				}
 			}
