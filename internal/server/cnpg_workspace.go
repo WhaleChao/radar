@@ -555,7 +555,7 @@ func (s *Server) cnpgWorkspaceReadPods(r *http.Request, cache *k8s.ResourceCache
 	returned := map[string]bool{}
 	acc, denied, uncovered, read := s.cnpgTypedScope(r, cache, namespaces, "", "pods")
 	if acc.state != cnpgCoverageFull && acc.state != cnpgCoveragePartial {
-		return acc, nil, nil, out, returned
+		return acc, denied, uncovered, out, returned
 	}
 	if cache.Pods() == nil {
 		log.Printf("[cnpg] Pod cache unavailable for workspace")
