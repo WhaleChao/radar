@@ -155,26 +155,25 @@ func (s *Server) writeCollectionFailure(w http.ResponseWriter, resource string, 
 type listTarget struct {
 	clusterScoped bool
 	// explicit: the request named its namespaces.
-	explicit   bool
-	namespaces []string
-	// withheld counts named namespaces left out of namespaces because the
-	// caller can't see them or the pin excludes them: still in scope, never
-	// named back.
-	withheld   int
-	narrowedBy []resourceapi.Narrowing
-	gaps       []resourceapi.Gap
+	explicit bool
+	// namespaces is what may be read; named, on an explicit request, is every
+	// namespace it named, including ones the caller can't see or the pin
+	// excludes: those stay in scope, as gaps.
+	namespaces, named []string
+	narrowedBy        []resourceapi.Narrowing
+	gaps              []resourceapi.Gap
 }
 
 func (t listTarget) scope() resourceapi.Scope {
 	switch {
 	case t.clusterScoped:
 		return resourceapi.Scope{Type: resourceapi.ScopeCluster}
+	case t.explicit:
+		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(t.named, resourceapi.RESTSetLimit)}
 	case t.namespaces == nil:
 		return resourceapi.Scope{Type: resourceapi.ScopeAllNamespaces}
 	default:
-		names := resourceapi.Names(t.namespaces, resourceapi.RESTSample)
-		names.Count += t.withheld
-		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: names}
+		return resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(t.namespaces, resourceapi.RESTSetLimit)}
 	}
 }
 
@@ -187,11 +186,11 @@ func (t listTarget) coverage(read []string, gaps []resourceapi.Gap) resourceapi.
 	switch {
 	case t.clusterScoped:
 	case read != nil:
-		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(read, resourceapi.RESTSample)}
+		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(read, resourceapi.RESTSetLimit)}
 	case t.namespaces != nil:
-		// The whole target was read, which never includes the named
-		// namespaces withheld from it.
-		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(t.namespaces, resourceapi.RESTSample)}
+		// The whole readable target was read, which never includes named
+		// namespaces the caller can't see or the pin excludes.
+		readScope = resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names(t.namespaces, resourceapi.RESTSetLimit)}
 	}
 	cov.Read = &readScope
 	if len(gaps) > 0 {
@@ -219,28 +218,27 @@ func (s *Server) requestListTarget(r *http.Request, visible []string) listTarget
 	t := listTarget{namespaces: visible}
 	if named := parseNamespaces(r.URL.Query()); named != nil {
 		t.explicit = true
-		// A named namespace the caller can't see is a gap counted but never
-		// named back: the caller knows what they asked for, and the response
-		// stays the same whether that namespace exists or not.
-		named = slices.Compact(slices.Sorted(slices.Values(named)))
-		pinned, hidden := 0, 0
+		// A named namespace the caller can't see is a gap, named back: it is
+		// what they asked for, and namespace_not_visible reads the same whether
+		// that namespace exists or not.
+		t.named = slices.Compact(slices.Sorted(slices.Values(named)))
+		var pinned, hidden []string
 		t.namespaces = []string{}
-		for _, ns := range named {
+		for _, ns := range t.named {
 			switch {
 			case visible == nil || slices.Contains(visible, ns):
 				t.namespaces = append(t.namespaces, ns)
 			case k8s.ForceNamespaceScope && ns != k8s.GetNamespaceScopeTarget():
-				pinned++
+				pinned = append(pinned, ns)
 			default:
-				hidden++
+				hidden = append(hidden, ns)
 			}
 		}
-		t.withheld = pinned + hidden
-		if pinned > 0 {
-			t.gaps = append(t.gaps, resourceapi.Gap{Code: readreason.OutsideNamespaceScope, Namespaces: &resourceapi.NameSet{Count: pinned, Sample: []string{}}})
+		if len(pinned) > 0 {
+			t.gaps = append(t.gaps, gapOf(readreason.OutsideNamespaceScope, pinned))
 		}
-		if hidden > 0 {
-			t.gaps = append(t.gaps, resourceapi.Gap{Code: readreason.NamespaceNotVisible, Namespaces: &resourceapi.NameSet{Count: hidden, Sample: []string{}}})
+		if len(hidden) > 0 {
+			t.gaps = append(t.gaps, gapOf(readreason.NamespaceNotVisible, hidden))
 		}
 	} else if visible != nil {
 		if s.getUserNamespaces(r, nil) != nil {
@@ -411,7 +409,7 @@ func typedReadCoverage(cache *k8s.ResourceCache, resource string, namespaces []s
 func gapOf(code readreason.Code, namespaces []string) resourceapi.Gap {
 	gap := resourceapi.Gap{Code: code}
 	if len(namespaces) > 0 {
-		gap.Namespaces = resourceapi.Names(namespaces, resourceapi.RESTSample)
+		gap.Namespaces = resourceapi.Names(namespaces, resourceapi.RESTSetLimit)
 	}
 	return gap
 }
@@ -831,27 +829,17 @@ func boundCountCoverageDetails(coverage map[string]resourceapi.Coverage) {
 	if sets == 0 {
 		return
 	}
-	limit := min(resourceapi.RESTSample, resourceCountsNamespaceBudget/sets)
-	sample := func(set *resourceapi.NameSet) *resourceapi.NameSet {
-		if set == nil {
-			return nil
-		}
-		names := slices.Clone(set.Sample[:min(len(set.Sample), limit)])
-		if names == nil {
-			names = []string{}
-		}
-		return &resourceapi.NameSet{Count: set.Count, Sample: names}
-	}
+	limit := min(resourceapi.RESTSetLimit, resourceCountsNamespaceBudget/sets)
 	for kind, value := range coverage {
-		value.Scope.Namespaces = sample(value.Scope.Namespaces)
+		value.Scope.Namespaces = value.Scope.Namespaces.Capped(limit)
 		if value.Read != nil {
 			read := *value.Read
-			read.Namespaces = sample(read.Namespaces)
+			read.Namespaces = read.Namespaces.Capped(limit)
 			value.Read = &read
 		}
 		value.Gaps = slices.Clone(value.Gaps)
 		for i := range value.Gaps {
-			value.Gaps[i].Namespaces = sample(value.Gaps[i].Namespaces)
+			value.Gaps[i].Namespaces = value.Gaps[i].Namespaces.Capped(limit)
 		}
 		coverage[kind] = value
 	}

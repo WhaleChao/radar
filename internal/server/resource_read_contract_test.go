@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -98,7 +97,7 @@ func TestResourceReadsArePerNamespaceForBuiltInKinds(t *testing.T) {
 	}
 	pending := slices.IndexFunc(list.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.KindSyncPending })
 	if len(list.Items) != 1 || mustNested(t, list.Items[0], "metadata", "name") != "alpha-cm" || list.Coverage.Status != resourceapi.CoveragePartial ||
-		pending < 0 || !slices.Equal(list.Coverage.Gaps[pending].Namespaces.Sample, []string{"gamma"}) || !slices.Equal(list.Coverage.Read.Namespaces.Sample, []string{"alpha"}) {
+		pending < 0 || !slices.Equal(list.Coverage.Gaps[pending].Namespaces.Names, []string{"gamma"}) || !slices.Equal(list.Coverage.Read.Namespaces.Names, []string{"alpha"}) {
 		t.Fatalf("list while gamma loads = %+v", list)
 	}
 
@@ -125,7 +124,7 @@ func TestResourceReadsArePerNamespaceForBuiltInKinds(t *testing.T) {
 
 // An unscoped list a restricted caller's access narrowed says so; a list of
 // namespaces the caller named does not, and a named namespace the caller
-// can't see is counted, never named back.
+// can't see stays in scope as a gap, named back like every other one.
 func TestResourceListScopeProvenance(t *testing.T) {
 	client := fake.NewClientset(
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "a"}},
@@ -149,22 +148,26 @@ func TestResourceListScopeProvenance(t *testing.T) {
 
 	implicit := decode(env.authGet(t, "/api/resources/services", "scoped", ""))
 	if implicit.Coverage.Status != resourceapi.CoverageComplete || !slices.Equal(implicit.Coverage.NarrowedBy, []resourceapi.Narrowing{resourceapi.NarrowedByCallerAccess}) ||
-		!slices.Equal(implicit.Coverage.Scope.Namespaces.Sample, []string{"alpha"}) {
+		!slices.Equal(implicit.Coverage.Scope.Namespaces.Names, []string{"alpha"}) {
 		t.Fatalf("narrowed implicit list = %+v", implicit.Coverage)
 	}
 
 	named := decode(env.authGet(t, "/api/resources/services?namespaces=alpha,secret-tenant", "scoped", ""))
 	hidden := slices.IndexFunc(named.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.NamespaceNotVisible })
 	if named.Coverage.Status != resourceapi.CoveragePartial || len(named.Coverage.NarrowedBy) != 0 || hidden < 0 ||
-		named.Coverage.Gaps[hidden].Namespaces.Count != 1 || len(named.Coverage.Gaps[hidden].Namespaces.Sample) != 0 {
+		!slices.Equal(named.Coverage.Gaps[hidden].Namespaces.Names, []string{"secret-tenant"}) {
 		t.Fatalf("named list = %+v", named.Coverage)
 	}
-	if raw, _ := json.Marshal(named); strings.Contains(string(raw), "secret-tenant") {
-		t.Fatalf("a namespace the caller can't see was named back: %s", raw)
+	// The answer is about both namespaces named; only alpha was read.
+	if !slices.Equal(named.Coverage.Scope.Namespaces.Names, []string{"alpha", "secret-tenant"}) || !slices.Equal(named.Coverage.Read.Namespaces.Names, []string{"alpha"}) {
+		t.Fatalf("named scope = %+v, read = %+v", named.Coverage.Scope.Namespaces, named.Coverage.Read.Namespaces)
 	}
-	// The scope still counts it: the answer is about both namespaces named.
-	if named.Coverage.Scope.Namespaces.Count != 2 || !slices.Equal(named.Coverage.Scope.Namespaces.Sample, []string{"alpha"}) {
-		t.Fatalf("named scope = %+v", named.Coverage.Scope.Namespaces)
+	// Whether secret-tenant exists can't be told apart from the caller not
+	// seeing it: a name the caller sent back is the same either way.
+	missing := decode(env.authGet(t, "/api/resources/services?namespaces=alpha,no-such-namespace", "scoped", ""))
+	if gap := slices.IndexFunc(missing.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.NamespaceNotVisible }); gap < 0 ||
+		!slices.Equal(missing.Coverage.Gaps[gap].Namespaces.Names, []string{"no-such-namespace"}) {
+		t.Fatalf("a missing namespace must read like an unseen one: %+v", missing.Coverage)
 	}
 }
 
@@ -200,13 +203,13 @@ func TestResourceGetDenialsAreCoded(t *testing.T) {
 	assertResourceReadError(t, resp, http.StatusServiceUnavailable, "permission_check_failed")
 }
 
-// A read of the whole target never counts the named namespaces withheld
-// from it: the scope does, the read set does not.
-func TestWholeTargetReadExcludesWithheldNamespaces(t *testing.T) {
-	target := listTarget{explicit: true, namespaces: []string{"alpha"}, withheld: 1,
-		gaps: []resourceapi.Gap{{Code: readreason.NamespaceNotVisible, Namespaces: &resourceapi.NameSet{Count: 1, Sample: []string{}}}}}
+// A read of the whole readable target never includes a named namespace the
+// caller can't see: the scope does, the read set does not.
+func TestWholeTargetReadExcludesUnseenNamespaces(t *testing.T) {
+	target := listTarget{explicit: true, namespaces: []string{"alpha"}, named: []string{"alpha", "beta"},
+		gaps: []resourceapi.Gap{gapOf(readreason.NamespaceNotVisible, []string{"beta"})}}
 	cov := target.coverage(nil, nil)
-	if cov.Scope.Namespaces.Count != 2 || cov.Read.Namespaces.Count != 1 || !slices.Equal(cov.Read.Namespaces.Sample, []string{"alpha"}) || cov.Status != resourceapi.CoveragePartial {
+	if cov.Scope.Namespaces.Count != 2 || cov.Read.Namespaces.Count != 1 || !slices.Equal(cov.Read.Namespaces.Names, []string{"alpha"}) || cov.Status != resourceapi.CoveragePartial {
 		t.Fatalf("coverage = scope %+v read %+v status %s", cov.Scope.Namespaces, cov.Read.Namespaces, cov.Status)
 	}
 }

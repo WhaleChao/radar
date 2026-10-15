@@ -145,7 +145,7 @@ describe('resourceQueryMatchesSelectedKind', () => {
 
 
 describe('loaded count coverage', () => {
-  const partial = { status: 'partial' as const, scope: { type: 'all_namespaces' as const }, read: { type: 'namespaces' as const, namespaces: { sample: ['alpha'], count: 1 } }, gaps: [{ code: 'collector_scope_limited' }] }
+  const partial = { status: 'partial' as const, scope: { type: 'all_namespaces' as const }, read: { type: 'namespaces' as const, namespaces: { names: ['alpha'], count: 1 } }, gaps: [{ code: 'collector_scope_limited' }] }
   it('retains a cached partial count qualification and expires both together', () => {
     const cache = { Endpoints: { count: 0, expiresAt: 20, coverage: partial } }
     expect(deriveSidebarResourceCoverage({}, {}, cache, 10)).toEqual({ Endpoints: partial })

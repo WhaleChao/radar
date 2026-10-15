@@ -64,7 +64,7 @@ func TestLimitRangeResourceAccess(t *testing.T) {
 				// A namespace whose LimitRanges the caller can't list is a gap,
 				// so the rows from the others never read as the whole answer.
 				denied := slices.IndexFunc(response.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.RBACDenied })
-				if mixed := len(tt.grants) > 1; mixed != (response.Coverage.Status == resourceapi.CoveragePartial) || mixed && (denied < 0 || !slices.Equal(response.Coverage.Gaps[denied].Namespaces.Sample, []string{"other"})) {
+				if mixed := len(tt.grants) > 1; mixed != (response.Coverage.Status == resourceapi.CoveragePartial) || mixed && (denied < 0 || !slices.Equal(response.Coverage.Gaps[denied].Namespaces.Names, []string{"other"})) {
 					t.Fatalf("coverage = %+v", response.Coverage)
 				}
 			}

@@ -1,6 +1,6 @@
 import type { ReadNameSet } from '../types/read-coverage'
 import type { ResourceCoverage } from '../types/resource-coverage'
-import { pluralize } from './pluralize'
+import { pluralNoun, pluralize } from './pluralize'
 
 // Only a partial answer is qualified. Unknown coverage (an older Radar, or a
 // host that passes none) keeps the presentation that predates coverage: plain
@@ -19,18 +19,19 @@ const gapPhrases: [string, (where: string) => string][] = [
   ['collector_scope_limited', where => `Radar doesn't collect this kind in some ${where}`],
 ]
 
-/** The first few names of a set and how many more there are; empty when the names are withheld. */
-function namespacePreview({ sample, count }: ReadNameSet): string {
-  const preview = sample.slice(0, 3).join(', ')
-  const extra = count - Math.min(sample.length, 3)
-  return preview && `${preview}${extra > 0 ? ` and ${extra} more` : ''}`
+/** The first few names of a set and how many more there are; empty when the set is too large to name. */
+function namespacePreview({ names, count }: ReadNameSet): string {
+  if (!names?.length) return ''
+  const extra = count - Math.min(names.length, 3)
+  return `${names.slice(0, 3).join(', ')}${extra > 0 ? ` and ${extra} more` : ''}`
 }
 
 export function resourceCoverageNotice(coverage: ResourceCoverage | undefined): string | undefined {
   if (coverage?.status !== 'partial') return undefined
   const read = coverage.read
   if (read?.type !== 'namespaces' || !read.namespaces) return 'Partial results. Radar could not read the whole requested scope.'
-  const scope = namespacePreview(read.namespaces) || pluralize(read.namespaces.count, 'namespace')
+  const { count } = read.namespaces
+  const scope = namespacePreview(read.namespaces) || `${count.toLocaleString()} ${pluralNoun(count, 'namespace')}`
   // A broad request named no namespaces, so none of them were "requested".
   const where = coverage.scope.type === 'namespaces' && !coverage.narrowedBy?.length ? 'requested namespaces' : 'namespaces'
   const codes = new Set(coverage.gaps.map(gap => gap.code))

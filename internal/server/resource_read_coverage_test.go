@@ -120,7 +120,7 @@ func TestResourceListCoverageDistinguishesEmptyAndUnread(t *testing.T) {
 					if narrowed := slices.Equal(body.Coverage.NarrowedBy, []resourceapi.Narrowing{resourceapi.NarrowedByCollection}); narrowed != (tc.query == "") {
 						t.Fatalf("narrowedBy = %v", body.Coverage.NarrowedBy)
 					}
-					if body.Coverage.Read.Namespaces == nil || !slices.Equal(body.Coverage.Read.Namespaces.Sample, []string{"alpha"}) {
+					if body.Coverage.Read.Namespaces == nil || !slices.Equal(body.Coverage.Read.Namespaces.Names, []string{"alpha"}) {
 						t.Fatalf("read scope = %+v", body.Coverage.Read)
 					}
 					if tc.partial {
@@ -131,7 +131,7 @@ func TestResourceListCoverageDistinguishesEmptyAndUnread(t *testing.T) {
 						if tc.gapNames == nil && gap != nil {
 							t.Fatalf("invented unread universe: %+v", gap)
 						}
-						if tc.gapNames != nil && (gap == nil || !slices.Equal(gap.Sample, tc.gapNames)) {
+						if tc.gapNames != nil && (gap == nil || !slices.Equal(gap.Names, tc.gapNames)) {
 							t.Fatalf("missing unread namespace: %+v", gap)
 						}
 					} else if len(body.Coverage.Gaps) != 0 {
@@ -207,6 +207,9 @@ func TestAIResourceReadKeepsArrayAndRejectsIncompleteScope(t *testing.T) {
 	}
 }
 
+// A namespace Radar collects but the caller can't see reads exactly like one
+// that doesn't exist: the caller gets back the name they sent, as a
+// namespace_not_visible gap, and nothing that tells the two apart.
 func TestResourceListCoverageContainsOnlyCallerVisibleNamespaces(t *testing.T) {
 	client := fake.NewClientset()
 	useTestResourceCache(t, client)
@@ -216,25 +219,30 @@ func TestResourceListCoverageContainsOnlyCallerVisibleNamespaces(t *testing.T) {
 	}
 	env := newAuthTestServer(t)
 	env.srv.permCache.Set("reader", nil, &auth.UserPermissions{AllowedNamespaces: []string{"alpha", "beta"}})
-	resp := env.authGet(t, "/api/resources/pods?namespaces=alpha,beta,hidden-collector-namespace&table=1", "reader", "")
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	read := func(named string) string {
+		t.Helper()
+		resp := env.authGet(t, "/api/resources/pods?namespaces=alpha,beta,"+named+"&table=1", "reader", "")
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d: %s", resp.StatusCode, body)
+		}
+		return string(body)
 	}
-	if strings.Contains(string(body), "hidden-collector-namespace") {
-		t.Fatalf("coverage leaked a collector-only namespace: %s", body)
+	collected, missing := read("hidden-collector-namespace"), read("zz-no-such-namespace")
+	if strings.ReplaceAll(collected, "hidden-collector-namespace", "zz-no-such-namespace") != missing {
+		t.Fatalf("a collected namespace the caller can't see must read like a missing one:\n%s\n%s", collected, missing)
 	}
 	var result testResourceListEnvelope
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal([]byte(collected), &result); err != nil {
 		t.Fatal(err)
 	}
-	// The scope counts every namespace the request named; the one the caller
-	// can't see is counted, never named.
-	if result.Coverage.Status != resourceapi.CoveragePartial || result.Coverage.Scope.Namespaces.Count != 3 || !slices.Equal(result.Coverage.Scope.Namespaces.Sample, []string{"alpha", "beta"}) || result.Coverage.Read.Namespaces.Count != 1 {
+	hidden := slices.IndexFunc(result.Coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.NamespaceNotVisible })
+	if result.Coverage.Status != resourceapi.CoveragePartial || result.Coverage.Scope.Namespaces.Count != 3 || result.Coverage.Read.Namespaces.Count != 1 ||
+		hidden < 0 || !slices.Equal(result.Coverage.Gaps[hidden].Namespaces.Names, []string{"hidden-collector-namespace"}) {
 		t.Fatalf("coverage = %+v", result.Coverage)
 	}
-	resp = env.authGet(t, "/api/resources/pods?namespace=hidden-collector-namespace&table=1", "reader", "")
+	resp := env.authGet(t, "/api/resources/pods?namespace=hidden-collector-namespace&table=1", "reader", "")
 	defer resp.Body.Close()
 	assertResourceReadError(t, resp, 403, "namespace_not_visible")
 }
@@ -252,15 +260,16 @@ func TestResourceCoverageNamespaceMetadataIsBounded(t *testing.T) {
 	}
 	var body testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/pods?namespaces="+strings.Join(names, ",")), &body)
+	// Past the limit a set only counts its members.
 	for _, tc := range []struct {
-		set            *resourceapi.NameSet
-		total, omitted int
-	}{{body.Coverage.Scope.Namespaces, 80, 16}, {body.Coverage.Read.Namespaces, 70, 6}} {
-		if tc.set == nil || len(tc.set.Sample) != 64 || tc.set.Count != tc.total || tc.set.Count-len(tc.set.Sample) != tc.omitted {
-			t.Fatalf("preview = %+v, want total/omitted %d/%d", tc.set, tc.total, tc.omitted)
+		set   *resourceapi.NameSet
+		total int
+	}{{body.Coverage.Scope.Namespaces, 80}, {body.Coverage.Read.Namespaces, 70}} {
+		if tc.set == nil || tc.set.Names != nil || tc.set.Count != tc.total {
+			t.Fatalf("set = %+v, want a count of %d and no names", tc.set, tc.total)
 		}
 	}
-	if body.Coverage.Gaps[0].Namespaces.Count != 10 || len(body.Coverage.Gaps[0].Namespaces.Sample) != 10 {
+	if body.Coverage.Gaps[0].Namespaces.Count != 10 || len(body.Coverage.Gaps[0].Namespaces.Names) != 10 {
 		t.Fatalf("gap = %+v", body.Coverage.Gaps)
 	}
 }
@@ -350,10 +359,10 @@ func TestResourceCountsShareMetadataBudgetAcrossKinds(t *testing.T) {
 			if set == nil {
 				continue
 			}
-			if set.Count != 80 || len(set.Sample) > 64 {
+			if set.Count != 80 || len(set.Names) > 64 {
 				t.Fatalf("%s invalid metadata preview: %+v", key, set)
 			}
-			previewNames += len(set.Sample)
+			previewNames += len(set.Names)
 		}
 	}
 	if previewNames > 2048 {
@@ -434,13 +443,13 @@ func TestResourceCountsHonorSpecialNamespacedListGates(t *testing.T) {
 	var list testResourceListEnvelope
 	assertOK(t, env.authGet(t, "/api/resources/secrets?namespaces=alpha,beta", "partial", ""), &list)
 	coverage := counts.Coverage["Secret"]
-	if counts.Counts["Secret"] != len(list.Items) || counts.Counts["Secret"] != 1 || coverage.Status != resourceapi.CoveragePartial || coverage.Scope.Namespaces == nil || !slices.Equal(coverage.Scope.Namespaces.Sample, []string{"alpha", "beta"}) || coverage.Read.Namespaces == nil || !slices.Equal(coverage.Read.Namespaces.Sample, []string{"alpha"}) || len(coverage.Gaps) != 1 || coverage.Gaps[0].Code != "rbac_denied" || coverage.Gaps[0].Namespaces == nil || !slices.Equal(coverage.Gaps[0].Namespaces.Sample, []string{"beta"}) {
+	if counts.Counts["Secret"] != len(list.Items) || counts.Counts["Secret"] != 1 || coverage.Status != resourceapi.CoveragePartial || coverage.Scope.Namespaces == nil || !slices.Equal(coverage.Scope.Namespaces.Names, []string{"alpha", "beta"}) || coverage.Read.Namespaces == nil || !slices.Equal(coverage.Read.Namespaces.Names, []string{"alpha"}) || len(coverage.Gaps) != 1 || coverage.Gaps[0].Code != "rbac_denied" || coverage.Gaps[0].Namespaces == nil || !slices.Equal(coverage.Gaps[0].Namespaces.Names, []string{"beta"}) {
 		t.Fatalf("Secret count did not use list's authorized scope: counts=%+v list=%+v", counts, list)
 	}
 	// LimitRanges are narrowed like Secrets: counted where the caller may
 	// list them, with the rest a gap.
 	limits := counts.Coverage["LimitRange"]
-	if counts.Counts["LimitRange"] != 1 || limits.Status != resourceapi.CoveragePartial || len(limits.Gaps) != 1 || limits.Gaps[0].Code != "rbac_denied" || !slices.Equal(limits.Gaps[0].Namespaces.Sample, []string{"beta"}) {
+	if counts.Counts["LimitRange"] != 1 || limits.Status != resourceapi.CoveragePartial || len(limits.Gaps) != 1 || limits.Gaps[0].Code != "rbac_denied" || !slices.Equal(limits.Gaps[0].Namespaces.Names, []string{"beta"}) {
 		t.Fatalf("LimitRange count did not use list's authorized scope: %+v %+v", counts.Counts["LimitRange"], limits)
 	}
 }
@@ -610,7 +619,7 @@ func TestResourceListGroupCollisionKeepsRowsAndCoverageTogether(t *testing.T) {
 	}
 	var knative testResourceListEnvelope
 	assertOK(t, get(t, "/api/resources/Services?group=serving.knative.dev&namespace=beta&table=1"), &knative)
-	if len(knative.Items) != 1 || mustNested(t, knative.Items[0], "metadata", "name") != "knative-service" || knative.Items[0]["apiVersion"] != "serving.knative.dev/v1" || knative.Kind != "services" || knative.Group != gvr.Group || knative.Coverage.Status != resourceapi.CoverageComplete || !slices.Equal(knative.Coverage.Read.Namespaces.Sample, []string{"beta"}) {
+	if len(knative.Items) != 1 || mustNested(t, knative.Items[0], "metadata", "name") != "knative-service" || knative.Items[0]["apiVersion"] != "serving.knative.dev/v1" || knative.Kind != "services" || knative.Group != gvr.Group || knative.Coverage.Status != resourceapi.CoverageComplete || !slices.Equal(knative.Coverage.Read.Namespaces.Names, []string{"beta"}) {
 		t.Fatalf("group-qualified Service read borrowed core data/scope: %+v", knative)
 	}
 }
@@ -752,7 +761,7 @@ func TestResourceReadPreservesKnownExclusionBeforeInitialSync(t *testing.T) {
 					scope = &failure.gaps[i]
 				}
 			}
-			if len(failure.gaps) != 2 || scope == nil || !slices.Equal(scope.Namespaces.Sample, []string{"beta"}) {
+			if len(failure.gaps) != 2 || scope == nil || !slices.Equal(scope.Namespaces.Names, []string{"beta"}) {
 				t.Fatalf("mixed target lost known exclusion: %+v", failure.gaps)
 			}
 		}
@@ -777,7 +786,7 @@ func TestPendingResourceCountsRetainKnownScopeGaps(t *testing.T) {
 	}
 	coverage := response.Coverage["Pod"]
 	scopeGap := slices.IndexFunc(coverage.Gaps, func(gap resourceapi.Gap) bool { return gap.Code == readreason.CollectorScopeLimited })
-	if w.Code != 200 || !slices.Contains(response.Unavailable, "Pod") || response.Reasons["Pod"] != string(readreason.KindSyncPending) || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || scopeGap < 0 || !slices.Equal(coverage.Gaps[scopeGap].Namespaces.Sample, []string{"beta"}) {
+	if w.Code != 200 || !slices.Contains(response.Unavailable, "Pod") || response.Reasons["Pod"] != string(readreason.KindSyncPending) || coverage.Status != resourceapi.CoveragePartial || len(coverage.Gaps) != 2 || scopeGap < 0 || !slices.Equal(coverage.Gaps[scopeGap].Namespaces.Names, []string{"beta"}) {
 		t.Fatalf("counts lost unread scope facts: status=%d %+v", w.Code, response)
 	}
 	if _, exists := response.Counts["Pod"]; exists {

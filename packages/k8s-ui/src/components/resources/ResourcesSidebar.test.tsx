@@ -196,7 +196,7 @@ describe('ResourcesSidebar counts from a Radar that predates coverage', () => {
 })
 
 it('sizes the count badge to fit a bounded count in the thousands', () => {
-  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 12345 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { sample: ['alpha'], count: 1 } } } }} />)
+  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 12345 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], count: 1 } } } }} />)
   const label = `≥${(12345).toLocaleString()}`
   const badge = html.slice(html.lastIndexOf('<span', html.indexOf(label)), html.indexOf(label))
   const classes = badge.match(/class="([^"]*)"/)?.[1].split(/\s+/) ?? []
@@ -206,7 +206,7 @@ it('sizes the count badge to fit a bounded count in the thousands', () => {
 })
 
 it('keeps a partial zero visible rather than hiding the kind as empty', () => {
-  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { sample: ['alpha'], count: 1 } } } }} />)
+  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[horizontalPodAutoscaler]} resourceCounts={{ 'autoscaling/HorizontalPodAutoscaler': 0 }} resourceCoverage={{ 'autoscaling/HorizontalPodAutoscaler': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], count: 1 } } } }} />)
   expect(html).toContain('HorizontalPodAutoscaler')
   expect(html).toContain('–')
   expect(html).not.toContain('≥0')
@@ -233,7 +233,7 @@ describe('sidebarDestinationsMatching', () => {
 
 it('qualifies the collapsed category total as well as the individual kind', () => {
   const widget = { name: 'widgets', kind: 'Widget', group: 'read.example.test', version: 'v1', namespaced: true, isCrd: true, verbs: ['get', 'list', 'watch'] }
-  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[widget]} resourceCounts={{ 'read.example.test/Widget': 3 }} resourceCoverage={{ 'read.example.test/Widget': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { sample: ['alpha'], count: 1 } } } }} />)
+  const html = renderToString(<ResourcesSidebar selectedKind={null} onSelectedKindChange={() => {}} apiResources={[widget]} resourceCounts={{ 'read.example.test/Widget': 3 }} resourceCoverage={{ 'read.example.test/Widget': { status: 'partial', gaps: [], scope: { type: 'all_namespaces' }, read: { type: 'namespaces', namespaces: { names: ['alpha'], count: 1 } } } }} />)
   const start = html.indexOf('>Test Read Example</span>')
   expect(start).toBeGreaterThan(-1)
   expect(html.slice(start, html.indexOf('</button>', start))).toContain('≥3')
