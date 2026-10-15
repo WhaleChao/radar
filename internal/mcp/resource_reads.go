@@ -159,10 +159,22 @@ func (t readTarget) narrowedByCollection(collected, uncovered []string) readTarg
 	if t.namespaces == nil {
 		t.namespaces = collected
 	} else {
-		t.namespaces = slices.DeleteFunc(slices.Clone(t.namespaces), func(ns string) bool { return slices.Contains(uncovered, ns) })
+		t.namespaces = withoutNamespaces(t.namespaces, uncovered)
 	}
-	t.narrowedBy = append(slices.Clone(t.narrowedBy), resourceapi.NarrowedByCollection)
+	if !slices.Contains(t.narrowedBy, resourceapi.NarrowedByCollection) {
+		t.narrowedBy = append(slices.Clone(t.narrowedBy), resourceapi.NarrowedByCollection)
+	}
 	return t
+}
+
+// withoutNamespaces returns namespaces less those in drop, in linear time:
+// both can hold thousands of names.
+func withoutNamespaces(namespaces, drop []string) []string {
+	dropped := make(map[string]bool, len(drop))
+	for _, ns := range drop {
+		dropped[ns] = true
+	}
+	return slices.DeleteFunc(slices.Clone(namespaces), func(ns string) bool { return dropped[ns] })
 }
 
 // resourceReadNamespaces returns the namespaces a read of requested may reach
@@ -829,33 +841,59 @@ func isObjectNotFound(err error) bool {
 	return apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound)
 }
 
-// narrowSecrets keeps the namespaces of target where the caller can list (or
-// get) Secrets. Namespace access does not imply Secret access, so withheld
-// namespaces are a gap within the target, not a narrowing of it. An
+// exactAccessResource names the core resource a read of kind needs the
+// caller's exact permission for, beyond namespace visibility: Secrets (the
+// chart can grant Radar every Secret in the cluster) and LimitRanges, as on
+// the REST routes. It is "" for every other kind.
+func exactAccessResource(kind, group string) string {
+	if group != "" {
+		return ""
+	}
+	switch kind {
+	case "secrets", "limitranges":
+		return kind
+	}
+	return ""
+}
+
+// narrowByExactAccess keeps the namespaces of target where the caller can
+// list (or get) resource. Namespace access does not imply that access, so
+// withheld namespaces are a gap within the target, not a narrowing of it. An
 // unrestricted caller is checked cluster-wide.
-func narrowSecrets(ctx context.Context, target []string, verb string) ([]string, gapSet, error) {
+func narrowByExactAccess(ctx context.Context, target []string, resource, verb string) ([]string, gapSet, error) {
 	var gaps gapSet
 	if target == nil {
-		granted, checked := canReadInNamespaceDecision(ctx, "", "secrets", "", verb)
+		granted, checked := canReadInNamespaceDecision(ctx, "", resource, "", verb)
 		if !granted {
-			return nil, gaps, resourcePermissionError(checked, verb, "", "secrets", "")
+			return nil, gaps, resourcePermissionError(checked, verb, "", resource, "")
 		}
 		return nil, gaps, nil
 	}
-	allowed, denied, unchecked := partitionNamespacesByCanRead(ctx, "", "secrets", verb, target)
+	allowed, denied, unchecked := partitionNamespacesByCanRead(ctx, "", resource, verb, target)
 	if len(denied) > 0 {
-		gaps.add(readreason.RBACDenied, resourcePermissionError(true, verb, "", "secrets", namespaceForError(denied)), denied...)
+		gaps.add(readreason.RBACDenied, resourcePermissionError(true, verb, "", resource, namespaceForError(denied)), denied...)
 	}
 	if len(unchecked) > 0 {
-		gaps.add(readreason.PermissionCheckFailed, resourcePermissionError(false, verb, "", "secrets", namespaceForError(unchecked)), unchecked...)
+		gaps.add(readreason.PermissionCheckFailed, resourcePermissionError(false, verb, "", resource, namespaceForError(unchecked)), unchecked...)
 	}
 	if len(allowed) == 0 {
 		if gaps.empty() {
-			return nil, gaps, resourcePermissionError(true, verb, "", "secrets", namespaceForError(target))
+			return nil, gaps, resourcePermissionError(true, verb, "", resource, namespaceForError(target))
 		}
 		return nil, gaps, gaps.failure()
 	}
 	return allowed, gaps, nil
+}
+
+// currentReadCache is the typed cache a read would use now. A handler
+// captures it before authorizing and checks the cache it reads against it,
+// so authorization and rows come from the same connection.
+func currentReadCache() *k8s.ResourceCache {
+	active, syncing := k8s.SnapshotCaches()
+	if active != nil {
+		return active
+	}
+	return syncing
 }
 
 func resourceKindName(kind, group string) string {

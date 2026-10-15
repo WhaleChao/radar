@@ -104,10 +104,19 @@ function failedKinds(entries: SearchCoverageEntry[], label: (e: SearchCoverageEn
 // Radar's ⌘K note for one search: what happened to the kinds and namespaces
 // the query named, whether results are still loading, and which kinds failed
 // to read. Access and setup never come up on a broad search (Radar doesn't
-// report them). An older Radar sends no coverage, and gets no note.
+// report them), except that an empty narrowed search says it can't rule out
+// matches. An older Radar sends no coverage, and gets no note.
 export function searchCoverageNote(coverage: SearchCoverage | undefined, opts: SearchCoverageNoteOptions): OmnibarNote | undefined {
   const unsearched = searchCoverageEntries(coverage)
-  if (!unsearched.length) return undefined
+  if (!unsearched.length) {
+    // An empty answer from a search Radar's collection narrowed can't rule
+    // out matches where Radar doesn't collect. The other narrowings (access,
+    // pin, namespace pick) already show in the namespace picker.
+    if (opts.hits?.length === 0 && coverage?.narrowedBy?.includes('collection')) {
+      return { text: "Radar doesn't collect everything on this cluster, so there may be matches it can't see." }
+    }
+    return undefined
+  }
   const label = kindLabeler(unsearched, opts.hits ?? [])
   const named = (reason: string) => distinctKinds(unsearched.filter((e) => e.reason === reason))
   const names = (entries: SearchCoverageEntry[], conj: string, plural = true) => joinNames([...new Set(entries.map((e) => label(e, plural)))], conj)

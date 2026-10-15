@@ -852,6 +852,7 @@ type topResourcesResponseMCP struct {
 }
 
 func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input listResourcesInput) (*mcp.CallToolResult, any, error) {
+	started := currentReadCache()
 	kind := resourceKindName(strings.ToLower(input.Kind), input.Group)
 	group := input.Group
 	var requested []string
@@ -874,15 +875,18 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 		}
 	}
 	readable := target.namespaces
-	if kind == "secrets" {
+	if resource := exactAccessResource(kind, group); resource != "" && !clusterScoped {
 		var secretGaps gapSet
 		var err error
-		if readable, secretGaps, err = narrowSecrets(ctx, readable, "list"); err != nil {
+		if readable, secretGaps, err = narrowByExactAccess(ctx, readable, resource, "list"); err != nil {
 			return nil, nil, err
 		}
 		gaps.merge(secretGaps)
 	}
 	cache, plan, err := resourceReadCache(ctx, kind, group, readable, target.explicit)
+	if err == nil && cache != started {
+		err = errConnectionChanged()
+	}
 	if err != nil {
 		// Secrets withheld from the caller are part of why nothing was read.
 		if !gaps.empty() && gaps.absorb(err) {
@@ -1158,6 +1162,7 @@ func isCollectorForbidden(err error) bool {
 }
 
 func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getResourceInput) (*mcp.CallToolResult, any, error) {
+	started := currentReadCache()
 	kind := resourceKindName(strings.ToLower(input.Kind), input.Group)
 	group := input.Group
 	namespace := input.Namespace
@@ -1192,10 +1197,10 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 		if _, err := resourceReadNamespaces(ctx, []string{namespace}); err != nil {
 			return nil, nil, err
 		}
-		if kind == "secrets" {
-			granted, checked := canReadInNamespaceDecision(ctx, "", "secrets", namespace, "get")
+		if resource := exactAccessResource(kind, group); resource != "" {
+			granted, checked := canReadInNamespaceDecision(ctx, "", resource, namespace, "get")
 			if !granted {
-				return nil, nil, resourcePermissionError(checked, "get", "", "secrets", namespace)
+				return nil, nil, resourcePermissionError(checked, "get", "", resource, namespace)
 			}
 		}
 	}
@@ -1206,6 +1211,9 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 	cache, plan, err := resourceReadCache(ctx, kind, group, namespaces, true)
 	if err != nil {
 		return nil, nil, err
+	}
+	if cache != started {
+		return nil, nil, errConnectionChanged()
 	}
 
 	// Fetch the resource. When group is set, skip the typed cache and route
