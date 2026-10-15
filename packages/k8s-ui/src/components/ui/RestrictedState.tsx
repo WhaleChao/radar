@@ -122,7 +122,7 @@ export function RestrictedState({
           {context && <p className="text-sm mt-1 max-w-md">{context}</p>}
           <p className="text-sm mt-2 max-w-md">
             Radar couldn't confirm which identity made this read, so it can't say what access to
-            grant. Reload the page to try again.
+            grant.
           </p>
         </>
       ) : isUnavailable ? (
