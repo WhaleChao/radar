@@ -27,6 +27,7 @@ func TestBroadSearchSaysHowItWasNarrowed(t *testing.T) {
 		{"saved pick", "robusta", []string{"a"}, nil, false, []resourceapi.Narrowing{resourceapi.NarrowedByNamespaceSelection}},
 		{"pin", "robusta", []string{"a"}, nil, true, []resourceapi.Narrowing{resourceapi.NarrowedByNamespacePin}},
 		{"restricted caller under a pick", "robusta", []string{"a"}, []string{"a", "b"}, false, []resourceapi.Narrowing{resourceapi.NarrowedByCallerAccess, resourceapi.NarrowedByNamespaceSelection}},
+		{"restricted caller under the pin they can read", "robusta", []string{"a"}, []string{"a"}, true, []resourceapi.Narrowing{resourceapi.NarrowedByCallerAccess, resourceapi.NarrowedByNamespacePin}},
 		{"a named namespace is not narrowing", "ns:a robusta", []string{"a"}, []string{"a"}, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
