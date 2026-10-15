@@ -1,10 +1,14 @@
 // Coverage of a Radar read, as Radar's pkg/resourceapi serializes it. Codes
 // come from Radar's pkg/readreason.
 
-/** A known, finite set: `count` members, the first of them (sorted) in `sample`. */
+/**
+ * A known, finite set of `count` members. `names` lists all of them, sorted,
+ * when there are few enough for the response; otherwise it is absent and which
+ * members are in the set is unknown.
+ */
 export interface ReadNameSet {
   count: number
-  sample: string[]
+  names?: string[]
 }
 
 /** A kind; an omitted group is the core group. */
@@ -27,9 +31,9 @@ export interface ReadObjectRef {
  */
 export interface ReadGap {
   code: string
-  kinds?: { count: number; sample: ReadKindRef[] }
+  kinds?: { count: number; names?: ReadKindRef[] }
   namespaces?: ReadNameSet
-  objects?: { count: number; sample: ReadObjectRef[] }
+  objects?: { count: number; names?: ReadObjectRef[] }
 }
 
 /** Why an implicitly broad read covers less than everything. */

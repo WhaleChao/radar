@@ -725,8 +725,9 @@ Events are excluded from broad searches.
 
 Every response includes `coverage`: `{status, narrowedBy?, gaps}`, built from the
 same [gaps and codes](#resource-reads-coverage-and-errors) as resource lists. A
-gap names `kinds` (`{count, sample}` of `{kind, group}`, an omitted group being
-core), `namespaces`, or `objects`, never both kinds and namespaces; a gap with
+gap names `kinds` (`{count, names}` of `{kind, group}`, an omitted group being
+core), `namespaces`, or `objects`, each listing every member or, past its limit,
+only counting them, never both kinds and namespaces; a gap with
 none of them reaches an unknown set of kinds.
 
 **`status: "partial"` means this result can't rule out a match for what you
@@ -755,9 +756,9 @@ What gets reported follows from that:
 - **Loading and failures are always reported, folded.** All `kind_sync_pending`
   kinds become one gap whose `kinds` counts distinct kinds and names none. Each
   failure reason (`kind_sync_failed`, `kind_watch_failed`, `read_error`,
-  `permission_check_failed`, `collector_credentials_rejected`) names its first five
-  kinds, by kind then group, and counts the rest. A query with `kind:` terms names
-  every kind it reports, exactly.
+  `permission_check_failed`, `collector_credentials_rejected`) names its kinds when
+  there are at most five, and otherwise only counts them. A query with `kind:` terms
+  names every kind it reports, exactly.
 - **Only kinds you may read count, and your access comes first.** Your own access is
   checked before a kind's loading, failed or collection state is reported, so a kind
   you can't list never shows up as loading for you, and a named kind that neither
@@ -833,11 +834,11 @@ search with no hits carries one too, saying it doesn't rule out matches outside
 your access and Radar's collection. REST never carries it.
 
 ```json
-{"coverage": {"status": "partial", "gaps": [{"code": "kind_sync_pending", "kinds": {"count": 37, "sample": []}}]},
+{"coverage": {"status": "partial", "gaps": [{"code": "kind_sync_pending", "kinds": {"count": 37}}]},
  "coverageHint": "37 kinds were still loading; retry in a few seconds before concluding absence.", …}
-{"coverage": {"status": "partial", "gaps": [{"code": "rbac_denied", "kinds": {"count": 1, "sample": [{"kind": "Secret"}]}}]},
+{"coverage": {"status": "partial", "gaps": [{"code": "rbac_denied", "kinds": {"count": 1, "names": [{"kind": "Secret"}]}}]},
  "coverageHint": "Your access doesn't include all Secrets; this result says nothing about the rest.", …}
-{"coverage": {"status": "partial", "gaps": [{"code": "namespace_not_found", "namespaces": {"count": 1, "sample": ["payments-prd"]}}]},
+{"coverage": {"status": "partial", "gaps": [{"code": "namespace_not_found", "namespaces": {"count": 1, "names": ["payments-prd"]}}]},
  "coverageHint": "Namespace 'payments-prd' doesn't exist on this cluster.", …}
 {"coverage": {"status": "complete", "narrowedBy": ["caller_access"], "gaps": []},
  "coverageHint": "No matches within what your access and Radar's collection cover; that does not rule out matches outside them.", …}
@@ -891,8 +892,8 @@ the bare form also matches every object without that field. Deployments with zer
 unreported ready replicas:
 `kind == "Deployment" && (!has(status.readyReplicas) || status.readyReplicas == 0)`. Evaluation/activation errors make the result partial, preserve
 `filter_errors` and `filter_error_sample`, and add a `filter_eval_failed` gap whose
-`objects` name the first 20 `{kind, group, namespace, name}` refs (no namespace at
-cluster scope) and count them all.
+`objects` name the failing `{kind, group, namespace, name}` refs (no namespace at
+cluster scope) when there are at most 20, and otherwise only count them.
 Surviving hits remain available. A valid false predicate is an ordinary non-match.
 
 For `issues`, `unchecked_sources` lists the issue sources Radar couldn't check for this answer, so their issues may be missing; don't read the response as healthy for them. Today the only source is `helm` (failed or stuck Helm releases), with reason `read_failed`. Treat any other value as unchecked too. Read `timing_summary` when present; it explains timing combinations that are easy to misread without schema context. The raw provenance fields remain available for filtering. `first_seen` is an evidence-backed lower bound, `onset_unknown` means no contributing signal has a known onset, and `resource_created_at` is resource-age context rather than issue age. A missing `first_seen` is exposed to CEL as `0`; require `first_seen != 0` for any age filter, and also require `onset_coverage_unknown == 0` when the whole row must have exact timing.

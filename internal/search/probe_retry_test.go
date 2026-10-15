@@ -49,8 +49,7 @@ func TestSearchProbeRetryCoverage(t *testing.T) {
 				want = []UnsearchedKind{{Kind: "*", Reason: tc.reason, Count: 8}}
 			}
 			if tc.reason == readreason.ReadError {
-				want = append(want, UnsearchedKind{Kind: "*", Reason: tc.reason, Count: 3})
-				want = append(want, capNamed("Widget", 8, 0, 4, tc.reason)...)
+				want = []UnsearchedKind{{Kind: "*", Reason: tc.reason, Count: 8}}
 			}
 			if !reflect.DeepEqual(unsearched(res), want) || partial(res) != (len(want) > 0) || len(p.warmed) > 0 {
 				t.Fatalf("broad: %+v warm=%v want=%+v", res, p.warmed, want)

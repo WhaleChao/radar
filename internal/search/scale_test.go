@@ -226,7 +226,7 @@ func TestCoverageNamespaceDeduplicationPreservesSort(t *testing.T) {
 		c.namespaces(readreason.CollectorScopeLimited, "z", "a", "ambient")
 	}
 	got := c.result()
-	if len(got) != 1 || got[0].Namespaces == nil || got[0].Namespaces.Count != 2 || got[0].Namespaces.Sample[0] != "a" || got[0].Namespaces.Sample[1] != "z" {
+	if len(got) != 1 || got[0].Namespaces == nil || got[0].Namespaces.Count != 2 || got[0].Namespaces.Names[0] != "a" || got[0].Namespaces.Names[1] != "z" {
 		t.Fatalf("gaps=%+v", got)
 	}
 }
