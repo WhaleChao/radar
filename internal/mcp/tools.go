@@ -1038,7 +1038,18 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 		}
 		if observation := dynamicCache.Observation(gvr); observation.Scope == k8score.DynamicObservationScopeExplicitNamespaces {
 			namespaces = observation.Namespaces
-			target = target.narrowedByCollection(namespaces, nil)
+			scope := namespaces
+			// A namespace whose access check hasn't answered may be collected:
+			// it stays in the scope as a gap, never outside it.
+			if unanswered := observation.UnansweredNamespaces; len(unanswered) > 0 {
+				code, err := readreason.ReadError, readErrorf(readreason.ReadError, "Radar could not check whether it can collect %s in some namespaces", collector.resource)
+				if observation.ProbeRetrying {
+					code, err = readreason.KindSyncPending, readErrorf(readreason.KindSyncPending, "Radar is still checking whether it can collect %s in some namespaces; retry shortly", collector.resource)
+				}
+				gaps.add(code, err, unanswered...)
+				scope = slices.Compact(slices.Sorted(slices.Values(slices.Concat(namespaces, unanswered))))
+			}
+			target = target.narrowedByCollection(scope, nil)
 		}
 	}
 
