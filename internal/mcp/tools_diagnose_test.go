@@ -348,7 +348,7 @@ func TestHandleDiagnose_PodNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for non-existent pod, got nil")
 	}
-	if !strings.Contains(err.Error(), "not found") {
+	if !strings.HasPrefix(err.Error(), "object_not_found:") {
 		t.Errorf("expected 'not found' error, got %v", err)
 	}
 }
@@ -475,7 +475,7 @@ func TestHandleDiagnose_DeploymentNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for non-existent deployment, got nil")
 	}
-	if !strings.Contains(err.Error(), "not found") {
+	if !strings.HasPrefix(err.Error(), "object_not_found:") {
 		t.Errorf("expected 'not found' error, got %v", err)
 	}
 }

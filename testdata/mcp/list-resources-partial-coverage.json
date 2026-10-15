@@ -15,7 +15,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"narrowedBy\":[\"collection\"],\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":1,\"sample\":[\"alpha\"]}},\"gaps\":[{\"code\":\"kind_sync_pending\",\"namespaces\":{\"count\":1,\"sample\":[\"gamma\"]}}],\"note\":\"This list covers only namespaces \\\"alpha\\\", \\\"gamma\\\" (the namespaces Radar collects services in). Radar read services only in namespace \\\"alpha\\\". Not read: namespace \\\"gamma\\\" (still loading). This result cannot show that services there don't exist.\"},\"items\":[{\"kind\":\"Service\",\"name\":\"alpha-object\",\"namespace\":\"alpha\"}]}"
+            "text": "{\"summary\":\"These are the services in namespace \\\"alpha\\\" only. Not read: namespace \\\"gamma\\\", because Radar is still loading services there (retry in a few seconds). Services may exist there that this list doesn't show. Other namespaces weren't read either: Radar collects services only in namespaces \\\"alpha\\\", \\\"gamma\\\"; whoever installed Radar can add namespaces with --namespaces through the chart's extraArgs, if its service account can list services there.\",\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"narrowedBy\":[\"collection\"],\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":1,\"sample\":[\"alpha\"]}},\"gaps\":[{\"code\":\"kind_sync_pending\",\"namespaces\":{\"count\":1,\"sample\":[\"gamma\"]}}]},\"items\":[{\"kind\":\"Service\",\"name\":\"alpha-object\",\"namespace\":\"alpha\"}]}"
           }
         ]
       }
@@ -33,7 +33,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"narrowedBy\":[\"collection\"],\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":1,\"sample\":[\"alpha\"]}},\"gaps\":[{\"code\":\"kind_sync_pending\",\"namespaces\":{\"count\":1,\"sample\":[\"gamma\"]}}],\"note\":\"This list covers only namespaces \\\"alpha\\\", \\\"gamma\\\" (the namespaces Radar collects services in). Radar read services only in namespace \\\"alpha\\\". Not read: namespace \\\"gamma\\\" (still loading). This result cannot show that services there don't exist.\"},\"items\":[]}"
+            "text": "{\"summary\":\"Radar found no services in namespace \\\"alpha\\\". Not read: namespace \\\"gamma\\\", because Radar is still loading services there (retry in a few seconds). Services may exist there that this list doesn't show. Other namespaces weren't read either: Radar collects services only in namespaces \\\"alpha\\\", \\\"gamma\\\"; whoever installed Radar can add namespaces with --namespaces through the chart's extraArgs, if its service account can list services there.\",\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"narrowedBy\":[\"collection\"],\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":1,\"sample\":[\"alpha\"]}},\"gaps\":[{\"code\":\"kind_sync_pending\",\"namespaces\":{\"count\":1,\"sample\":[\"gamma\"]}}]},\"items\":[]}"
           }
         ]
       }
@@ -51,7 +51,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"narrowedBy\":[\"collection\"],\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":1,\"sample\":[\"alpha\"]}},\"gaps\":[{\"code\":\"kind_sync_pending\",\"namespaces\":{\"count\":1,\"sample\":[\"gamma\"]}}],\"note\":\"This list covers only namespaces \\\"alpha\\\", \\\"gamma\\\" (the namespaces Radar collects services in). Radar read services only in namespace \\\"alpha\\\". Not read: namespace \\\"gamma\\\" (still loading). This result cannot show that services there don't exist.\"},\"items\":[]}"
+            "text": "{\"summary\":\"Radar found no services in namespace \\\"alpha\\\". Not read: namespace \\\"gamma\\\", because Radar is still loading services there (retry in a few seconds). Services may exist there that this list doesn't show. Other namespaces weren't read either: Radar collects services only in namespaces \\\"alpha\\\", \\\"gamma\\\"; whoever installed Radar can add namespaces with --namespaces through the chart's extraArgs, if its service account can list services there.\",\"coverage\":{\"status\":\"partial\",\"scope\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":2,\"sample\":[\"alpha\",\"gamma\"]}},\"narrowedBy\":[\"collection\"],\"read\":{\"type\":\"namespaces\",\"namespaces\":{\"count\":1,\"sample\":[\"alpha\"]}},\"gaps\":[{\"code\":\"kind_sync_pending\",\"namespaces\":{\"count\":1,\"sample\":[\"gamma\"]}}]},\"items\":[]}"
           }
         ]
       }

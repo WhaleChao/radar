@@ -58,7 +58,7 @@ func TestResourceReadsReportCallerDenial(t *testing.T) {
 				} else {
 					_, _, err = handleGetResource(ctx, nil, getResourceInput{Kind: kind, Name: "hidden"})
 				}
-				for _, want := range []string{"rbac_denied: your role", verb, resource, `group "` + group + `"`} {
+				for _, want := range []string{"rbac_denied: Your Kubernetes access doesn't allow you to " + verb + " " + qualifiedResource(group, resource) + " across the cluster"} {
 					if err == nil || !strings.Contains(err.Error(), want) {
 						t.Errorf("want %q in caller error, got %v", want, err)
 					}
@@ -187,7 +187,7 @@ func TestResourceReadsReadyContract(t *testing.T) {
 						if !containsName(extractText(t, result), "present") {
 							t.Fatal("missing get object")
 						}
-					} else if err == nil || !strings.Contains(err.Error(), "not found") {
+					} else if err == nil || !strings.HasPrefix(err.Error(), "object_not_found: No ") || !strings.Contains(err.Error(), `named "present" exist in `) {
 						t.Fatalf("ready absent get must report not found, got %v", err)
 					}
 				})
@@ -223,7 +223,7 @@ func TestResourceReadsPermissionAndScopeFailures(t *testing.T) {
 	}
 	noAccess := withRestrictedUser(t, "no-access", []string{})
 	_, _, err := handleListResources(noAccess, nil, listResourcesInput{Kind: "pods"})
-	if err == nil || !strings.Contains(err.Error(), "no Radar access") {
+	if err == nil || !strings.Contains(err.Error(), "You can't access any namespace") {
 		t.Fatalf("expected Radar namespace access denial, got %v", err)
 	}
 	unchecked := withClusterAdmin(t, "unchecked")
@@ -368,9 +368,9 @@ func TestResourceReadsDynamicPendingAndCollectorDenial(t *testing.T) {
 						if denied {
 							want = "collector_forbidden"
 						} else if b.Kind == "CustomResourceDefinition" && verb == "get" {
-							want = "resource not found"
+							want = "object_not_found"
 						}
-						if err == nil || !(strings.HasPrefix(err.Error(), want+":") || (want == "resource not found" && strings.Contains(err.Error(), want))) || (want != "resource not found" && strings.Contains(err.Error(), "resource not found")) {
+						if err == nil || !strings.HasPrefix(err.Error(), want+":") || (want != "object_not_found" && strings.Contains(err.Error(), "object_not_found")) {
 							t.Fatalf("%s: expected %s, got %v", verb, want, err)
 						}
 						if denied && (!strings.Contains(err.Error(), "Radar's") || !strings.Contains(err.Error(), "can't ")) {
@@ -387,7 +387,7 @@ func TestResourceReadsDynamicPendingAndCollectorDenial(t *testing.T) {
 				} else {
 					_, _, err = handleGetResource(context.Background(), nil, getResourceInput{Kind: "unknown", Namespace: "alpha", Name: "hidden"})
 				}
-				if err == nil || !strings.Contains(err.Error(), "kind_unknown") || strings.Contains(err.Error(), "resource not found") {
+				if err == nil || !strings.Contains(err.Error(), "kind_unknown") || strings.Contains(err.Error(), "object_not_found") {
 					t.Fatalf("unknown kind must not claim absent resource, got %v", err)
 				}
 			}
@@ -425,9 +425,9 @@ func TestResourceReadToolErrorTransport(t *testing.T) {
 		reason    string
 		detail    string
 	}{
-		{"list_resources", map[string]any{"kind": "nodes"}, "rbac_denied", `your role cannot list resource "nodes"`},
-		{"get_resource", map[string]any{"kind": "nodes", "name": "hidden"}, "rbac_denied", `your role cannot get resource "nodes"`},
-		{"get_resource", map[string]any{"kind": "pods", "name": "hidden"}, "namespace_required", "specify a namespace for pods"},
+		{"list_resources", map[string]any{"kind": "nodes"}, "rbac_denied", "Your Kubernetes access doesn't allow you to list nodes across the cluster"},
+		{"get_resource", map[string]any{"kind": "nodes", "name": "hidden"}, "rbac_denied", "Your Kubernetes access doesn't allow you to get nodes across the cluster"},
+		{"get_resource", map[string]any{"kind": "pods", "name": "hidden"}, "namespace_required", "Pods live in namespaces: call get_resource again with namespace set."},
 	} {
 		result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: tc.name, Arguments: tc.arguments})
 		if err != nil {
@@ -440,7 +440,7 @@ func TestResourceReadToolErrorTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertReadErrorWire(t, "get_resource absent", wire(result), extractText(t, result), "object_not_found", "not found")
+	assertReadErrorWire(t, "get_resource absent", wire(result), extractText(t, result), "object_not_found", `No pods named "absent" exist in namespace "alpha".`)
 	result, err = session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "list_resources", Arguments: map[string]any{"kind": "services", "context": "none"}})
 	if err != nil {
 		t.Fatal(err)
@@ -493,7 +493,7 @@ func TestResourceReadsFailedSARCanRecover(t *testing.T) {
 			if err := call(); err == nil || !strings.Contains(err.Error(), "permission_check_failed") {
 				t.Fatalf("%s/%s first check: %v", kind, verb, err)
 			}
-			if err := call(); err == nil || !strings.Contains(err.Error(), "rbac_denied: your role") {
+			if err := call(); err == nil || !strings.Contains(err.Error(), "rbac_denied: Your Kubernetes access") {
 				t.Fatalf("%s/%s retry must establish denial: %v", kind, verb, err)
 			}
 			if calls != 2 {
@@ -560,13 +560,13 @@ type wireCoverage struct {
 	ScopeType     string
 	Scope         []string
 	NarrowedBy    []string
-	Note          string
+	Summary       string
 }
 
 // listBody decodes a list_resources result, failing unless it is the
 // documented shape: one text block and nothing else, holding exactly
-// {"coverage", "items"} with coverage first, and coverage holding the shared
-// single-kind coverage plus its note.
+// {"summary", "coverage", "items"} with the summary first, and coverage holding
+// the shared single-kind coverage.
 func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
 	t.Helper()
 	if result == nil || result.IsError || len(result.Content) != 1 || result.StructuredContent != nil {
@@ -574,24 +574,28 @@ func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wi
 	}
 	text := extractText(t, result)
 	// A reader that keeps only the head of a long result must keep the caveat.
-	if !strings.HasPrefix(text, `{"coverage":`) {
-		t.Fatalf("a list must lead with its coverage, got %.80s", text)
+	if !strings.HasPrefix(text, `{"summary":`) {
+		t.Fatalf("a list must lead with its summary, got %.80s", text)
 	}
 	var top map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(text), &top); err != nil || len(top) != 2 || top["items"] == nil || top["coverage"] == nil {
-		t.Fatalf("a list must be {\"coverage\", \"items\"}, got %s", text)
+	if err := json.Unmarshal([]byte(text), &top); err != nil || len(top) != 3 || top["items"] == nil || top["coverage"] == nil || top["summary"] == nil {
+		t.Fatalf("a list must be {\"summary\", \"coverage\", \"items\"}, got %s", text)
+	}
+	var summary string
+	if err := json.Unmarshal(top["summary"], &summary); err != nil || summary == "" {
+		t.Fatalf("a list must say what it covers in words, got %s", top["summary"])
 	}
 	var rows []map[string]any
 	if err := json.Unmarshal(top["items"], &rows); err != nil || rows == nil {
 		t.Fatalf("items must be an array, got %s", top["items"])
 	}
-	var coverage listCoverage
+	var coverage resourceapi.Coverage
 	if err := json.Unmarshal(top["coverage"], &coverage); err != nil || coverage.Read == nil || coverage.Gaps == nil ||
 		(coverage.Status != resourceapi.CoverageComplete && coverage.Status != resourceapi.CoveragePartial) ||
 		(coverage.Status == resourceapi.CoveragePartial) != (len(coverage.Gaps) > 0) {
 		t.Fatalf("invalid coverage: %s", top["coverage"])
 	}
-	out := wireCoverage{Status: string(coverage.Status), GapNamespaces: map[string][]string{}, ReadType: string(coverage.Read.Type), ScopeType: string(coverage.Scope.Type), Note: coverage.Note}
+	out := wireCoverage{Status: string(coverage.Status), GapNamespaces: map[string][]string{}, ReadType: string(coverage.Read.Type), ScopeType: string(coverage.Scope.Type), Summary: summary}
 	for _, gap := range coverage.Gaps {
 		out.Codes = append(out.Codes, string(gap.Code))
 		if gap.Namespaces != nil {
@@ -610,8 +614,8 @@ func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wi
 	for _, n := range coverage.NarrowedBy {
 		out.NarrowedBy = append(out.NarrowedBy, string(n))
 	}
-	if (coverage.Status == resourceapi.CoveragePartial || len(coverage.NarrowedBy) > 0) && coverage.Note == "" {
-		t.Fatalf("a partial or narrowed list must explain itself: %s", top["coverage"])
+	if (coverage.Status == resourceapi.CoveragePartial || len(coverage.NarrowedBy) > 0) && !strings.Contains(summary, "this list doesn't show") {
+		t.Fatalf("a partial or narrowed list must say what it can't show: %q", summary)
 	}
 	return rows, out
 }
@@ -620,8 +624,8 @@ func listBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wi
 func partialListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
 	t.Helper()
 	rows, coverage := listBody(t, result)
-	if coverage.Status != "partial" || !strings.Contains(coverage.Note, "cannot show that") {
-		t.Fatalf("want a partial list whose note says it cannot establish absence, got %+v", coverage)
+	if coverage.Status != "partial" || !strings.Contains(coverage.Summary, "may exist there that this list doesn't show") {
+		t.Fatalf("want a partial list whose summary says it cannot establish absence, got %+v", coverage)
 	}
 	return rows, coverage
 }
@@ -631,7 +635,7 @@ func partialListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]
 func narrowedListBody(t *testing.T, result *mcpsdk.CallToolResult) ([]map[string]any, wireCoverage) {
 	t.Helper()
 	rows, coverage := completeListBody(t, result)
-	if !slices.Contains(coverage.NarrowedBy, "collection") || coverage.ScopeType != "namespaces" || !strings.Contains(coverage.Note, "the namespaces Radar collects") {
+	if !slices.Contains(coverage.NarrowedBy, "collection") || coverage.ScopeType != "namespaces" || !strings.Contains(coverage.Summary, "Radar collects ") {
 		t.Fatalf("want a list narrowed by collection, got %+v", coverage)
 	}
 	return rows, coverage
@@ -745,7 +749,7 @@ func partialCoverageReason(class coverageClass) string {
 }
 
 func TestResourceReadsCollectorCoverageRule(t *testing.T) {
-	const anyHidden = "the collector's coverage does not include any namespace you can read"
+	const anyHidden = "in any namespace you can access"
 	cases := []struct {
 		name      string
 		caller    string // "" = auth disabled, "admin" = cluster-wide access, "restricted" = allowed
@@ -782,8 +786,8 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 		{name: "restricted partial overlap with an empty covered namespace", caller: "restricted", allowed: []string{"gamma", "beta"}, rows: []string{}, narrowed: true, read: []string{"gamma"}, uncollected: true},
 		{name: "no overlap", caller: "restricted", allowed: []string{"beta"}, wantErr: []string{`namespace "beta"`}, coverage: []string{anyHidden}, typedOnly: true, hidden: []string{"alpha", "gamma"}},
 		{name: "no overlap across namespaces", caller: "restricted", allowed: []string{"beta", "delta"}, wantErr: []string{`namespaces "beta,delta"`}, coverage: []string{anyHidden}, typedOnly: true, hidden: []string{"alpha", "gamma"}},
-		{name: "explicit uncovered", namespace: "beta", wantErr: []string{`namespace "beta"`}, coverage: []string{`covered namespaces you can read: "alpha,gamma"`}},
-		{name: "restricted explicit uncovered", caller: "restricted", allowed: []string{"alpha", "beta"}, namespace: "beta", wantErr: []string{`namespace "beta"`}, coverage: []string{`covered namespaces you can read: "alpha"`}, hidden: []string{"gamma"}},
+		{name: "explicit uncovered", namespace: "beta", wantErr: []string{`namespace "beta"`}, coverage: []string{`in namespaces "alpha,gamma".`}},
+		{name: "restricted explicit uncovered", caller: "restricted", allowed: []string{"alpha", "beta"}, namespace: "beta", wantErr: []string{`namespace "beta"`}, coverage: []string{`in namespace "alpha".`}, hidden: []string{"gamma"}},
 	}
 	for _, class := range []coverageClass{coverageTyped, coverageCRD, coverageDirect} {
 		for _, tc := range cases {
@@ -805,7 +809,7 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 					want := tc.wantErr
 					if (class != coverageDirect || tc.directCoverage) && (class == coverageTyped || !tc.typedOnly) {
 						want = append(slices.Clone(want), tc.coverage...)
-					} else if strings.Contains(err.Error(), "covered namespaces") || strings.Contains(err.Error(), anyHidden) {
+					} else if strings.Contains(err.Error(), "It collects ") || strings.Contains(err.Error(), anyHidden) {
 						t.Fatalf("%s cannot claim coverage it did not establish: %v", class, err)
 					}
 					for _, text := range want {
@@ -836,7 +840,7 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 					if coverage.Status != "complete" || len(coverage.Codes) != 0 || !slices.Equal(coverage.NarrowedBy, []string{"caller_access", "collection"}) || !slices.Equal(coverage.Read, tc.read) || !slices.Equal(coverage.Scope, tc.read) {
 						t.Fatalf("coverage = %+v, want read and scope %v narrowed by caller_access and collection", coverage, tc.read)
 					}
-					assertNoCollectorLeak(t, errors.New(coverage.Note), tc.hidden...)
+					assertNoCollectorLeak(t, errors.New(coverage.Summary), tc.hidden...)
 				default:
 					if coverage.Status != "complete" || len(coverage.Codes) != 0 {
 						t.Fatalf("coverage = %+v, want complete", coverage)
@@ -860,7 +864,7 @@ func TestResourceReadsCollectorCoverageRule(t *testing.T) {
 			if err == nil || !strings.HasPrefix(err.Error(), coverageReason(class)+":") || !strings.Contains(err.Error(), `namespace "beta"`) {
 				t.Fatalf("uncovered get: %v", err)
 			}
-			if class != coverageDirect && !strings.Contains(err.Error(), `covered namespaces you can read: "alpha"`) {
+			if class != coverageDirect && !strings.Contains(err.Error(), `in namespace "alpha".`) {
 				t.Fatalf("uncovered get must offer the caller's covered namespaces: %v", err)
 			}
 			assertNoCollectorLeak(t, err, "gamma")
@@ -980,7 +984,7 @@ func setupLoadingServicesFixture(t *testing.T, objects ...string) {
 	}
 }
 
-func TestListNoteBoundsNamespaceProse(t *testing.T) {
+func TestListSummaryBoundsNamespaceProse(t *testing.T) {
 	for _, count := range []int{1, 3, 8, 9, 40, 1000} {
 		t.Run(fmt.Sprintf("%d", count), func(t *testing.T) {
 			read := make([]string, count)
@@ -989,7 +993,7 @@ func TestListNoteBoundsNamespaceProse(t *testing.T) {
 			}
 			original := slices.Clone(read)
 			gaps := []resourceapi.Gap{{Code: readreason.CollectorScopeLimited}}
-			coverage := listCoverageFor("services", false, readTarget{}, read, false, gaps)
+			coverage := listCoverageFor(false, readTarget{}, read, false, gaps)
 			expected := slices.Clone(read)
 			slices.Sort(expected)
 			if !slices.Equal(read, original) || coverage.Read.Namespaces.Count != count || !slices.Equal(coverage.Read.Namespaces.Sample, expected[:min(count, resourceapi.MCPSample)]) {
@@ -1006,9 +1010,9 @@ func TestListNoteBoundsNamespaceProse(t *testing.T) {
 					where += fmt.Sprintf(" and %d more", count-resourceapi.MCPSample)
 				}
 			}
-			want := fmt.Sprintf("Radar read services only in %s. Not read: other namespaces (outside the namespaces Radar collects). This result cannot show that services there don't exist.", where)
-			if coverage.Note != want || coverage.Status != resourceapi.CoveragePartial {
-				t.Fatalf("note = %q, want %q", coverage.Note, want)
+			want := fmt.Sprintf("These are the services in %s only. Not read: part of the scope, because Radar doesn't collect services there (%s). Services may exist there that this list doesn't show.", where, collectionRemedy("services"))
+			if got := listSummary(context.Background(), "services", 1, coverage); got != want || coverage.Status != resourceapi.CoveragePartial {
+				t.Fatalf("summary = %q, want %q", got, want)
 			}
 		})
 	}
@@ -1049,14 +1053,22 @@ func TestListResourcesReportsCollectorCoverage(t *testing.T) {
 						if !slices.Equal(coverage.NarrowedBy, []string{"collection"}) || !slices.Equal(coverage.Read, []string{"alpha", "gamma"}) || !slices.Equal(coverage.Scope, []string{"alpha", "gamma"}) {
 							t.Fatalf("coverage = %+v, want narrowed by collection to alpha and gamma", coverage)
 						}
-						if want := fmt.Sprintf(`This list covers only namespaces "alpha", "gamma" (the namespaces Radar collects %s in). It says nothing about %s in other namespaces.`, kind, kind); coverage.Note != want {
-							t.Fatalf("note must name the kind and the namespaces collected, got %q", coverage.Note)
+						these := fmt.Sprintf(`These are the %s in namespaces "alpha", "gamma" only`, kind)
+						if len(rows) == 0 {
+							these = fmt.Sprintf(`There are no %s in namespaces "alpha", "gamma"`, kind)
+						}
+						if want := fmt.Sprintf(`%s: Radar collects %s only in those namespaces. Other namespaces may have %s this list doesn't show; %s.`, these, kind, kind, collectionRemedy(kind)); coverage.Summary != want {
+							t.Fatalf("summary must name the kind, the namespaces collected and who widens them, got %q", coverage.Summary)
 						}
 						assertNoCollectorLeak(t, errors.New(extractText(t, result)))
 					} else {
 						var coverage wireCoverage
 						rows, coverage = completeListBody(t, result)
-						if coverage.ScopeType != "all_namespaces" || coverage.ReadType != "all_namespaces" || coverage.Note != "" {
+						want := fmt.Sprintf("These are all the %s in every namespace.", kind)
+						if len(rows) == 0 {
+							want = fmt.Sprintf("There are no %s in any namespace.", kind)
+						}
+						if coverage.ScopeType != "all_namespaces" || coverage.ReadType != "all_namespaces" || coverage.Summary != want {
 							t.Fatalf("a complete unscoped list covers every namespace: %+v", coverage)
 						}
 					}
@@ -1342,7 +1354,7 @@ func TestResourceReadsNamespaceDenialAttribution(t *testing.T) {
 	ctx := withRestrictedUser(t, "attribution-reader", []string{"alpha"})
 	for _, kind := range []string{"pods", "widgets"} {
 		_, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: kind, Namespace: "beta"})
-		for _, text := range []string{"namespace_not_visible:", "not among the namespaces you can see", "beta", "list pods or deployments", "~2 minutes"} {
+		for _, text := range []string{"namespace_not_visible:", "doesn't exist or you can't access it", "beta", "list pods or deployments", "about every 2 minutes"} {
 			if err == nil || !strings.Contains(err.Error(), text) {
 				t.Fatalf("missing %s: %v", text, err)
 			}
@@ -1401,7 +1413,7 @@ func TestResourceReadsDynamicCollectorIntersection(t *testing.T) {
 		} else {
 			_, _, err = handleGetResource(context.Background(), nil, getResourceInput{Kind: "widgets", Namespace: "beta", Name: "x"})
 		}
-		if err == nil || !strings.HasPrefix(err.Error(), "collector_forbidden:") || !strings.Contains(err.Error(), `covered namespaces you can read: "alpha"`) {
+		if err == nil || !strings.HasPrefix(err.Error(), "collector_forbidden:") || !strings.Contains(err.Error(), `in namespace "alpha".`) {
 			t.Fatalf("%s explicit uncovered scope: %v", verb, err)
 		}
 		assertNoCollectorLeak(t, err)
@@ -1549,7 +1561,7 @@ func TestListResourcesUnderNamespacePinIsNarrowed(t *testing.T) {
 				if got := rowNames(rows); !slices.Equal(got, []string{"alpha-object"}) {
 					t.Fatalf("pinned list = %v, want alpha-object", got)
 				}
-				if !slices.Equal(coverage.NarrowedBy, []string{"namespace_pin"}) || !slices.Equal(coverage.Scope, []string{"alpha"}) || !strings.Contains(coverage.Note, "--namespace-scope pin") {
+				if !slices.Equal(coverage.NarrowedBy, []string{"namespace_pin"}) || !slices.Equal(coverage.Scope, []string{"alpha"}) || !strings.Contains(coverage.Summary, "Radar is set to read only that namespace (--namespace-scope)") {
 					t.Fatalf("pinned list must say the pin narrowed it: %+v", coverage)
 				}
 			})
@@ -1620,7 +1632,7 @@ func TestResourceReadsUnrestrictedDirectListsFallBackToCandidates(t *testing.T) 
 			{name: "cluster scope readable", candidates: []string{"alpha"}, readable: []string{"", "alpha", "beta", "gamma"}, rows: []string{"alpha-object", "beta-object", "gamma-object"}},
 			{name: "refused cluster-wide reads the candidates", candidates: []string{"alpha", "beta", "gamma"}, readable: []string{"alpha", "gamma"}, rows: []string{"alpha-object", "gamma-object"}},
 			{name: "refused everywhere", candidates: []string{"alpha", "beta"}, wantErr: []string{`namespaces "alpha,beta"`}},
-			{name: "refused cluster-wide with no candidates", wantErr: []string{"at cluster scope"}},
+			{name: "refused cluster-wide with no candidates", wantErr: []string{"across the cluster"}},
 		} {
 			for _, caller := range []string{"auth disabled", "cluster-wide"} {
 				t.Run(b.Kind+"/"+tc.name+"/"+caller, func(t *testing.T) {
@@ -1730,7 +1742,7 @@ func TestCollectorRefusalsNeverEchoTheAPIServerResponse(t *testing.T) {
 		t.Cleanup(k8s.ResetTestDynamicState)
 		for _, kind := range []string{"rollout", "application"} {
 			_, _, err := handleDiagnose(context.Background(), nil, diagnoseInput{diagnoseCommonInput: diagnoseCommonInput{Kind: kind, Namespace: "alpha", Name: "web"}})
-			if err == nil || !strings.HasPrefix(err.Error(), "collector_forbidden:") || strings.Contains(err.Error(), "resource not found") {
+			if err == nil || !strings.HasPrefix(err.Error(), "collector_forbidden:") || strings.Contains(err.Error(), "object_not_found") {
 				t.Fatalf("%s: a collector refusal is not an absent object: %v", kind, err)
 			}
 			assertNoCollectorLeak(t, err)
@@ -1951,12 +1963,12 @@ func TestResourceReadErrorDetails(t *testing.T) {
 	}
 	for _, verb := range []string{"list", "get"} {
 		_, err := checkDynamicResourceRead(context.Background(), "widgets", "example.test", "alpha", verb, fmt.Errorf("transport unavailable"))
-		if err == nil || !strings.HasPrefix(err.Error(), "read_error: failed to "+verb+" widgets") {
+		if err == nil || !strings.HasPrefix(err.Error(), "read_error: Radar failed to "+verb+" widgets") {
 			t.Fatalf("%s: %v", verb, err)
 		}
 	}
 	err := resourceGetError(context.Background(), fmt.Errorf("store unavailable"), "pods", "alpha", "present")
-	if !strings.HasPrefix(err.Error(), "read_error: failed to get pods alpha/present") {
+	if !strings.HasPrefix(err.Error(), "read_error: Radar failed to get pods alpha/present") {
 		t.Fatal(err)
 	}
 	namespaces := make([]string, 15)
@@ -2010,7 +2022,7 @@ func TestResourceReadsNonWatchableKindIsNotSupported(t *testing.T) {
 	t.Cleanup(k8s.ResetTestDynamicState)
 	for _, ns := range []string{"alpha", ""} {
 		_, _, err := handleListResources(context.Background(), nil, listResourcesInput{Kind: "reports", Group: "example.test", Namespace: ns})
-		if err == nil || !strings.HasPrefix(err.Error(), "kind_not_watchable: reports does not support list/watch") {
+		if err == nil || !strings.HasPrefix(err.Error(), "kind_not_watchable: Radar can't collect reports: its API doesn't support both list and watch") {
 			t.Fatalf("list ns=%q: %v", ns, err)
 		}
 	}
