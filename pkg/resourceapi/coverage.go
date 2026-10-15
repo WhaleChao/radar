@@ -20,11 +20,12 @@ const (
 	CoveragePartial CoverageStatus = "partial"
 )
 
-// Sample caps for the sets below: a REST response is rendered by Radar's UI,
-// an MCP response is read by a model.
+// The sets below list their members only when there are at most a
+// response's cap of them: a REST response is rendered by Radar's UI, an MCP
+// response is read by a model. Above the cap a set carries only its count.
 const (
-	RESTSample = 64
-	MCPSample  = 8
+	RESTSetLimit = 64
+	MCPSetLimit  = 8
 )
 
 type ScopeType string
@@ -53,13 +54,13 @@ const (
 	NarrowedByCollection Narrowing = "collection"
 )
 
-// NameSet is a known, finite set of names: Count members, the first of them
-// (sorted) in Sample. Sample is shorter than Count because of the cap, or
-// because names are withheld from the caller — a namespace they named but
-// can't see is counted, never named back.
+// NameSet is a known, finite set of names. Names, when present, is all of
+// them, sorted; it is absent when there are more than the response's cap, and
+// then only Count says how many. A reader learns membership from Names or not
+// at all.
 type NameSet struct {
-	Count  int      `json:"count"`
-	Sample []string `json:"sample"`
+	Count int      `json:"count"`
+	Names []string `json:"names,omitzero"`
 }
 
 // Names builds a NameSet from names, which must already be safe to show the
@@ -68,7 +69,15 @@ func Names(names []string, limit int) *NameSet {
 	names = slices.Clone(names)
 	slices.Sort(names)
 	names = slices.Compact(names)
-	return &NameSet{Count: len(names), Sample: capped(names, limit)}
+	return &NameSet{Count: len(names), Names: listed(names, len(names), limit)}
+}
+
+// Capped is the set as a response with a smaller cap would carry it.
+func (s *NameSet) Capped(limit int) *NameSet {
+	if s == nil {
+		return nil
+	}
+	return &NameSet{Count: s.Count, Names: listed(s.Names, s.Count, limit)}
 }
 
 // KindRef names a kind. An omitted group is the core group.
@@ -77,9 +86,10 @@ type KindRef struct {
 	Group string `json:"group,omitempty"`
 }
 
+// KindSet is a NameSet of kinds.
 type KindSet struct {
-	Count  int       `json:"count"`
-	Sample []KindRef `json:"sample"`
+	Count int       `json:"count"`
+	Names []KindRef `json:"names,omitzero"`
 }
 
 func Kinds(kinds []KindRef, limit int) *KindSet {
@@ -88,7 +98,14 @@ func Kinds(kinds []KindRef, limit int) *KindSet {
 		return cmp.Or(strings.Compare(a.Kind, b.Kind), strings.Compare(a.Group, b.Group))
 	})
 	kinds = slices.Compact(kinds)
-	return &KindSet{Count: len(kinds), Sample: capped(kinds, limit)}
+	return &KindSet{Count: len(kinds), Names: listed(kinds, len(kinds), limit)}
+}
+
+func (s *KindSet) Capped(limit int) *KindSet {
+	if s == nil {
+		return nil
+	}
+	return &KindSet{Count: s.Count, Names: listed(s.Names, s.Count, limit)}
 }
 
 // ObjectRef names one object. An omitted group is the core group; an omitted
@@ -100,23 +117,34 @@ type ObjectRef struct {
 	Name      string `json:"name"`
 }
 
+// ObjectSet is a NameSet of objects.
 type ObjectSet struct {
-	Count  int         `json:"count"`
-	Sample []ObjectRef `json:"sample"`
+	Count int         `json:"count"`
+	Names []ObjectRef `json:"names,omitzero"`
 }
 
-// Objects builds an ObjectSet of count members from a sample that may already
-// be shorter than count.
-func Objects(sample []ObjectRef, count, limit int) *ObjectSet {
-	return &ObjectSet{Count: max(count, len(sample)), Sample: capped(slices.Clone(sample), limit)}
+// Objects builds an ObjectSet of count members. known holds the ones the
+// caller collected, which may be fewer than count; the set lists them only
+// when they are all of it.
+func Objects(known []ObjectRef, count, limit int) *ObjectSet {
+	count = max(count, len(known))
+	return &ObjectSet{Count: count, Names: listed(known, count, limit)}
 }
 
-func capped[T any](items []T, limit int) []T {
-	items = items[:min(len(items), max(0, limit))]
-	if items == nil {
-		return []T{}
+func (s *ObjectSet) Capped(limit int) *ObjectSet {
+	if s == nil {
+		return nil
 	}
-	return items
+	return &ObjectSet{Count: s.Count, Names: listed(s.Names, s.Count, limit)}
+}
+
+// listed is items as a set of count members lists them: all of them, or
+// nothing when they are not all known or there are more than limit.
+func listed[T any](items []T, count, limit int) []T {
+	if len(items) != count || count > max(0, limit) {
+		return nil
+	}
+	return append([]T{}, items...)
 }
 
 type Scope struct {

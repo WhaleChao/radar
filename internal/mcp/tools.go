@@ -127,8 +127,8 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 			"(pods/po, deployments/deploy, services/svc, configmaps/cm, CRDs). Returns compact Kubernetes-shaped " +
 			"rows plus summaryContext by default (managedBy, health, issueCount) so you can " +
 			"compare many similar resources and pick suspects before calling get_resource. " +
-			"Returns {summary, coverage, items}: summary says in words what the rows cover, what was not read and " +
-			"what to do about it; coverage holds the same as data. Failures return {error, error_code}, where error says it in words. " +
+			"Returns {summary, next?, coverage, items}: summary says in words what the rows cover and what was not read; " +
+			"next, when present, is what you can do to complete it; coverage holds the same as data. Failures return {error, error_code, next?}. " +
 			"For unknown kind/name searches, use search. For broad health triage, use " +
 			"get_dashboard or issues first.",
 		Annotations: readOnly,
@@ -945,7 +945,7 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 		if errors.As(err, &re) {
 			return nil, nil, err
 		}
-		return nil, nil, readErrorf(readreason.ReadError, "Radar failed to list %s, so it can't say what exists (%w). Retry in a few seconds; if it keeps failing, report this error.", kind, err)
+		return nil, nil, readErrorf(readreason.ReadError, "Radar failed to list %s, so it can't say what exists (%w).", kind, err)
 	}
 
 	if listScope != nil {
@@ -975,7 +975,7 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 	if !resourceReadCacheIsCurrent(cache) {
 		return nil, nil, errConnectionChanged()
 	}
-	return listResult(ctx, kind, results, listCoverageFor(clusterScoped, target, read, readAll, gaps.gaps(ctx, resourceapi.MCPSample)))
+	return listResult(ctx, kind, results, listCoverageFor(clusterScoped, target, read, readAll, gaps.gaps(ctx, resourceapi.MCPSetLimit)))
 }
 
 // listDynamicResources lists a kind the dynamic cache serves. namespaces is
@@ -1151,7 +1151,7 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 	if !current() {
 		return nil, nil, errConnectionChanged()
 	}
-	return listResult(ctx, collector.resource, allItems, listCoverageFor(clusterScoped, target, read, readAll, gaps.gaps(ctx, resourceapi.MCPSample)))
+	return listResult(ctx, collector.resource, allItems, listCoverageFor(clusterScoped, target, read, readAll, gaps.gaps(ctx, resourceapi.MCPSetLimit)))
 }
 
 // readErrorCodeOf classifies one namespace's failed dynamic read. An API
@@ -1199,11 +1199,12 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 			}
 			if !known {
 				if discovery == nil {
-					return nil, nil, readErrorf(readreason.KindSyncPending, "Radar is still discovering this cluster's resource kinds, so it can't resolve %q yet. Retry in a few seconds.", kind)
+					return nil, nil, readErrorf(readreason.KindSyncPending, "Radar is still discovering this cluster's resource kinds, so it can't resolve %q yet.", kind)
 				}
-				return nil, nil, readErrorf(readreason.KindUnknown, "Radar doesn't know a resource kind named %q in this cluster, so it read nothing. Check the spelling, pass group for a custom resource, or confirm its CRD is installed.", kind)
+				return nil, nil, readErrorf(readreason.KindUnknown, "Radar doesn't know a resource kind named %q in this cluster, so it read nothing.", kind)
 			}
-			return nil, nil, readErrorf(readreason.NamespaceRequired, "%s live in namespaces: call get_resource again with namespace set.", upperFirst(kind))
+			return nil, nil, &readError{code: readreason.NamespaceRequired, err: fmt.Errorf("%s live in namespaces, so get_resource needs one.", upperFirst(kind)),
+				next: fmt.Sprintf("Call get_resource again with namespace set. If you don't know it, call search with query %q to find it.", name)}
 		}
 		if _, err := resourceReadNamespaces(ctx, []string{namespace}); err != nil {
 			return nil, nil, err

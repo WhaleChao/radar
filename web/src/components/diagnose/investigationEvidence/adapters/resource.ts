@@ -270,14 +270,16 @@ function listedRows(
       },
     };
   }
+  // A set lists every name or, when it is too large, none: then which
+  // namespaces were read is unknown and only the count is.
   const set = record(read.namespaces);
-  const sample = stringArray(set?.sample);
   const count = set?.count;
+  const names = set?.names === undefined ? [] : stringArray(set.names);
   if (
-    !sample ||
+    !names ||
     typeof count !== "number" ||
     !Number.isInteger(count) ||
-    count < sample.length
+    (set?.names !== undefined && names.length !== count)
   ) {
     return undefined;
   }
@@ -286,8 +288,8 @@ function listedRows(
     coverage: {
       partial: status === "partial",
       narrowed,
-      namespacesRead: sample,
-      namespacesReadOmitted: count - sample.length,
+      namespacesRead: names,
+      namespacesReadOmitted: count - names.length,
       summary,
     },
   };

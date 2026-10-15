@@ -58,7 +58,7 @@ func TestPartialListCoverageSurvivesEveryAgentBackend(t *testing.T) {
 			Items    []json.RawMessage     `json:"items"`
 			Coverage *resourceapi.Coverage `json:"coverage"`
 		}
-		if err := json.Unmarshal([]byte(payload), &list); err != nil || list.Items == nil || list.Coverage == nil || list.Coverage.Status != resourceapi.CoveragePartial || list.Coverage.Read == nil || list.Coverage.Read.Namespaces == nil || len(list.Coverage.Read.Namespaces.Sample) == 0 {
+		if err := json.Unmarshal([]byte(payload), &list); err != nil || list.Items == nil || list.Coverage == nil || list.Coverage.Status != resourceapi.CoveragePartial || list.Coverage.Read == nil || list.Coverage.Read.Namespaces == nil || len(list.Coverage.Read.Namespaces.Names) == 0 {
 			t.Fatalf("%s: the fixture must hold a partial list, got %s", tc.Name, payload)
 		}
 

@@ -102,7 +102,7 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
     const projection = projectCase("partial and empty");
     expect(groupsOf(projection.groups, "inventory")).toEqual([]);
     expect(projection.limitations.map((item) => item.message)).toEqual([
-      'Radar found no services in namespace "alpha". Not read: namespace "gamma", because Radar is still loading services there (retry in a few seconds). Services may exist there that this list doesn\'t show. Other namespaces weren\'t read either: Radar collects services only in namespaces "alpha", "gamma"; whoever installed Radar can add namespaces with --namespaces through the chart\'s extraArgs, if its service account can list services there.',
+      'Radar found no services in namespace "alpha". Not read: namespace "gamma", because Radar is still loading services there. Services may exist there that this list doesn\'t show. Other namespaces weren\'t read either: Radar collects services only in namespaces "alpha", "gamma"; whoever installed Radar can add namespaces with --namespaces through the chart\'s extraArgs, if its service account can list services there.',
     ]);
     expect(investigationEvidenceCoverageLimited(projection, "Service")).toBe(
       true,
@@ -119,12 +119,12 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
       scope: { type: "all_namespaces" },
       read: {
         type: "namespaces",
-        namespaces: { count: 40, sample: namespaces.slice(0, 8) },
+        namespaces: { count: 40 },
       },
       gaps: [{ code: "collector_scope_limited" }],
     };
     const summary =
-      'These are the services in namespaces "team-01", "team-02", "team-03", "team-04", "team-05", "team-06", "team-07", "team-08" and 32 more only. Not read: part of the scope, because Radar doesn\'t collect services there. Services may exist there that this list doesn\'t show.';
+      "These are the services in 40 namespaces only. Not read: part of the scope, because Radar doesn't collect services there. Services may exist there that this list doesn't show.";
     const rows = [
       { kind: "Service", name: "present", namespace: namespaces[0] },
       { kind: "Service", name: "observed", namespace: "team-39" },
@@ -144,8 +144,8 @@ describe("a list Radar read only in some of the namespaces it collects", () => {
       throw new Error("expected an inventory card");
     }
     const data = inventory.latest.data;
-    expect(data.namespacesRead).toEqual(namespaces.slice(0, 8));
-    expect(data.namespacesReadOmitted).toBe(32);
+    expect(data.namespacesRead).toEqual([]);
+    expect(data.namespacesReadOmitted).toBe(40);
     expect(inventory.latest.summary).toBe(
       "2 returned · only 40 namespaces read",
     );
@@ -338,12 +338,12 @@ describe("a list Radar read all of", () => {
       status: "complete",
       scope: {
         type: "namespaces",
-        namespaces: { count: 2, sample: ["alpha", "beta"] },
+        namespaces: { count: 2, names: ["alpha", "beta"] },
       },
       narrowedBy: ["caller_access"],
       read: {
         type: "namespaces",
-        namespaces: { count: 2, sample: ["alpha", "beta"] },
+        namespaces: { count: 2, names: ["alpha", "beta"] },
       },
       gaps: [],
     };
