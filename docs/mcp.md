@@ -507,8 +507,10 @@ namespace whose informer has synced is read even while another is loading. A
 namespace you name that Radar doesn't collect, or was refused in, is a gap too;
 on an unscoped request those namespaces narrow it (`collection`) instead.
 
-Namespaces you can see but whose Secrets you can't list are an `rbac_denied`
-gap on a Secret list. Cluster-scoped kinds and unrestricted Secret lists keep
+Secrets and LimitRanges need your exact permission, not just namespace
+visibility: namespaces you can see but can't list them in are an
+`rbac_denied` gap (or `permission_check_failed` when the check didn't
+complete). Cluster-scoped kinds and unscoped Secret or LimitRange lists keep
 exact per-kind permission checks and fail with `rbac_denied`. Namespace lists
 use the full collector list after the list-namespaces permission check.
 

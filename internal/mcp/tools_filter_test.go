@@ -605,6 +605,29 @@ func TestHandleListResources_Secrets_UncheckedNamespaceIsAGap(t *testing.T) {
 	}
 }
 
+// LimitRanges need the caller's exact permission, as on the REST routes and
+// in search: a namespace they can see but not list LimitRanges in is a gap,
+// and a get there is denied.
+func TestLimitRangesNeedExactAccess(t *testing.T) {
+	setupFakeCacheForFilterTests(t)
+	ctx := withRestrictedUser(t, "alice", []string{"alpha", "beta"})
+	perms := getPermCache().Get("alice", nil)
+	perms.SetCanI("list", "", "limitranges", "alpha", true)
+	perms.SetCanI("list", "", "limitranges", "beta", false)
+	perms.SetCanI("get", "", "limitranges", "beta", false)
+
+	result, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: "limitranges"})
+	if err != nil {
+		t.Fatalf("handleListResources: %v", err)
+	}
+	if _, coverage := partialListBody(t, result); !slices.Equal(coverage.GapNamespaces["rbac_denied"], []string{"beta"}) || !slices.Equal(coverage.Read, []string{"alpha"}) {
+		t.Errorf("a namespace without LimitRange access must be a gap: %+v", coverage)
+	}
+	if _, _, err := handleGetResource(ctx, nil, getResourceInput{Kind: "limitranges", Namespace: "beta", Name: "limits"}); err == nil || !strings.HasPrefix(err.Error(), "rbac_denied: ") {
+		t.Errorf("get without LimitRange access: %v", err)
+	}
+}
+
 func TestHandleListResources_Secrets_ClusterWideShape_NoSecretRBAC(t *testing.T) {
 	// User with AllowedNamespaces==nil (cluster-wide namespace sentinel from
 	// DiscoverNamespaces stage 1: list-pods cluster-wide) but no cluster-scope
