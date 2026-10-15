@@ -10,6 +10,8 @@ describe('searchCoverageNote', () => {
   it('offers a kind re-check for a broad read error, with an action when supported', () => {
     const failed = [entry('Certificate', 'read_error', 'cert-manager.io')]
     expect(searchCoverageNote(failed, { query: 'renewal' })?.text).toBe("Couldn't read Certificate; matches of that kind may be missing. Search kind:Certificate to re-check.")
+    // Kinds too many to name are counted, with the way to re-check one.
+    expect(searchCoverageNote([entry('*', 'read_error', '', 10)], { query: 'renewal' })?.text).toBe("Couldn't read 10 kinds; matches of those kinds may be missing. Search kind:<name> to re-check one.")
     const recheckKind = vi.fn()
     const note = searchCoverageNote(failed, { query: 'renewal', recheckKind })
     expect(note?.text).toBe("Couldn't read Certificate; matches of that kind may be missing. Search")

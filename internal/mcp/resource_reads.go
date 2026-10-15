@@ -54,6 +54,11 @@ func readErrorResult(err error) (*mcp.CallToolResult, bool) {
 		return nil, false
 	}
 	next := re.next
+	if next == "" && re.coverage != nil {
+		// A failed list's gaps can have causes other than its code, and
+		// some of them clear on their own.
+		next = retrySteps(*re.coverage)
+	}
 	if next == "" {
 		next = errorNext(re.code)
 	}
@@ -87,8 +92,6 @@ func errorNext(code readreason.Code) string {
 		return "Retry in a few seconds; if it keeps failing, report the error to whoever runs Radar."
 	case readreason.KindWatchFailed:
 		return "Retry: the retry starts the watch again."
-	case readreason.NamespaceNotVisible:
-		return "Call list_namespaces to see the namespaces you can access."
 	case readreason.KindUnknown:
 		return "Check the spelling, or pass group for a custom resource; list_resources with kind=customresourcedefinitions lists the custom kinds installed here."
 	}
@@ -171,7 +174,13 @@ func resolveReadTarget(ctx context.Context, requested []string) (readTarget, err
 			if len(clamped) > 1 {
 				scope = fmt.Sprintf("Namespaces %q don't exist or you can't access them", namespaceForError(clamped))
 			}
-			return target, readErrorf(readreason.NamespaceNotVisible, "%s, so Radar can't say what's in it. If the name is right, a cluster admin can grant access %s", scope, namespaceAccessRule)
+			err := &readError{code: readreason.NamespaceNotVisible, err: fmt.Errorf("%s, so Radar can't say what's in it. If the name is right, a cluster admin can grant access %s", scope, namespaceAccessRule)}
+			// list_namespaces needs Radar to list Namespaces, which an identity
+			// limited to some namespaces may not be allowed to.
+			if cache := k8s.GetResourceCache(); cache != nil && cache.Namespaces() != nil {
+				err.next = "Call list_namespaces to see the namespaces you can access."
+			}
+			return target, err
 		}
 		return target, readErrorf(readreason.NoNamespaceAccess, "You can't access any namespace in this request's scope, so Radar read nothing. A cluster admin can grant access %s", namespaceAccessRule)
 	}
@@ -567,6 +576,19 @@ func gapReason(ctx context.Context, resource string, code readreason.Code) (why,
 // counts namespaces it couldn't name, so the agent can't tell whether the one
 // it cares about was read.
 func listNext(cov resourceapi.Coverage) string {
+	steps := []string{}
+	if retry := retrySteps(cov); retry != "" {
+		steps = append(steps, retry)
+	}
+	if countsUnnamedNamespaces(cov) {
+		steps = append(steps, "To check one namespace, call list_resources again with namespace set to it.")
+	}
+	return strings.Join(steps, " ")
+}
+
+// retrySteps says when retrying would read the parts of cov that clear on
+// their own, or "" when none would.
+func retrySteps(cov resourceapi.Coverage) string {
 	var steps []string
 	for _, when := range []string{"in a few seconds", "in a minute"} {
 		var where []string
@@ -587,9 +609,6 @@ func listNext(cov resourceapi.Coverage) string {
 		case len(where) > 0:
 			steps = append(steps, fmt.Sprintf("Retry %s to read %s.", when, namespacePhrase(resourceapi.Names(where, resourceapi.MCPSetLimit))))
 		}
-	}
-	if countsUnnamedNamespaces(cov) {
-		steps = append(steps, "To check one namespace, call list_resources again with namespace set to it.")
 	}
 	return strings.Join(steps, " ")
 }

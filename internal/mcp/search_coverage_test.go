@@ -279,6 +279,9 @@ func TestCoverageHintTemplates(t *testing.T) {
 		{"failures fold", hintResult{Unsearched: []hintEntry{
 			{Kind: "*", Reason: readreason.ReadError, Count: 1}, gap("Certificate", "cert-manager.io", readreason.KindSyncFailed), gap("Issuer", "cert-manager.io", readreason.ReadError),
 		}}, "Couldn't read 3 kinds (Certificate, Issuer, …); matches of those kinds may be missing. Retry with kind:Issuer for a kind you need before concluding absence."},
+		// Kinds too many to name still get the way to re-check one.
+		{"failures counted", hintResult{Unsearched: []hintEntry{{Kind: "*", Reason: readreason.ReadError, Count: 10}}},
+			"Couldn't read 10 kinds; matches of those kinds may be missing. Retry with kind:<Kind> for a kind you need before concluding absence."},
 		{"rbac", hintResult{Unsearched: []hintEntry{gap("Secret", "", readreason.RBACDenied)}},
 			"Your access doesn't include all Secrets; this result says nothing about the rest."},
 		{"rbac cluster-scoped", hintResult{Unsearched: []hintEntry{gap("Node", "", readreason.RBACDenied), gap("ClusterRole", "rbac.authorization.k8s.io", readreason.RBACDenied)}},

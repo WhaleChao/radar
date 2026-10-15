@@ -479,7 +479,7 @@ agent's next move:
 |---|---|
 | Part of the answer clears on its own: still loading, a permission check that failed, a watch that failed to start, an unexpected error | Retry, and when: "Retry in a few seconds to read namespace \"gamma\"." (a minute for a load that missed its deadline) |
 | The answer counts namespaces it can't name, so the agent can't tell whether the one it cares about was read | "To check one namespace, call list_resources again with namespace set to it." |
-| The request can't be answered as asked: a get with no namespace, a kind Radar doesn't know, a namespace you can't see, an object that isn't there | The narrower or different call: set `namespace`, `search` for the name, `list_resources kind=customresourcedefinitions`, `list_namespaces`, or the same name under another kind or namespace |
+| The request can't be answered as asked: a get with no namespace, a kind Radar doesn't know, a namespace you can't see, an object that isn't there | The narrower or different call: set `namespace`; `search` for `kind:<kind> <name>` (naming the kind reaches kinds a broad search skips); `list_resources kind=customresourcedefinitions`; `list_namespaces`, when Radar can list namespaces; or the same name under another kind or namespace |
 
 A denial (`rbac_denied`), and anything Radar's own identity or configuration
 blocks, has no `next`: retrying won't change it, and its `error` names who can.
@@ -572,9 +572,11 @@ text block are the same body:
 ```
 
 Branch on `error_code`. A failure the agent can act on itself carries `next`,
-as on lists (`namespace_required`: set `namespace` or `search` for the name;
-`object_not_found`: the same name under another kind or namespace, else
-`search`). A list error carries `coverage` when Radar assessed the
+as on lists (`namespace_required`: set `namespace`, or `search` for
+`kind:<kind> <name>`; `object_not_found`: the same name under another kind or
+namespace, else that `search`). A list that read nothing takes its `next` from
+every gap, so a retry that would recover one namespace is offered even when
+the code names a denial. A list error carries `coverage` when Radar assessed the
 scope; it has no `read`, because nothing was read, and its gaps keep every
 cause when namespaces failed for different reasons. `error_code` is then the
 most actionable of them. A get of an object that isn't there is

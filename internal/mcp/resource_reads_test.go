@@ -430,7 +430,7 @@ func TestResourceReadToolErrorTransport(t *testing.T) {
 		{"list_resources", map[string]any{"kind": "nodes"}, "rbac_denied", "Your Kubernetes access doesn't allow you to list nodes across the cluster", ""},
 		{"get_resource", map[string]any{"kind": "nodes", "name": "hidden"}, "rbac_denied", "Your Kubernetes access doesn't allow you to get nodes across the cluster", ""},
 		{"get_resource", map[string]any{"kind": "pods", "name": "hidden"}, "namespace_required", "Pods live in namespaces, so get_resource needs one.",
-			`Call get_resource again with namespace set. If you don't know it, call search with query "hidden" to find it.`},
+			`Call get_resource again with namespace set. If you don't know it, call search with query "kind:pods hidden" to find it.`},
 	} {
 		result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: tc.name, Arguments: tc.arguments})
 		if err != nil {
@@ -449,7 +449,7 @@ func TestResourceReadToolErrorTransport(t *testing.T) {
 	}
 	body := wire(result)
 	assertReadErrorWire(t, "get_resource absent", body, extractText(t, result), "object_not_found", `No pods named "absent" exist in namespace "alpha".`)
-	if next, _ := body["structuredContent"].(map[string]any)["next"].(string); next != `Call search with query "absent" to look for it under every kind and namespace you can read.` {
+	if next, _ := body["structuredContent"].(map[string]any)["next"].(string); next != `Call search with query "kind:pods absent" to look for it in every namespace you can read.` {
 		t.Fatalf("a miss points at search: next = %q", next)
 	}
 	result, err = session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "list_resources", Arguments: map[string]any{"kind": "services", "context": "none"}})
@@ -1392,8 +1392,20 @@ func TestResourceReadsNamespaceDenialAttribution(t *testing.T) {
 		if strings.Contains(err.Error(), "your role cannot list") || strings.Contains(err.Error(), "API group") {
 			t.Fatalf("namespace membership cannot claim exact SAR: %v", err)
 		}
+		if next := readErrorNext(t, err); next != "Call list_namespaces to see the namespaces you can access." {
+			t.Fatalf("a caller who named an unseen namespace is pointed at list_namespaces, got %q", next)
+		}
 	}
-	err := resourcePermissionError(true, "list", "", "secrets", namespaceForError([]string{"alpha", "beta"}))
+	// list_namespaces can't answer when Radar's identity can't list Namespaces.
+	k8s.ResetResourceCache()
+	if err := k8s.InitScopedTestResourceCache(fake.NewClientset(), map[string]k8score.ResourceScope{k8score.Pods: {Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: "pods", Namespace: "beta"})
+	if next := readErrorNext(t, err); next != "" {
+		t.Fatalf("no dead-end hint without a namespace list, got %q", next)
+	}
+	err = resourcePermissionError(true, "list", "", "secrets", namespaceForError([]string{"alpha", "beta"}))
 	if strings.Contains(err.Error(), "at cluster scope") || !strings.Contains(err.Error(), "beta") {
 		t.Fatal(err)
 	}
@@ -2196,5 +2208,30 @@ func TestNotConnectedErrorsCarryCodes(t *testing.T) {
 		if !errors.As(err, &re) || re.code != tc.want {
 			t.Fatalf("%+v: got %v, want %s", tc.status, err, tc.want)
 		}
+	}
+}
+
+// readErrorNext is the next an MCP client gets with a read failure.
+func readErrorNext(t *testing.T, err error) string {
+	t.Helper()
+	result, ok := readErrorResult(err)
+	if !ok {
+		t.Fatalf("not a read failure: %v", err)
+	}
+	return result.StructuredContent.(mcpReadError).Next
+}
+
+// A list that read nothing can fail for several reasons at once; the code
+// names the most actionable, and next still offers the retry that can recover
+// another part.
+func TestFailedListNextComesFromEveryGap(t *testing.T) {
+	cov := &resourceapi.Coverage{Status: resourceapi.CoveragePartial, Scope: resourceapi.Scope{Type: resourceapi.ScopeNamespaces, Namespaces: resourceapi.Names([]string{"alpha", "beta"}, resourceapi.MCPSetLimit)},
+		Gaps: []resourceapi.Gap{
+			{Code: readreason.RBACDenied, Namespaces: resourceapi.Names([]string{"alpha"}, resourceapi.MCPSetLimit)},
+			{Code: readreason.KindSyncFailed, Namespaces: resourceapi.Names([]string{"beta"}, resourceapi.MCPSetLimit)},
+		}}
+	err := &readError{code: readreason.RBACDenied, err: errors.New("denied"), coverage: cov}
+	if next := readErrorNext(t, err); next != `Retry in a minute to read namespace "beta".` {
+		t.Fatalf("next = %q", next)
 	}
 }

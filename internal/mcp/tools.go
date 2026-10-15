@@ -1204,7 +1204,7 @@ func handleGetResource(ctx context.Context, req *mcp.CallToolRequest, input getR
 				return nil, nil, readErrorf(readreason.KindUnknown, "Radar doesn't know a resource kind named %q in this cluster, so it read nothing.", kind)
 			}
 			return nil, nil, &readError{code: readreason.NamespaceRequired, err: fmt.Errorf("%s live in namespaces, so get_resource needs one.", upperFirst(kind)),
-				next: fmt.Sprintf("Call get_resource again with namespace set. If you don't know it, call search with query %q to find it.", name)}
+				next: fmt.Sprintf("Call get_resource again with namespace set. If you don't know it, call search with query %q to find it.", "kind:"+kind+" "+name)}
 		}
 		if _, err := resourceReadNamespaces(ctx, []string{namespace}); err != nil {
 			return nil, nil, err
