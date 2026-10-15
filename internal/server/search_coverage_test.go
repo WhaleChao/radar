@@ -83,7 +83,6 @@ func TestSearchNewNamespacedKindsReportCallerDenial(t *testing.T) {
 func TestSearchOrdinaryNamespacedKindsUseNamespaceVisibility(t *testing.T) {
 	useTestResourceCache(t, fake.NewClientset(
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"}},
-		&corev1.LimitRange{ObjectMeta: metav1.ObjectMeta{Name: "limits", Namespace: "default"}},
 		&corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "default"}},
 		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "default"}},
 	))
@@ -91,7 +90,7 @@ func TestSearchOrdinaryNamespacedKindsUseNamespaceVisibility(t *testing.T) {
 	perms := &auth.UserPermissions{AllowedNamespaces: []string{"default"}}
 	env.srv.permCache.Set("search-ordinary", nil, perms)
 	for _, tc := range []struct{ kind, group, resource string }{
-		{"ServiceAccount", "", "serviceaccounts"}, {"LimitRange", "", "limitranges"},
+		{"ServiceAccount", "", "serviceaccounts"},
 		{"ResourceQuota", "", "resourcequotas"}, {"NetworkPolicy", "networking.k8s.io", "networkpolicies"},
 	} {
 		perms.SetCanI("list", tc.group, tc.resource, "", false)

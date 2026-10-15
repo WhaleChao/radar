@@ -1004,7 +1004,7 @@ func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, g
 				if k8s.ShouldBypassDynamicInformer(gvr) {
 					return dynamicCache.ListDirect(ctx, gvr, ns)
 				}
-				return dynamicCache.List(gvr, ns)
+				return dynamicCache.ListContext(ctx, gvr, ns)
 			}
 			return cache.ListDynamicWithGroup(ctx, kind, ns, group)
 		}
@@ -3492,6 +3492,9 @@ func handleSearch(ctx context.Context, req *mcp.CallToolRequest, input searchInp
 		}
 	}
 	result, err := search.Search(ctx, provider, parsed, opts)
+	if errors.Is(err, search.ErrConnectionChanged) || (err == nil && !provider.Current()) {
+		return nil, nil, errConnectionChanged()
+	}
 	if err != nil {
 		return nil, nil, err
 	}

@@ -133,6 +133,9 @@ var coverageTemplates = []coverageTemplate{
 	{[]readreason.Code{readreason.CollectorForbidden}, func(e, _ []hintEntry) string {
 		return fmt.Sprintf("Radar isn't allowed to read %s on this cluster; granting you access won't help.", joinKinds(e, "or", kindPlural))
 	}},
+	{[]readreason.Code{readreason.KindNotWatched}, func(e, _ []hintEntry) string {
+		return fmt.Sprintf("Radar doesn't watch %s on this cluster, so they weren't searched.", joinKinds(e, "or", kindPlural))
+	}},
 }
 
 // coverageHint explains a partial search result to an agent: one sentence per

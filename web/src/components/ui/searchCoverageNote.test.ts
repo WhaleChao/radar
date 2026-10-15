@@ -47,6 +47,7 @@ describe('searchCoverageNote', () => {
   it('explains a named kind the caller or Radar cannot read', () => {
     expect(searchCoverageNote([entry('Secret', 'rbac_denied')], {})?.text).toBe("Your access doesn't include all Secrets.")
     expect(searchCoverageNote([entry('Secret', 'collector_forbidden')], {})?.text).toBe("Radar isn't allowed to read Secrets on this cluster.")
+    expect(searchCoverageNote([entry('Role', 'kind_not_watched')], {})?.text).toBe("Radar doesn't watch Roles on this cluster, so they weren't searched.")
   })
 
   it('treats an unrecognized kind as not installed or misspelled, unless API groups went undiscovered', () => {
@@ -181,7 +182,7 @@ describe('large named target lists', () => {
       expect(gaps[0].namespaces).toEqual(names)
     },
   )
-  it.each(['kind_unknown', 'rbac_denied', 'collector_forbidden', 'kind_not_watchable'])(
+  it.each(['kind_unknown', 'rbac_denied', 'collector_forbidden', 'kind_not_watchable', 'kind_not_watched'])(
     'caps %s kind prose and preserves exact entries', (reason) => {
       const gaps = names.map((kind) => entry(kind, reason))
       const text = searchCoverageNote(gaps, {})!.text

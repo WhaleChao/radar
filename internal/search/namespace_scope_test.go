@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/resourceapi"
 )
 
 func TestScopeNamespaces(t *testing.T) {
@@ -162,6 +164,11 @@ func TestNamespaceCoverageNamesOnlyNamedNamespaces(t *testing.T) {
 			res, _ := Search(context.Background(), p, q, opts)
 			if !reflect.DeepEqual(unsearched(res), tc.want) || partial(res) != (len(tc.want) > 0) || len(res.Hits) != tc.hits {
 				t.Fatalf("coverage %+v hits %v, want %+v and %d hits", unsearched(res), hitNames(res), tc.want, tc.hits)
+			}
+			// Without ns:, what Radar doesn't collect narrowed the search
+			// instead of leaving a gap in it.
+			if collected := slices.Contains(res.Coverage.NarrowedBy, resourceapi.NarrowedByCollection); tc.collectorLimited && len(q.NSFilter) == 0 && !collected {
+				t.Fatalf("narrowedBy = %v, want collection", res.Coverage.NarrowedBy)
 			}
 		})
 	}

@@ -705,7 +705,11 @@ What gets reported follows from that:
   names; on a broad query it adds to `narrowedBy` instead. A namespace reason is a
   gap only for a namespace an `ns:` term (or the MCP `namespace` argument) names.
   So `ns:` alone never yields per-kind gaps, and `kind:` alone never yields
-  namespace or collection-scope gaps. `kind_not_watched` is never reported.
+  namespace or collection-scope gaps. A named kind Radar doesn't watch at all is
+  `kind_not_watched`. Kinds search can never watch (`kind_not_watchable`:
+  Endpoints, EndpointSlices, Leases and other list-only APIs) are outside every
+  search, so on a broad query they don't add to `narrowedBy`; read them with
+  `list_resources`.
 - **Loading and failures are always reported, folded.** All `kind_sync_pending`
   kinds become one gap whose `kinds` counts distinct kinds and names none. Each
   failure reason (`kind_sync_failed`, `kind_watch_failed`, `read_error`,
@@ -731,11 +735,10 @@ What gets reported follows from that:
   term warms it, retrying the probe, and reports what happens. A watch that was
   granted but couldn't start is `kind_watch_failed` on every search, and a `kind:`
   search starts it again; a watch that started but hasn't finished loading by its
-  deadline is `kind_sync_failed`, which naming the kind can't restart. A probe the
-  client-side rate limiter refused never reached the API server, so it is neither a
-  grant nor a denial: Radar never watches a namespace on its strength, and a
-  namespace its own credentials can't list stays outside its collection (silent on
-  broad searches, `collector_scope_limited` when an `ns:` term names it).
+  deadline is `kind_sync_failed`, which naming the kind can't restart. A namespace
+  Radar's own credentials can't list stays outside its collection: on a broad
+  search it adds `collection` to `narrowedBy`, and it is `collector_scope_limited`
+  when an `ns:` term names it.
 - **Search never waits on warm-up.** Kinds still loading are reported as
   `kind_sync_pending`, and the per-hit `summaryContext` (health, issue count,
   managedBy) is left out when it can't be built within about three seconds, as
@@ -756,6 +759,7 @@ What gets reported follows from that:
 | `permission_check_failed` | always (folded) | Radar could not complete your permission check and failed closed. This is not a denial; authorized namespaces still contribute hits. | Retry. |
 | `rbac_denied` | named `kind:` | Your role cannot list the kind in some or all of the searched namespaces. | Ask for access; authorized namespaces still contribute hits. |
 | `collector_forbidden` | named `kind:` | Kubernetes refused Radar's own identity for the kind. | Fix Radar's access; granting the caller access does not help. |
+| `kind_not_watched` | named `kind:` | Radar doesn't watch the kind at all in this configuration. | Use `list_resources`, or change Radar's collection. |
 | `kind_not_watchable` | named `kind:` | The kind cannot be watched, or Radar reads it directly instead of watching. | Use `list_resources`; warming will not help. |
 | `kind_unknown` | named `kind:` | A `kind:` term matched no kind in the discovered catalog: it isn't installed on this cluster, or it is misspelled. Reported in your spelling. | Check the spelling, and whether the API is installed here. |
 | `namespace_not_found` | named `ns:` | The namespace doesn't exist on this cluster. Only a caller who can see every namespace is told this. | Check the name. |
@@ -772,10 +776,9 @@ searched to a silent empty answer or blamed on the pin or the pick (Radar watche
 Namespaces cluster-wide, even under the pin; when it can't list them, existence is
 unknown and the namespace is treated as existing). For anyone else existence is
 never checked, so a namespace outside your RBAC is `namespace_not_visible` whether
-or not it exists. Kubernetes rejecting Radar's credentials during a list is
-reported as `collector_forbidden`: the collector's permission probes don't keep
-401 apart from 403. A credential rejection Radar did record is
-`collector_credentials_rejected`.
+or not it exists. Kubernetes refusing Radar's own identity is
+`collector_forbidden` or `collector_credentials_rejected`: either way it is
+Radar's access to fix, not yours.
 
 On a broad search, read-error and watch-start hints suggest a `kind:` search to
 re-check; a search that already names the kind reports the failure without

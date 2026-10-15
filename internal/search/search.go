@@ -296,7 +296,10 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 			continue
 		}
 		readiness := p.TypedCoverage(tk.Kind, opts.Namespaces)
-		if readiness == readreason.CollectorScopeLimited {
+		// Radar collecting the kind in only some of the namespaces searched
+		// narrows the search; the rest is still searched.
+		limited := readiness == readreason.CollectorScopeLimited
+		if limited {
 			readiness = ""
 		}
 		// A kind watched namespace by namespace can be searched where its
@@ -305,6 +308,7 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 		if !clusterScoped && (readiness == readreason.KindSyncPending || readiness == readreason.KindSyncFailed) {
 			if r, ok := p.(typedNamespaceReader); ok {
 				readable = r.TypedReadable(tk.Kind, opts.Namespaces)
+				limited = r.TypedCollectionLimited(tk.Kind, opts.Namespaces)
 			}
 		}
 		if readiness != "" && cov.quiet(readiness) {
@@ -359,12 +363,8 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 				}
 			}
 		}
-		if readiness != "" {
-			cov.kind(tk.Kind, tk.Group, readiness)
-			if listNs = readableWithin(listNs, readable); len(listNs) == 0 {
-				continue
-			}
-		}
+		// A namespace the query names that Radar doesn't collect is a gap;
+		// otherwise what Radar doesn't collect narrowed the search.
 		if !clusterScoped && len(q.NSFilter) > 0 {
 			for _, ns := range listNs {
 				if err := ctx.Err(); err != nil {
@@ -373,6 +373,14 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 				if p.TypedCoverage(tk.Kind, []string{ns}) == readreason.CollectorScopeLimited {
 					cov.namespaces(readreason.CollectorScopeLimited, ns)
 				}
+			}
+		} else if !clusterScoped && limited {
+			cov.narrow(readreason.CollectorScopeLimited)
+		}
+		if readiness != "" {
+			cov.kind(tk.Kind, tk.Group, readiness)
+			if listNs = readableWithin(listNs, readable); len(listNs) == 0 {
+				continue
 			}
 		}
 		objs, err := p.ListTyped(tk.Plural, listNs)
@@ -504,7 +512,7 @@ func Search(ctx context.Context, p Provider, q Query, opts Options) (Result, err
 				return Result{}, err
 			}
 			if clusterWideSynced && p.DynamicCacheStopped() {
-				break
+				return Result{}, ErrConnectionChanged
 			}
 			nsObservation := observation
 			if !clusterWideSynced {

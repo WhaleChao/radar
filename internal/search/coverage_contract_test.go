@@ -75,10 +75,13 @@ func TestNamedNamespaceOutsideThePinOrThePick(t *testing.T) {
 type readableProvider struct {
 	*fakeProvider
 	readable []string
+	limited  bool
 	listed   [][]string
 }
 
 func (p *readableProvider) TypedReadable(string, []string) []string { return p.readable }
+
+func (p *readableProvider) TypedCollectionLimited(string, []string) bool { return p.limited }
 
 func (p *readableProvider) ListTyped(kind string, namespaces []string) ([]runtime.Object, error) {
 	p.listed = append(p.listed, namespaces)
