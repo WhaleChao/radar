@@ -1,5 +1,5 @@
 import type { ResourceCoverage } from '../../types/resource-coverage'
-import { resourceCoverageNotice, resourceEmptyMessage } from '../../utils/resource-coverage'
+import { resourceCoverageNotice, resourceEmptyMessage, resourceNarrowedNotice } from '../../utils/resource-coverage'
 import React, { useState, useMemo, useEffect, useCallback, useDeferredValue, useRef, useContext, useId } from 'react'
 import { TableVirtuoso, type TableVirtuosoHandle } from 'react-virtuoso'
 import { useDebouncedValue } from '../../hooks/useDebouncedValue'
@@ -6549,6 +6549,12 @@ export function ResourcesView({
           </div>
         )}
 
+        {!isLoading && !selectedQueryError && resourceNarrowedNotice(selectedQuery?.coverage) && (
+          <div role="status" className="px-4 py-2 text-xs text-theme-text-tertiary border-b border-theme-border bg-theme-surface">
+            {resourceNarrowedNotice(selectedQuery?.coverage)}
+          </div>
+        )}
+
         {!isLoading && !isSelectedForbidden && !largeListGuard && filteredResources.length > 0 && (
           <ActiveFilterBar
             columnFilters={columnFilters}
@@ -6624,7 +6630,7 @@ export function ResourcesView({
           ) : filteredResources.length === 0 ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-theme-text-tertiary">
               <p>{resourceEmptyMessage(selectedKind.kind, selectedQuery?.coverage, (resources?.length ?? 0) > 0)}</p>
-              {selectedQuery?.coverage?.status === 'complete' && emptyKindNote(selectedKind.kind, selectedKind.group, resources?.length ?? 0) && (
+              {selectedQuery?.coverage?.status !== 'partial' && emptyKindNote(selectedKind.kind, selectedKind.group, resources?.length ?? 0) && (
                 <p className="text-xs mt-2 max-w-md text-center text-theme-text-disabled">
                   {emptyKindNote(selectedKind.kind, selectedKind.group, resources?.length ?? 0)}
                 </p>

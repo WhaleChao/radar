@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchResourceList } from './client'
+import { ApiError, fetchResourceList, isListTooLargeError, isUnretryableReadError } from './client'
 import { setApiBase, setAuthHeadersProvider, setCredentialsMode } from './config'
 
 afterEach(() => {
@@ -9,11 +9,11 @@ afterEach(() => {
   setCredentialsMode('same-origin')
 })
 
-const coverage = { status: 'complete', requested: { type: 'all_namespaces' }, read: { type: 'all_namespaces' }, gaps: [] }
-const envelope = { items: [], kind: 'Pod', group: '', coverage }
+const coverage = { status: 'complete', scope: { type: 'all_namespaces' }, read: { type: 'all_namespaces' }, gaps: [] }
+const envelope = { items: [], kind: 'pods', coverage, columns: null, cells: null }
 
 describe('resource list transport', () => {
-  it('uses the configured cluster route and auth with a bounded new list', async () => {
+  it('uses the configured cluster route and auth with a bounded list', async () => {
     setApiBase('/c/cluster/api')
     setAuthHeadersProvider(() => ({ Authorization: 'Bearer test' }))
     setCredentialsMode('include')
@@ -24,7 +24,7 @@ describe('resource list transport', () => {
       return new Response(JSON.stringify(envelope), { status: 200 })
     })
     vi.stubGlobal('fetch', mock)
-    expect((await fetchResourceList('pods', { supportsCoverage: true, namespaces: ['alpha'] })).coverage).toEqual(coverage)
+    expect((await fetchResourceList('pods', { namespaces: ['alpha'] })).coverage).toEqual(coverage)
     expect(mock).toHaveBeenCalledTimes(1)
   })
   it('uses the summary budget only for summary requests', async () => {
@@ -32,19 +32,43 @@ describe('resource list transport', () => {
       expect(url).toBe('/api/resources/pods?include=summary&maxItems=50000')
       return new Response(JSON.stringify(envelope), { status: 200 })
     }))
-    await fetchResourceList('pods', { supportsCoverage: true, summary: true })
+    await fetchResourceList('pods', { summary: true })
   })
-  it('reads old arrays without probing or inventing complete coverage', async () => {
+  it('reads an older Radar array, sent the same budget it ignores, without inventing complete coverage', async () => {
     const mock = vi.fn(async (url: RequestInfo | URL) => {
-      expect(url).toBe('/api/resources/pods?')
-      return new Response('[]', { status: 200 })
+      expect(url).toBe('/api/resources/pods?maxItems=25000')
+      return new Response('[{"metadata":{"name":"api"}}]', { status: 200 })
     })
     vi.stubGlobal('fetch', mock)
-    expect((await fetchResourceList('pods', { supportsCoverage: false })).coverage).toEqual({ status: 'unknown' })
+    const result = await fetchResourceList('pods')
+    expect(result.items).toEqual([{ metadata: { name: 'api' } }])
+    expect(result.coverage).toEqual({ status: 'unknown' })
     expect(mock).toHaveBeenCalledTimes(1)
   })
   it('preserves oversized-list errors instead of returning empty rows', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'Too many resources to load', error_code: 'resource_list_too_large' }), { status: 400, headers: { 'Content-Type': 'application/json' } })))
-    await expect(fetchResourceList('pods', { supportsCoverage: true })).rejects.toMatchObject({ status: 400, data: { error_code: 'resource_list_too_large' } })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'Too many resources to load; select fewer namespaces', error_code: 'list_too_large', count: 30000, limit: 25000 }), { status: 400, headers: { 'Content-Type': 'application/json' } })))
+    const error = await fetchResourceList('pods').catch((e: unknown) => e)
+    expect(error).toMatchObject({ status: 400, data: { error_code: 'list_too_large', count: 30000 } })
+    expect(isListTooLargeError(error)).toBe(true)
+    expect(isListTooLargeError(new ApiError('failed', 400, { error: 'failed', error_code: 'kind_unknown' }))).toBe(false)
+  })
+})
+
+describe('read errors that a retry cannot answer', () => {
+  const failure = (status: number, error_code?: string) => new ApiError('failed', status, error_code ? { error: 'failed', error_code } : { error: 'failed' })
+
+  it('stops on a request, access or collection problem', () => {
+    expect(isUnretryableReadError(failure(400, 'list_too_large'))).toBe(true)
+    expect(isUnretryableReadError(failure(400, 'kind_unknown'))).toBe(true)
+    expect(isUnretryableReadError(failure(409, 'collector_scope_limited'))).toBe(true)
+    expect(isUnretryableReadError(failure(403, 'rbac_denied'))).toBe(true)
+    expect(isUnretryableReadError(failure(503, 'kind_sync_failed'))).toBe(true)
+  })
+  it('retries what may answer on its own or on a request that names the kind', () => {
+    expect(isUnretryableReadError(failure(503, 'kind_sync_pending'))).toBe(false)
+    expect(isUnretryableReadError(failure(503, 'kind_watch_failed'))).toBe(false)
+    expect(isUnretryableReadError(failure(500, 'read_error'))).toBe(false)
+    expect(isUnretryableReadError(failure(503))).toBe(false)
+    expect(isUnretryableReadError(new Error('network'))).toBe(false)
   })
 })

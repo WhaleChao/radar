@@ -18,6 +18,7 @@ export interface CompareResourcePickerProps {
   sourceSide?: CompareSide
   /** Candidate resources — same kind as source. Source is filtered out automatically. */
   candidates: CompareResourceRef[]
+  /** Says the candidate list may be incomplete; shown as a warning above it. */
   coverageNote?: ReactNode
   loading?: boolean
   error?: unknown

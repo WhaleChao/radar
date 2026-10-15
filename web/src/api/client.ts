@@ -1,4 +1,4 @@
-import { normalizeResourceList, type ResourceListResult } from './resourceLists'
+import { LIST_SYNC_PENDING_REFETCH_MS, listSyncPending, normalizeResourceList, type ResourceListBody, type ResourceListResult } from './resourceLists'
 import { canonicalResourceGroup } from '@skyhook-io/k8s-ui/utils/api-resources'
 import { knownKindForPluralWithGroup, pluralToKind } from '@skyhook-io/k8s-ui/utils/navigation'
 import { useEffect, useRef } from 'react'
@@ -2807,7 +2807,6 @@ export function useResourceWithRelationships<T>(
 }
 
 export interface ResourceListOptions {
-  supportsCoverage: boolean
   namespaces?: string[]
   group?: string
   table?: boolean
@@ -2815,15 +2814,28 @@ export interface ResourceListOptions {
   signal?: AbortSignal
 }
 
-export async function fetchResourceList<T>(kind: string, options: ResourceListOptions): Promise<ResourceListResult<T>> {
+export async function fetchResourceList<T>(kind: string, options: ResourceListOptions = {}): Promise<ResourceListResult<T>> {
   const params = new URLSearchParams()
   if (options.namespaces?.length) params.set('namespaces', options.namespaces.join(','))
   if (options.group) params.set('group', options.group)
   if (options.table) params.set('table', '1')
   if (options.summary) params.set('include', 'summary')
-  if (options.supportsCoverage) params.set('maxItems', options.summary ? '50000' : '25000')
-  const body = await fetchJSON<Parameters<typeof normalizeResourceList<T>>[0]>(`/resources/${encodeURIComponent(kind)}?${params}`, options.signal)
-  return normalizeResourceList<T>(body, options.supportsCoverage, options.table === true)
+  // A Radar that predates the list budget ignores the parameter.
+  params.set('maxItems', options.summary ? '50000' : '25000')
+  const body = await fetchJSON<ResourceListBody<T>>(`/resources/${encodeURIComponent(kind)}?${params}`, options.signal)
+  return normalizeResourceList<T>(body)
+}
+
+// A read failure no retry can answer: the request, the caller's access or
+// Radar's collection has to change first (too large, outside the collector, a
+// denial), so it is shown at once.
+export function isUnretryableReadError(error: unknown): boolean {
+  return error instanceof ApiError && !['retry', 'request_kind', undefined].includes(readActionFor(error.data?.error_code))
+}
+
+// The list is over the request's size budget; the body carries `count` and `limit`.
+export function isListTooLargeError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.data?.error_code === 'list_too_large'
 }
 
 // List resources - queryKey includes group for cache sharing with ResourcesView
@@ -2833,32 +2845,25 @@ export function useResources<T>(
   group?: string,
   options?: { enabled?: boolean; refetchInterval?: number | false; cacheScope?: string },
 ) {
-  const capabilityQuery = useCapabilities();
-  const capabilities = capabilityQuery.data;
   const query = useQuery<ResourceListResult<T>>({
-    queryKey: ["resources", kind, group, namespace, capabilities?.features?.resourceReadCoverage === true, ...(options?.cacheScope ? [options.cacheScope] : [])],
-    queryFn: ({ signal }) => fetchResourceList<T>(kind, {
-      supportsCoverage: capabilities?.features?.resourceReadCoverage === true,
-      namespaces: namespace ? [namespace] : [], group, signal,
-    }),
-    enabled: (options?.enabled ?? true) && Boolean(kind) && capabilities != null,
+    queryKey: ["resources", kind, group, namespace, ...(options?.cacheScope ? [options.cacheScope] : [])],
+    queryFn: ({ signal }) => fetchResourceList<T>(kind, { namespaces: namespace ? [namespace] : [], group, signal }),
+    enabled: (options?.enabled ?? true) && Boolean(kind),
     staleTime: 30000, // 30 seconds - matches refetchInterval in ResourcesView
-    refetchInterval: options?.refetchInterval,
+    refetchInterval: (q) => listSyncPending(q.state.data?.coverage) ? LIST_SYNC_PENDING_REFETCH_MS : options?.refetchInterval,
     // Kind still completing its initial sync (progressive shell, or a
     // deferred kind shortly after connect): keep polling instead of
     // surfacing an error.
     retry: (failureCount, error) => {
       if (isStillLoadingError(error)) return true;
       if (isKindSyncFailed(error)) return false;
-      // A request no retry can answer (too large, outside the collector, a
-      // denial) is shown at once rather than retried.
-      if (error instanceof ApiError && !['retry', 'request_kind', undefined].includes(readActionFor(error.data?.error_code))) return false;
+      if (isUnretryableReadError(error)) return false;
       return failureCount < 1; // one retry, 4xx included, unlike the QueryClient default
     },
     retryDelay: (failureCount, error) =>
       isStillLoadingError(error) ? 2000 : Math.min(1000 * 2 ** failureCount, 30000),
   });
-  return { ...query, data: query.data?.items, coverage: query.data?.coverage, isLoading: query.isLoading || capabilityQuery.isLoading, error: query.error ?? capabilityQuery.error };
+  return { ...query, data: query.data?.items, coverage: query.data?.coverage };
 }
 
 // Timeline changes (unified view of changes + K8s events)

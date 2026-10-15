@@ -105,5 +105,5 @@ export type { SearchHit, SearchMatchedField } from './api/client';
 export type { SearchCoverageEntry } from './components/ui/searchCoverageNote';
 
 export { fetchResourceList, type ResourceListOptions } from './api/client';
-export { normalizeResourceList, type ResourceListResult } from './api/resourceLists';
+export { normalizeResourceList, type ResourceListBody, type ResourceListResult } from './api/resourceLists';
 export type { ResourceCoverage, ResourceReadCoverage, ResourceListResponse } from '@skyhook-io/k8s-ui';

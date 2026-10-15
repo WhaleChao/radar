@@ -1,11 +1,11 @@
 import { useState, useMemo, useCallback } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ApiError, fetchResourceList, fetchJSON, isForbiddenError, isKindSyncFailed, isStillLoadingError, useCapabilities, useNamespaceCapabilities, useResources, useSecretCertExpiry, useTopPodMetrics, useTopNodeMetrics, useBulkDeleteResources, useBulkRestartWorkloads, useBulkScaleWorkloads, useAudit } from '../../api/client'
+import { fetchResourceList, fetchJSON, isForbiddenError, isKindSyncFailed, isListTooLargeError, isStillLoadingError, isUnretryableReadError, useCapabilities, useNamespaceCapabilities, useResources, useSecretCertExpiry, useTopPodMetrics, useTopNodeMetrics, useBulkDeleteResources, useBulkRestartWorkloads, useBulkScaleWorkloads, useAudit } from '../../api/client'
 import { isBadgeWorthy } from '../../utils/auditBadges'
 import type { AuditBadgeMessage } from '@skyhook-io/k8s-ui'
 import { stripBasename } from '../../api/config'
-import type { ResourceListResult } from '../../api/resourceLists'
+import { LIST_SYNC_PENDING_REFETCH_MS, listSyncPending, type ResourceListResult } from '../../api/resourceLists'
 import { useAPIResources } from '../../api/apiResources'
 import { useConnection } from '../../context/ConnectionContext'
 import { getSecretStoreProviderType } from '@skyhook-io/k8s-ui'
@@ -77,7 +77,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const navigate = useNavigate()
   const { connection } = useConnection()
 
-  const { data: capabilities, isLoading: capabilitiesLoading, error: capabilitiesError } = useCapabilities()
+  const { data: capabilities } = useCapabilities()
   const namespaceForCapabilities = namespaces.length === 1 ? namespaces[0] : undefined
   const { data: namespaceCapabilities } = useNamespaceCapabilities(namespaceForCapabilities, capabilities)
   const namespaceCapabilityNames = useMemo(() => namespaces.length > 1 ? [...namespaces].sort() : [], [namespaces])
@@ -220,21 +220,26 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
 
   // Fetch full data only for the selected kind
   const selectedKindQuery = useQuery({
-    queryKey: ['resources', selectedKind?.name, isSelectedCrd ? selectedKind?.group : '', namespaces, capabilities?.features?.resourceReadCoverage === true],
+    queryKey: ['resources', selectedKind?.name, isSelectedCrd ? selectedKind?.group : '', namespaces],
     queryFn: async ({ signal }): Promise<ResourceListResult<any>> => {
       if (!selectedKind) return { items: [], coverage: { status: 'unknown' }, printerTable: null }
+      // Only CRDs can declare printer columns, and a curated kind discards the
+      // result — so table mode is requested from exactly the kinds that can use
+      // it. Resolving a table costs the server a CRD read per request; doing
+      // that for a kind whose columns are hand-curated is pure waste.
       const wantsTable = isSelectedCrd && !!selectedKind.group && !hasCuratedColumns(selectedKind.name, selectedKind.group)
       return fetchResourceList(selectedKind.name, {
-        supportsCoverage: capabilities?.features?.resourceReadCoverage === true,
         namespaces, group: isSelectedCrd ? selectedKind.group : undefined,
         summary: selectedKindSummaryServed, table: wantsTable, signal,
       })
     },
-    enabled: !!selectedKind && !selectedKindQueryBlocked && capabilities != null,
+    enabled: !!selectedKind && !selectedKindQueryBlocked,
     staleTime: 30000,
-    refetchInterval: 120000, // Safety net — SSE k8s_event drives near-real-time invalidation
+    // Safety net — SSE k8s_event drives near-real-time invalidation. A list
+    // whose namespaces are still loading is re-read until they finish.
+    refetchInterval: (query) => listSyncPending(query.state.data?.coverage) ? LIST_SYNC_PENDING_REFETCH_MS : 120000,
     retry: (failureCount: number, error: Error) => {
-      if (isForbiddenError(error) || isKindSyncFailed(error) || (error instanceof ApiError && error.data?.error_code === 'resource_list_too_large')) return false
+      if (isForbiddenError(error) || isKindSyncFailed(error) || isUnretryableReadError(error)) return false
       // Cluster still connecting, or this kind's informer still completing
       // its initial sync: keep the query in its loading state and retry —
       // the header's sync-progress label explains the wait.
@@ -253,12 +258,12 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       group: selectedKind.group,
       coverage: selectedKindQuery.data?.coverage,
       data: selectedKindQueryBlocked ? [] : selectedKindQuery.data?.items,
-      isLoading: waitingForGuardCount || selectedKindQuery.isLoading || capabilitiesLoading,
-      error: selectedKindQueryBlocked ? undefined : selectedKindQuery.error ?? capabilitiesError,
+      isLoading: waitingForGuardCount || selectedKindQuery.isLoading,
+      error: selectedKindQueryBlocked ? undefined : selectedKindQuery.error,
       refetch: selectedKindQuery.refetch,
       dataUpdatedAt: selectedKindQuery.dataUpdatedAt,
     }
-  }, [selectedKind, selectedKindQueryBlocked, waitingForGuardCount, selectedKindQuery.data?.items, selectedKindQuery.data?.coverage, selectedKindQuery.isLoading, selectedKindQuery.error, selectedKindQuery.refetch, selectedKindQuery.dataUpdatedAt, capabilitiesLoading, capabilitiesError])
+  }, [selectedKind, selectedKindQueryBlocked, waitingForGuardCount, selectedKindQuery.data?.items, selectedKindQuery.data?.coverage, selectedKindQuery.isLoading, selectedKindQuery.error, selectedKindQuery.refetch, selectedKindQuery.dataUpdatedAt])
 
   // Metrics
   const { data: topPodMetrics } = useTopPodMetrics({ enabled: topPodMetricsEnabled, namespaces })
@@ -359,8 +364,8 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       selectedKindQuery={selectedKindQueryResult}
       printerTable={selectedKindQueryBlocked ? null : selectedKindQuery.data?.printerTable ?? null}
       connectionState={connection.state === 'connecting' && connection.syncStatus ? 'syncing' : connection.state}
-      largeListGuard={selectedKindQuery.error && (selectedKindQuery.error as { data?: { error_code?: string } }).data?.error_code === 'resource_list_too_large' && selectedKind
-        ? { kind: selectedKind.name, reason: 'too-many', count: (selectedKindQuery.error as any).data.count, limit: selectedKindRowLimit, namespaces }
+      largeListGuard={selectedKind && isListTooLargeError(selectedKindQuery.error)
+        ? { kind: selectedKind.name, reason: 'too-many', count: typeof selectedKindQuery.error.data?.count === 'number' ? selectedKindQuery.error.data.count : undefined, limit: selectedKindRowLimit, namespaces }
         : largeListGuard}
       onSelectedKindChange={setSelectedKind}
       sidebarCategoryWorkspaces={cnpgSidebarWorkspace}

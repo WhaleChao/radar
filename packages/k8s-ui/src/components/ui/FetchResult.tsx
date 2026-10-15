@@ -16,6 +16,7 @@ import { readActionFor } from '../../utils/read-actions'
 //   error (403)              → "Access denied"            + error.message
 //   error (404)              → notFoundMessage            + error.message
 //   error (503 sync failed)  → "Couldn't load this view"  + error.message
+//   error (503 collector)    → "Radar can't read this"    + error.message
 //   error (503)              → "Cluster unavailable"      + error.message
 //   error (401)              → "Sign-in required"         (apiFetch redirects; fallback)
 //   error (other / no shape) → "Couldn't load this view"  + error.message
@@ -121,6 +122,11 @@ function classify(error: unknown, notFoundMessage: string): Classified {
         // deadline, so "Cluster unavailable" would send the reader the wrong way.
         if (errorCodeOf(error) === 'kind_sync_failed') {
           return { headline: "Couldn't load this view", detail: error.message, icon: AlertTriangle }
+        }
+        // Shares the collector's action, but it is the cluster connection
+        // that is down rather than one read.
+        if (errorCodeOf(error) === 'cluster_disconnected') {
+          return { headline: 'Cluster unavailable', detail: error.message, icon: ServerCrash }
         }
         // Radar's own identity or collection can't serve the read: neither
         // the cluster being down nor the reader's access.

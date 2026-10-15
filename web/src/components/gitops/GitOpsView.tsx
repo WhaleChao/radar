@@ -57,7 +57,6 @@ import {
   ApiError,
   fetchJSON,
   fetchResourceList as fetchCoveredResourceList,
-  useCapabilities,
   buildArgoResourceSyncVars,
   useApplyResource,
   useArgoRefresh,
@@ -76,6 +75,7 @@ import {
   useResource,
 } from '../../api/client'
 import { useAPIResources, GITOPS_KINDS } from '../../api/apiResources'
+import { combinedListStatus } from '../../api/resourceLists'
 import { useConnection } from '../../context/ConnectionContext'
 import { useRegisterShortcut } from '../../hooks/useKeyboardShortcuts'
 import { CodeViewer } from '../ui/CodeViewer'
@@ -123,7 +123,6 @@ export function GitOpsView({ namespaces, onOpenResource, onClearNamespaces, onOp
 }
 
 function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string[]; onClearNamespaces?: () => void }) {
-  const { data: capabilities, isLoading: capabilitiesLoading, error: capabilitiesError } = useCapabilities()
   const navigate = useNavigate()
   const { connection } = useConnection()
   const namespacesParam = namespaces.join(',')
@@ -185,13 +184,13 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
   // kind requests when the cluster doesn't have the CRD installed; the
   // capability map comes from useAPIResources.
   const rowsQuery = useQuery({
-    queryKey: ['gitops-rows-main', namespaces, apiResources?.length ?? 0, capabilities?.features?.resourceReadCoverage === true],
+    queryKey: ['gitops-rows-main', namespaces, apiResources?.length ?? 0],
     queryFn: async () => {
       const coverage: ResourceCoverage[] = []
       const failures: unknown[] = []
       const fetchResourceList = async (kind: string, group: string, namespacesParam: string): Promise<any[]> => {
         try {
-          const result = await fetchCoveredResourceList<any>(kind, { supportsCoverage: capabilities?.features?.resourceReadCoverage === true, group, namespaces: namespacesParam ? namespacesParam.split(',') : [] })
+          const result = await fetchCoveredResourceList<any>(kind, { group, namespaces: namespacesParam ? namespacesParam.split(',') : [] })
           coverage.push(result.coverage)
           return result.items
         } catch (error) {
@@ -221,14 +220,17 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
       ])
       if (coverage.length === 0 && failures.length > 0) throw failures[0]
       const fluxSourceUrls = buildFluxSourceUrlMap([...gitRepos, ...helmRepos, ...ociRepos, ...buckets])
-      return { coverageStatus: failures.length > 0 || coverage.some(c => c.status === 'partial') ? 'partial' as const : coverage.length > 0 && coverage.every(c => c.status === 'complete') ? 'complete' as const : 'unknown' as const, rows: [
+      // Discovery that finds no row kind is itself a complete answer: nothing
+      // was fetched because there is nothing to fetch.
+      const rowKindsDiscovered = hasApplications || hasApplicationSets || hasKustomizations || hasHelmReleases
+      return { coverageStatus: combinedListStatus(coverage, failures.length > 0, apiResources != null && !rowKindsDiscovered), rows: [
         ...applications.map((r) => normalizeArgoApplication(r)),
         ...applicationSets.map((r) => normalizeArgoApplicationSet(r)),
         ...kustomizations.map((r) => normalizeFluxKustomization(r, fluxSourceUrls)),
         ...helmReleases.map((r) => normalizeFluxHelmRelease(r, fluxSourceUrls)),
       ] }
     },
-    enabled: !apiResourcesLoading && capabilities != null,
+    enabled: !apiResourcesLoading,
     staleTime: 30_000,
     refetchInterval: GITOPS_ROWS_REFRESH_INTERVAL_MS,
   })
@@ -316,8 +318,8 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
       <SharedGitOpsTableView
         rows={rowsQuery.data?.rows ?? []}
         coverageStatus={rowsQuery.data?.coverageStatus ?? 'unknown'}
-        loading={apiResourcesLoading || capabilitiesLoading || countsQuery.isLoading || rowsQuery.isLoading || coldRetrying}
-        error={rowsQuery.error ?? capabilitiesError}
+        loading={apiResourcesLoading || countsQuery.isLoading || rowsQuery.isLoading || coldRetrying}
+        error={rowsQuery.error}
         counts={countsQuery.data?.counts ?? {}}
         countsUnavailable={countsQuery.data?.unavailable}
         countsPartial={Object.entries(countsQuery.data?.coverage ?? {}).filter(([, c]) => c.status === 'partial').map(([key]) => key)}

@@ -202,8 +202,12 @@ export interface GitOpsTableViewProps {
   // counts keyed "group/Kind" — e.g. "argoproj.io/Application" → 17. Drives
   // the Scope-section mode tabs and the empty-state check.
   counts: Record<string, number>
+  // Read coverage of `rows`, combined across every source and cluster that
+  // contributes to them. `unknown` (the default) keeps the presentation that
+  // predates coverage; only `partial` qualifies the view.
   coverageStatus?: 'complete' | 'partial' | 'unknown'
   countsUnavailable?: string[]
+  // Count keys whose counts are lower bounds.
   countsPartial?: string[]
   // @deprecated Superseded by `freshnessSlot` — kept for source compatibility
   // with existing consumers; no longer drives any affordance here.
@@ -559,7 +563,7 @@ export function GitOpsTableView({
   // Also require zero actual rows: the cold-cache retry can populate `rows`
   // before the separate counts map catches up, and a populated table must not
   // be hidden behind a "nothing here" screen.
-  if (totalGitOps === 0 && allRowsInput.length === 0 && !loading && !hasGlobalNamespaceFilter && !hasUnavailableGitOpsCounts && coverageStatus === 'complete') {
+  if (totalGitOps === 0 && allRowsInput.length === 0 && !loading && !hasGlobalNamespaceFilter && !hasUnavailableGitOpsCounts && coverageStatus !== 'partial') {
     return (
       <div className="flex h-full min-h-0 flex-1 items-start justify-center bg-theme-base px-4 pb-4 pt-[22vh]">
         <div className="rounded-lg border border-theme-border bg-theme-surface p-8 text-center">
@@ -591,7 +595,7 @@ export function GitOpsTableView({
   const summaryTiles: SummaryTileSpec[] = [
     {
       key: 'total',
-      label: coverageStatus === 'complete' ? 'Total Applications' : 'Observed Applications',
+      label: coverageStatus === 'partial' ? 'Observed Applications' : 'Total Applications',
       value: allRows.length,
       tone: 'neutral',
       active: noOtherFiltersActive(),
@@ -822,7 +826,7 @@ export function GitOpsTableView({
             <div className="p-4 text-sm text-red-500">Failed to load GitOps applications: {error.message}</div>
           ) : filteredRows.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-theme-text-secondary">
-              <p>{allRows.length > 0 ? 'No applications match the current filters.' : coverageStatus === 'complete' ? 'No applications found in the requested scope.' : coverageStatus === 'partial' ? 'No applications found in the namespaces Radar could read.' : 'No applications returned. Read coverage is unknown.'}</p>
+              <p>{noApplicationsMessage(allRows.length > 0, coverageStatus, hasGlobalNamespaceFilter)}</p>
               {hasGlobalNamespaceFilter && globalNamespaces && (
                 <p className="text-xs text-theme-text-tertiary">
                   Viewing {globalNamespaces.length === 1 ? `namespace: ${globalNamespaces[0]}` : `${globalNamespaces.length} namespaces`}
@@ -1898,6 +1902,13 @@ function countMap(values: string[]) {
     counts.set(value || 'Unknown', (counts.get(value || 'Unknown') ?? 0) + 1)
   }
   return counts
+}
+
+function noApplicationsMessage(hasRows: boolean, coverageStatus: GitOpsTableViewProps['coverageStatus'], namespaceFiltered: boolean): string {
+  if (hasRows) return 'No applications match the current filters.'
+  if (coverageStatus === 'complete') return 'No applications found in the requested scope.'
+  if (coverageStatus === 'partial') return 'No applications found in the namespaces Radar could read.'
+  return namespaceFiltered ? 'No applications match the current filters.' : 'No applications found.'
 }
 
 function countLabels(rows: GitOpsRow[]) {

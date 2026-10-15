@@ -1,26 +1,57 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeResourceList } from './resourceLists'
+import type { ResourceReadCoverage } from '@skyhook-io/k8s-ui/types/resource-coverage'
+import { combinedListStatus, listSyncPending, normalizeResourceList } from './resourceLists'
 
-const complete = { status: 'complete' as const, gaps: [], scope: { type: 'cluster' as const }, read: { type: 'cluster' as const } }
+const complete: ResourceReadCoverage = { status: 'complete', gaps: [], scope: { type: 'cluster' }, read: { type: 'cluster' } }
+const partial: ResourceReadCoverage = { ...complete, status: 'partial', gaps: [{ code: 'collector_scope_limited' }] }
+const columns = [{ name: 'State', type: 'string' }]
 
-describe('versioned resource-list responses', () => {
-  it('uses the new envelope and retains partial metadata with zero rows', () => {
-    const coverage = { ...complete, status: 'partial' as const, gaps: [{ code: 'collector_scope_limited' }] }
-    expect(normalizeResourceList({ items: [], kind: 'Pod', group: '', coverage }, true, false)).toEqual({ items: [], coverage, printerTable: null })
-  })
-  it('marks old array results as unknown rather than complete', () => {
+describe('resource-list responses, read by shape', () => {
+  it('reads an older Radar array as rows of unknown coverage', () => {
     const rows = [{ metadata: { name: 'api' } }]
-    expect(normalizeResourceList(rows, false, false)).toEqual({ items: rows, coverage: { status: 'unknown' }, printerTable: null })
+    expect(normalizeResourceList(rows)).toEqual({ items: rows, coverage: { status: 'unknown' }, printerTable: null })
+    expect(normalizeResourceList([]).coverage).toEqual({ status: 'unknown' })
   })
-  it('supports older instances predating table mode', () => {
-    expect(normalizeResourceList([], false, true).coverage.status).toBe('unknown')
+  it('reads an older Radar table envelope as a printer table of unknown coverage', () => {
+    const body = { items: [{ metadata: { uid: 'one' } }], kind: 'widgets', group: 'example.io', columns, cells: { one: ['Ready'] } }
+    const result = normalizeResourceList(body)
+    expect(result.items).toEqual(body.items)
+    expect(result.coverage).toEqual({ status: 'unknown' })
+    expect(result.printerTable?.cells).toEqual(body.cells)
   })
-  it('keeps rows and printer cells from the same response in either version', () => {
-    const body = { items: [{ metadata: { uid: 'one' } }], kind: 'Widget', group: 'example.io', columns: [{ name: 'State', type: 'string' }], cells: { one: ['Ready'] }, coverage: complete }
-    for (const supported of [true, false]) {
-      const result = normalizeResourceList(body, supported, true)
-      expect(result.items).toEqual(body.items)
-      expect(result.printerTable?.cells).toEqual(body.cells)
-    }
+  it('reads the coverage envelope without a table, retaining partial metadata with zero rows', () => {
+    expect(normalizeResourceList({ items: [], coverage: partial, kind: 'pods', columns: null, cells: null })).toEqual({ items: [], coverage: partial, printerTable: null })
+  })
+  it('reads the coverage envelope with a table, keeping rows and cells from the same response', () => {
+    const body = { items: [{ metadata: { uid: 'one' } }], kind: 'widgets', group: 'example.io', columns, cells: { one: ['Ready'] }, coverage: complete }
+    const result = normalizeResourceList(body)
+    expect(result.items).toEqual(body.items)
+    expect(result.coverage).toEqual(complete)
+    expect(result.printerTable?.cells).toEqual(body.cells)
+  })
+})
+
+describe('listSyncPending', () => {
+  it('holds only while a partial answer has namespaces still loading', () => {
+    expect(listSyncPending({ ...partial, gaps: [{ code: 'collector_forbidden' }, { code: 'kind_sync_pending' }] })).toBe(true)
+    expect(listSyncPending(partial)).toBe(false)
+    expect(listSyncPending(complete)).toBe(false)
+    expect(listSyncPending({ status: 'unknown' })).toBe(false)
+    expect(listSyncPending(undefined)).toBe(false)
+  })
+})
+
+describe('combinedListStatus', () => {
+  it('is partial when any read failed or was partial', () => {
+    expect(combinedListStatus([complete], true, false)).toBe('partial')
+    expect(combinedListStatus([complete, partial], false, false)).toBe('partial')
+  })
+  it('is complete only when every read was', () => {
+    expect(combinedListStatus([complete, complete], false, false)).toBe('complete')
+    expect(combinedListStatus([complete, { status: 'unknown' }], false, false)).toBe('unknown')
+  })
+  it('treats discovery finding nothing to read as complete, and no reads otherwise as unknown', () => {
+    expect(combinedListStatus([], false, true)).toBe('complete')
+    expect(combinedListStatus([], false, false)).toBe('unknown')
   })
 })

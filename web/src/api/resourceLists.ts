@@ -7,13 +7,42 @@ export interface ResourceListResult<T> {
   printerTable: PrinterTable | null
 }
 
-export function normalizeResourceList<T>(body: ResourceListResponse<T> | T[] | (PrinterTable & { items: T[] }), supportsCoverage: boolean, table: boolean): ResourceListResult<T> {
-  if (supportsCoverage) {
-    const result = body as ResourceListResponse<T>
-    return { items: result.items, coverage: result.coverage, printerTable: table ? sanitizePrinterTable(result) : null }
-  }
-  // The older instances Hub supports may predate printer-column responses.
-  if (!table || Array.isArray(body)) return { items: body as T[], coverage: { status: 'unknown' }, printerTable: null }
-  const result = body as PrinterTable & { items: T[] }
-  return { items: result.items as T[], coverage: { status: 'unknown' }, printerTable: sanitizePrinterTable(result) }
+/**
+ * Every list body a supported Radar sends: the coverage envelope, or from a
+ * Radar that predates coverage a bare array, or for `?table=1` the printer
+ * envelope without `coverage`.
+ */
+export type ResourceListBody<T> =
+  | ResourceListResponse<T>
+  | (Omit<ResourceListResponse<T>, 'coverage'> & { coverage?: undefined })
+  | T[]
+
+/**
+ * Reads a list body by its shape rather than by the cluster's advertised
+ * features: a host can point one query client at several clusters, so a cached
+ * capabilities answer may describe a different Radar than the one that
+ * answered. A response without coverage can't establish absence, so it reads
+ * as `unknown`.
+ */
+export function normalizeResourceList<T>(body: ResourceListBody<T>): ResourceListResult<T> {
+  if (Array.isArray(body)) return { items: body, coverage: { status: 'unknown' }, printerTable: null }
+  return { items: body.items, coverage: body.coverage ?? { status: 'unknown' }, printerTable: sanitizePrinterTable(body) }
+}
+
+/** How often to re-read a list while part of it is still loading. */
+export const LIST_SYNC_PENDING_REFETCH_MS = 5000
+
+export function listSyncPending(coverage: ResourceCoverage | undefined): boolean {
+  return coverage?.status === 'partial' && coverage.gaps.some(gap => gap.code === 'kind_sync_pending')
+}
+
+/**
+ * One status for a view assembled from several list reads. A failed read makes
+ * it partial; `nothingToRead` says discovery found no kind to read, which is
+ * itself a complete answer.
+ */
+export function combinedListStatus(coverage: ResourceCoverage[], failed: boolean, nothingToRead: boolean): 'complete' | 'partial' | 'unknown' {
+  if (failed || coverage.some(c => c.status === 'partial')) return 'partial'
+  if (coverage.length === 0 ? nothingToRead : coverage.every(c => c.status === 'complete')) return 'complete'
+  return 'unknown'
 }

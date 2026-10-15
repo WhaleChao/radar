@@ -24,8 +24,10 @@ export type ResourceCoverage = ResourceReadCoverage | { status: 'unknown' }
 export interface ResourceListResponse<T> {
   items: T[]
   coverage: ResourceReadCoverage
-  kind: string
-  group: string
+  /** The lowercased plural from the request path, not a Kubernetes Kind. */
+  kind?: string
+  /** Omitted for the core group. */
+  group?: string
   columns?: import('../components/resources/printer-columns').PrinterColumnDef[] | null
   cells?: Record<string, unknown[]> | null
 }
