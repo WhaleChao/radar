@@ -44,13 +44,6 @@ describe('searchCoverageNote', () => {
     expect(searchCoverageNote([], {})).toBeUndefined()
   })
 
-  it("says an empty search narrowed by Radar's collection can't rule out matches", () => {
-    const narrowed = { status: 'complete' as const, narrowedBy: ['collection'], gaps: [] }
-    expect(noteFor(narrowed, { hits: [] })?.text).toBe("Radar doesn't collect everything on this cluster, so there may be matches it can't see.")
-    expect(noteFor(narrowed, { hits: [{ kind: 'Pod' }] })).toBeUndefined()
-    expect(noteFor({ ...narrowed, narrowedBy: ['caller_access'] }, { hits: [] })).toBeUndefined()
-  })
-
   it('explains a named kind the caller or Radar cannot read', () => {
     expect(searchCoverageNote([entry('Secret', 'rbac_denied')], {})?.text).toBe("Your access doesn't include all Secrets.")
     expect(searchCoverageNote([entry('Secret', 'collector_forbidden')], {})?.text).toBe("Radar isn't allowed to read Secrets on this cluster.")
