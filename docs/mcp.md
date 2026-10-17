@@ -695,39 +695,28 @@ Injected containers, equivalent quantities/image spellings, ordinary
 limit-to-request defaulting, added tolerations, and preferred affinity stay quiet.
 Environment values, commands, and arbitrary spec diffs are excluded.
 
-One fact shows at most three fields, with truncation disclosed; candidates are
-found from every difference, not only the displayed ones. Up to five candidates
-get a full line and up to ten are named; any beyond that are counted. A grouped
-issue compares at most ten distinct affected Pods in representative order and
-labels its first matching witness as an example. A specific Pod lookup compares
-only that Pod, including members beyond the group's inline evidence cap.
-Existing diagnostic facts take precedence when the four-fact budget is full.
+One fact shows at most three fields, and its candidates are capped; both disclose
+truncation, and candidates are found from every difference, not only the shown
+ones. Candidate display order does not imply likelihood. A grouped issue
+compares at most ten distinct affected Pods in representative order and labels
+its first matching witness as an example. A specific Pod lookup compares only
+that Pod, including members beyond the group's inline evidence cap. Existing
+diagnostic facts take precedence when the four-fact budget is full.
 
 Candidates are current configuration to inspect, **not attribution**: matching
 LimitRange defaults for omitted resource keys, the observed global-default
-PriorityClass when the template omitted it, and mutating webhook configurations
-with a webhook whose current core/v1 Pod CREATE rules and selectors match (UPDATE
-candidates apply only to image differences). Each configuration is listed once
-with its matching webhooks and its creation time, beside the Pod's own. Pod
-resize subresource rules are not inspected. Namespace selectors use namespace
-labels; when those cannot be read, selector-scoped webhooks are not evaluated
-and the fact says so. Webhooks with CEL match conditions are listed with
-"matchConditions present, not evaluated". CREATE-only configurations newer than
-the Pod are excluded. List order does not indicate likelihood: LimitRange and
-PriorityClass candidates come first, then webhook configurations by name, and a
-configuration whose matching webhooks are all served from a loopback URL (on
-managed clusters, a control-plane-hosted endpoint such as EKS's
-`pod-identity-webhook`) is listed last and labelled so. The loopback label
-describes where admission calls go, not who installed the webhook or what it
-changes. When the Pod carries a mutator's own record that its template does not
-(`gatekeeper.sh/mutations`; `vpaUpdates` for resource differences), the fact
-quotes it; that names a mutator, not the field it set. Validating webhooks and
-Pod Security Admission are not mutation candidates. All named evidence is
-permission-filtered before producing prose; unreadable or unsynced candidate
-configuration does not suppress an observable Pod/template difference, and the
-fact states which candidate sources it could not inspect. The existing OOM
-diagnosis also records its template source internally so an unreadable
-ReplicaSet limit cannot reappear through the issue cause text.
+PriorityClass when the template omitted it, and mutating webhooks whose current
+core/v1 Pod CREATE rules and selectors match (UPDATE candidates apply only to
+image differences). Pod resize subresource rules are not inspected. Namespace selectors use
+namespace labels. CEL match conditions are not evaluated; such webhooks are
+listed as not evaluated. Each webhook candidate shows its configuration's
+creation time. CREATE-only configurations newer than the Pod are excluded. Validating
+webhooks and Pod Security Admission are not mutation candidates. All named
+evidence is permission-filtered before producing prose; unreadable or unsynced
+candidate configuration does not suppress an observable Pod/template difference,
+and the fact says which candidate sources it could not inspect.
+The existing OOM diagnosis also records its template source internally so an
+unreadable ReplicaSet limit cannot reappear through the issue cause text.
 
 Comparisons use cached current objects, not an admission-time snapshot. Resizing,
 other writers, and later template/configuration edits can explain differences.
@@ -738,61 +727,37 @@ or start watches. Verify provenance with configuration history or
 ### Pod/template differences without an issue
 
 `get_resource` (default context) and `diagnose` add
-`resourceContext.templateDivergence` for a Pod, ReplicaSet, Deployment, or Job
-whose live Pods differ from the current template of their immediate ReplicaSet
-or Job. A workload compares each current Pod (the 200 most recent at most)
-against its own ReplicaSet, so a rolling update is not a difference; it reports
-`podsCompared`, `podsDiffering`, and the most recent differing Pod's
-differences (`examplePod`, `baseline`). StatefulSet and DaemonSet Pods are not
-compared. With no difference, the field is absent.
+`resourceContext.templateDivergence` for a Pod, ReplicaSet, Deployment or Job
+whose live Pods differ from the current template of their own ReplicaSet or
+Job, so a rolling update is not a difference. It is context, not proof: a
+`summary`, the `differences` (for a workload, `podsCompared`, `podsDiffering`
+and an `examplePod`), and `sources`, the same candidate list as the issue fact.
+StatefulSet and DaemonSet Pods are not compared.
 
-The comparison is symptom-independent but keeps admission's routine changes
-quiet: injected containers and volumes, added environment and mounts on
-existing containers, added tolerations, preferred affinity, limit-to-request
-defaulting, equivalent quantities and image spellings, extended resources the
-template does not name, and a priority class filled in where the template
-leaves it unset. It reports CPU, memory, and ephemeral-storage requests and
-limits (and any resource the template names), images, node selectors, required
-affinity, lost or changed tolerations (including a changed `tolerationSeconds`), a template-set priority class, and the
-runtime class. Resource values are not compared while the Pod reports a resize.
-`sources` carries the same candidate list and coverage statements as the issue
-fact. It is context, not proof.
+- Reported: resource requests and limits, images, node selector, required
+  affinity, removed or changed tolerations, a template-set priority class, and
+  the runtime class.
+- Quiet: what admission adds routinely (injected containers, volumes and env,
+  added tolerations, extended resources, limit-to-request copies, a defaulted
+  priority class), and resource values while a resize is in progress.
 
-With `context=none`, `get_resource` still returns `{resource, warnings}` with a
-one-line divergence note when the comparison finds a difference, outside the
-returned object. This and the ConfigMap truncation note are the only warnings
-`context=none` keeps.
+With `context=none`, `get_resource` returns a one-line divergence note in
+top-level `warnings`, outside the returned object.
 
 ### Cluster-scoped admission changes in a namespace view
 
-A namespace-scoped `get_changes` (namespace set, no `kind` or `name`) returns
-`clusterScopedChanges` beside `changes`, and a single-namespace `issues`
-response returns `cluster_scoped_changes` when it has rows or is incomplete;
-there, notes that only say Radar (or its webhook watch) started inside the
-window are left out unless another gap is reported.
-`changes` itself never includes cluster-scoped objects. The section covers
-MutatingWebhookConfiguration and ValidatingWebhookConfiguration changes in the
-window, each with `applicability` and `applies_because`:
+A namespace `get_changes` (no `kind` or `name`) adds `clusterScopedChanges`; a
+single-namespace `issues` answer adds `cluster_scoped_changes` when it has rows
+or a coverage gap (notes that only say Radar started inside the window are left
+out there). It lists MutatingWebhookConfiguration and
+ValidatingWebhookConfiguration changes in the window, capped with truncation
+disclosed, each with `applicability` and `applies_because`:
 
-- `applies`: a changed webhook's current namespace selector matches the
-  namespace's labels (or it has none), its rules cover namespaced resources,
-  and it has no object selector or match conditions.
-- `may_apply`: it selects the namespace but its object selector or CEL match
-  conditions are not evaluated; its rules name resources whose scope Radar
-  cannot confirm (a wildcard group, or a resource discovery does not know);
-  the namespace labels are not readable; the
-  configuration was deleted or no longer exists; or the change removed or
-  re-scoped a webhook whose earlier scope the timeline does not record.
+- `applies`: a changed webhook's current selectors and rules reach the namespace.
+- `may_apply`: Radar cannot establish that, for example because of unevaluated
+  object selectors or CEL, rules of unknown scope, unreadable labels, or a
+  deleted or re-scoped webhook.
 
-Changes that do not concern the namespace are left out. Five rows are listed,
-up to five more are named in `not_listed`, and `truncated` marks anything
-beyond that or a saturated read. Rows pass per-kind RBAC before applicability
-and the row budget. `error` and `incomplete` say when the check could not be
-completed: a kind the caller cannot read or Radar has not cached, a window
-longer than Radar has observed, retained or watched that kind, or a change
-Radar failed to record. An empty `changes` list is a complete negative only without them.
-Only changes appear: a webhook that existed unchanged throughout the window is
-not listed however much it affects the namespace, so long-standing admission
-configuration is covered by the Pod/template candidates above, not by this
-section. A recorded change to a webhook's selectors, rules or match conditions
-counts as a re-scope.
+An empty list is a complete negative only without `error` or `incomplete`.
+Webhooks unchanged in the window are not listed; the Pod/template candidates
+above cover them. List order does not indicate likelihood.
