@@ -219,7 +219,7 @@ func (p *CacheProvider) templateCandidates(pod *corev1.Pod, differences []templa
 	}
 	var coverage []string
 	if needsDefaults {
-		if p.cache.LimitRanges() == nil || !p.cache.IsKindReady("limitranges") {
+		if p.cache.LimitRanges() == nil || !p.cache.AssessKindRead("limitranges", []string{pod.Namespace}).Complete {
 			coverage = append(coverage, "LimitRange defaults were not inspected: Radar has not cached LimitRanges yet.")
 		}
 		unreadable := false
