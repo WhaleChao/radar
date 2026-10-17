@@ -1561,7 +1561,7 @@ func handleGetChanges(ctx context.Context, req *mcp.CallToolRequest, input getCh
 		SourcesErrored: sourcesErrored,
 	}
 	if input.Namespace != "" && input.Kind == "" && input.Name == "" {
-		resp.ClusterScopedChanges = mcpClusterScopedChanges(ctx, input.Namespace, since)
+		resp.ClusterScopedChanges = mcpClusterScopedChanges(ctx, input.Namespace, since, false)
 	}
 	narrowAdvice := " Narrow with namespace=, kind=, name=, shorten since= (e.g. 15m), or raise limit (cap 50)."
 	if recentResult.FetchSaturated {
@@ -3167,7 +3167,7 @@ func handleIssuesTool(ctx context.Context, _ *mcp.CallToolRequest, input issuesI
 		}
 	}
 	if len(allowedNamespaces) == 1 {
-		if clusterScoped := mcpClusterScopedChanges(ctx, allowedNamespaces[0], meaningfulchanges.DefaultSince); clusterScoped.Informative() {
+		if clusterScoped := mcpClusterScopedChanges(ctx, allowedNamespaces[0], meaningfulchanges.DefaultSince, true); clusterScoped.Informative() {
 			resp.ClusterScopedChanges = clusterScoped
 		}
 	}

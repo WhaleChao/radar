@@ -19,12 +19,12 @@ func mcpTemplateDivergence(ctx context.Context, obj runtime.Object) *resourcecon
 	})
 }
 
-func mcpClusterScopedChanges(ctx context.Context, namespace string, since time.Duration) *issuesapi.ClusterScopedChanges {
+func mcpClusterScopedChanges(ctx context.Context, namespace string, since time.Duration, quietStartup bool) *issuesapi.ClusterScopedChanges {
 	nsLabels := meaningfulchanges.ReadNamespaceLabels(namespace, issueRelatedResourceAccess(ctx)(issues.Ref{Kind: "Namespace", Name: namespace}))
 	return meaningfulchanges.ClusterScopedForNamespace(ctx, namespace, nsLabels, since, func(kind string) bool {
 		if pkgauth.UserFromContext(ctx) == nil {
 			return true
 		}
 		return k8s.ChangeReadAllowed(kind, "admissionregistration.k8s.io/v1", "", mcpChangeAuthorizer(ctx))
-	})
+	}, quietStartup)
 }

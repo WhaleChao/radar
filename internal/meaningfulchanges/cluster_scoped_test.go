@@ -139,7 +139,7 @@ func TestClusterScopedForNamespaceBudgetsAndAuthorizesBeforeCapping(t *testing.T
 	}
 	timeline.SetObservationStartForTest(now.Add(-2 * time.Hour))
 	shop := NamespaceLabels{Labels: labels.Set{"team": "shop"}, Known: true}
-	got := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil)
+	got := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil, false)
 	// The webhook watches started moments ago, inside the window: earlier
 	// changes are unknown, and the section says so.
 	if got.Error != "" || len(got.Changes) != 5 || len(got.NotListed) != 5 || !got.Truncated ||
@@ -154,7 +154,7 @@ func TestClusterScopedForNamespaceBudgetsAndAuthorizesBeforeCapping(t *testing.T
 	for n := 0; n < 150; n++ {
 		timeline.RecordDrop("ConfigMap", "other", fmt.Sprintf("cm-%d", n), "no_diff", "update", k8s.ActiveClusterContext())
 	}
-	if failed := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil); !strings.Contains(failed.Incomplete, "Radar failed to record a ValidatingWebhookConfiguration change at") {
+	if failed := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil, false); !strings.Contains(failed.Incomplete, "Radar failed to record a ValidatingWebhookConfiguration change at") {
 		t.Fatalf("failed recording not disclosed: %+v", failed.Incomplete)
 	}
 	if got.Changes[0].Name != "policy-00" || got.Changes[0].Applicability != issuesapi.ClusterScopedApplies || !strings.Contains(got.NotListed[4], "MutatingWebhookConfiguration policy-09") {
@@ -170,16 +170,29 @@ func TestClusterScopedForNamespaceBudgetsAndAuthorizesBeforeCapping(t *testing.T
 	}
 
 	// A kind the caller cannot read is said to be unread, never queried.
-	denied := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, func(kind string) bool { return kind != "MutatingWebhookConfiguration" })
+	denied := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, func(kind string) bool { return kind != "MutatingWebhookConfiguration" }, false)
 	if len(denied.Changes) != 0 || !strings.HasPrefix(denied.Incomplete, "MutatingWebhookConfiguration changes are not readable by the caller.") || strings.Contains(denied.Incomplete, "watched MutatingWebhookConfigurations") || !denied.Informative() {
 		t.Fatalf("denied section=%+v", denied)
 	}
 
 	// A window longer than Radar has been watching is not a complete negative.
 	timeline.SetObservationStartForTest(now.Add(-10 * time.Minute))
-	fresh := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil)
+	fresh := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil, false)
 	if !strings.Contains(fresh.Incomplete, "Radar has recorded changes only since") {
 		t.Fatalf("observation gap not disclosed: %+v", fresh)
+	}
+
+	// An issues view drops notes that only say Radar started inside the
+	// window, but keeps them beside any other gap.
+	timeline.GetMetrics().Reset()
+	quiet := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil, true)
+	if strings.Contains(quiet.Incomplete, "only since") || len(quiet.Changes) != 5 {
+		t.Fatalf("startup-only note kept on the quiet view: %+v", quiet.Incomplete)
+	}
+	timeline.RecordDrop("MutatingWebhookConfiguration", "", "lost", timeline.DropReasonStoreFailed, "update", k8s.ActiveClusterContext())
+	both := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil, true)
+	if !strings.Contains(both.Incomplete, "Radar has recorded changes only since") || !strings.Contains(both.Incomplete, "failed to record a MutatingWebhookConfiguration change") {
+		t.Fatalf("startup note dropped beside another gap: %+v", both.Incomplete)
 	}
 }
 
@@ -232,7 +245,7 @@ func TestClusterScopedForNamespaceJudgesEveryCandidateBeforeTheBudget(t *testing
 			t.Fatalf("watch %s: %v", r, err)
 		}
 	}
-	got := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Labels: labels.Set{"team": "shop"}, Known: true}, time.Hour, nil)
+	got := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Labels: labels.Set{"team": "shop"}, Known: true}, time.Hour, nil, false)
 	if len(got.Changes) != 1 || got.Changes[0].Name != "target" || got.Changes[0].Applicability != issuesapi.ClusterScopedApplies {
 		t.Fatalf("applicable change pushed out by irrelevant ones: %+v", got)
 	}
@@ -297,7 +310,7 @@ func TestClusterScopedForNamespaceDisclosesEvictedHistoryAndUncachedKinds(t *tes
 	if err := k8s.GetDynamicResourceCache().EnsureWatching(gvr); err != nil || !k8s.GetDynamicResourceCache().WaitForSync(gvr, 2*time.Second) {
 		t.Fatalf("watch: %v", err)
 	}
-	got := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Known: true}, time.Hour, nil)
+	got := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Known: true}, time.Hour, nil, false)
 	if !strings.Contains(got.Incomplete, "older events were evicted") {
 		t.Fatalf("evicted history not disclosed: %+v", got)
 	}
@@ -359,7 +372,7 @@ func TestClusterScopedForNamespaceSeesMatchConditionEditThroughTheDiffer(t *test
 	}
 	// The current selector excludes "shop"; only the recorded CEL edit puts
 	// the change in its view, as one whose earlier scope is unknown.
-	got := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Labels: labels.Set{"team": "shop"}, Known: true}, time.Hour, nil)
+	got := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Labels: labels.Set{"team": "shop"}, Known: true}, time.Hour, nil, false)
 	if len(got.Changes) != 1 || got.Changes[0].Applicability != issuesapi.ClusterScopedMayApply || !strings.Contains(got.Changes[0].AppliesBecause, "re-scoped webhook policy.example") {
 		t.Fatalf("CEL-only edit not surfaced as a possible re-scope: %+v", got)
 	}

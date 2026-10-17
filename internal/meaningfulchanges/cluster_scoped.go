@@ -56,7 +56,12 @@ func ReadNamespaceLabels(namespace string, canRead bool) NamespaceLabels {
 // before the timeline is read, so neither rows, saturation nor counts say
 // anything about history the caller may not read. Every candidate in the
 // window is judged before the row budget applies.
-func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels NamespaceLabels, since time.Duration, canReadKind func(kind string) bool) *issuesapi.ClusterScopedChanges {
+//
+// quietStartup leaves out the notes that only say Radar started (or started
+// watching webhooks) inside the window, unless something else is incomplete
+// too. A view that is not about history, like an issues answer, would
+// otherwise carry them on every call after a restart.
+func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels NamespaceLabels, since time.Duration, canReadKind func(kind string) bool, quietStartup bool) *issuesapi.ClusterScopedChanges {
 	if since <= 0 {
 		since = DefaultSince
 	}
@@ -70,7 +75,13 @@ func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels N
 			incomplete = append(incomplete, kind+" changes are not readable by the caller.")
 		}
 	}
-	defer func() { out.Incomplete = strings.Join(incomplete, " ") }()
+	var startup []string
+	defer func() {
+		if len(incomplete) > 0 || !quietStartup {
+			incomplete = append(incomplete, startup...)
+		}
+		out.Incomplete = strings.Join(incomplete, " ")
+	}()
 	if len(readable) == 0 {
 		return out
 	}
@@ -81,7 +92,7 @@ func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels N
 	}
 	windowStart := time.Now().Add(-since)
 	if start := timeline.ObservationStart(); !start.IsZero() && start.After(windowStart) {
-		incomplete = append(incomplete, fmt.Sprintf("Radar has recorded changes only since %s; earlier changes in the window are unknown.", start.UTC().Format(time.RFC3339)))
+		startup = append(startup, fmt.Sprintf("Radar has recorded changes only since %s; earlier changes in the window are unknown.", start.UTC().Format(time.RFC3339)))
 	} else if stats := store.Stats(); stats.EventsEvicted && stats.OldestEvent.After(windowStart) {
 		incomplete = append(incomplete, fmt.Sprintf("Radar's change history now starts at %s (older events were evicted); earlier changes in the window are unknown.", stats.OldestEvent.UTC().Format(time.RFC3339)))
 	}
@@ -111,7 +122,7 @@ func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels N
 		case !loaded[kind]:
 			incomplete = append(incomplete, fmt.Sprintf("Current %ss are not cached, so their scope could not be checked; their changes are listed as may_apply.", kind))
 		case watchedSince[kind].After(windowStart):
-			incomplete = append(incomplete, fmt.Sprintf("Radar has watched %ss only since %s; earlier changes in the window are unknown.", kind, watchedSince[kind].UTC().Format(time.RFC3339)))
+			startup = append(startup, fmt.Sprintf("Radar has watched %ss only since %s; earlier changes in the window are unknown.", kind, watchedSince[kind].UTC().Format(time.RFC3339)))
 		}
 	}
 	for _, kind := range readable {

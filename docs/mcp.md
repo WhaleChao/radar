@@ -767,7 +767,9 @@ returned object. This and the ConfigMap truncation note are the only warnings
 
 A namespace-scoped `get_changes` (namespace set, no `kind` or `name`) returns
 `clusterScopedChanges` beside `changes`, and a single-namespace `issues`
-response returns `cluster_scoped_changes` when it has rows or is incomplete.
+response returns `cluster_scoped_changes` when it has rows or is incomplete;
+there, notes that only say Radar (or its webhook watch) started inside the
+window are left out unless another gap is reported.
 `changes` itself never includes cluster-scoped objects. The section covers
 MutatingWebhookConfiguration and ValidatingWebhookConfiguration changes in the
 window, each with `applicability` and `applies_because`:
