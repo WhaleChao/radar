@@ -115,8 +115,8 @@ func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels N
 		}
 	}
 	for _, kind := range readable {
-		if failed := failedRecordings(kind, windowStart); failed > 0 {
-			incomplete = append(incomplete, fmt.Sprintf("Radar failed to record %d %s change(s) in this window.", failed, kind))
+		if failed := timeline.LastStoreFailure(kind); failed.After(windowStart) {
+			incomplete = append(incomplete, fmt.Sprintf("Radar failed to record a %s change at %s; changes in the window may be missing.", kind, failed.UTC().Format(time.RFC3339)))
 		}
 	}
 	var applicable []issuesapi.ClusterScopedChange
@@ -155,18 +155,6 @@ type webhookScope struct {
 	// scopeUnknown: no rule is known to reach namespaced objects, but some
 	// rule names resources whose scope could not be established.
 	scopeUnknown bool
-}
-
-// failedRecordings counts kind's changes the timeline failed to store since
-// windowStart, from the recent-drop record.
-func failedRecordings(kind string, windowStart time.Time) int {
-	failed := 0
-	for _, drop := range timeline.GetMetrics().GetSnapshot().RecentDrops {
-		if drop.Kind == kind && drop.Reason == timeline.DropReasonStoreFailed && drop.Time.After(windowStart) {
-			failed++
-		}
-	}
-	return failed
 }
 
 // currentWebhookConfigurations returns the cached webhook scopes of each kind

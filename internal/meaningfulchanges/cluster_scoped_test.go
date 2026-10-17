@@ -150,7 +150,11 @@ func TestClusterScopedForNamespaceBudgetsAndAuthorizesBeforeCapping(t *testing.T
 	// A change the timeline failed to store leaves the window incomplete too.
 	t.Cleanup(timeline.GetMetrics().Reset)
 	timeline.RecordDrop("ValidatingWebhookConfiguration", "", "lost", timeline.DropReasonStoreFailed, "update", k8s.ActiveClusterContext())
-	if failed := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil); !strings.Contains(failed.Incomplete, "Radar failed to record 1 ValidatingWebhookConfiguration change(s) in this window.") {
+	// Routine drops past the debugging ring's size must not hide it.
+	for n := 0; n < 150; n++ {
+		timeline.RecordDrop("ConfigMap", "other", fmt.Sprintf("cm-%d", n), "no_diff", "update", k8s.ActiveClusterContext())
+	}
+	if failed := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil); !strings.Contains(failed.Incomplete, "Radar failed to record a ValidatingWebhookConfiguration change at") {
 		t.Fatalf("failed recording not disclosed: %+v", failed.Incomplete)
 	}
 	if got.Changes[0].Name != "policy-00" || got.Changes[0].Applicability != issuesapi.ClusterScopedApplies || !strings.Contains(got.NotListed[4], "MutatingWebhookConfiguration policy-09") {
