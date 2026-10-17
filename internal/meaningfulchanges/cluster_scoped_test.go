@@ -140,8 +140,18 @@ func TestClusterScopedForNamespaceBudgetsAndAuthorizesBeforeCapping(t *testing.T
 	timeline.SetObservationStartForTest(now.Add(-2 * time.Hour))
 	shop := NamespaceLabels{Labels: labels.Set{"team": "shop"}, Known: true}
 	got := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil)
-	if got.Error != "" || got.Incomplete != "" || len(got.Changes) != 5 || len(got.NotListed) != 5 || !got.Truncated {
+	// The webhook watches started moments ago, inside the window: earlier
+	// changes are unknown, and the section says so.
+	if got.Error != "" || len(got.Changes) != 5 || len(got.NotListed) != 5 || !got.Truncated ||
+		!strings.Contains(got.Incomplete, "Radar has watched MutatingWebhookConfigurations only since") || strings.Contains(got.Incomplete, "recorded changes only since") {
 		t.Fatalf("section=%+v", got)
+	}
+
+	// A change the timeline failed to store leaves the window incomplete too.
+	t.Cleanup(timeline.GetMetrics().Reset)
+	timeline.RecordDrop("ValidatingWebhookConfiguration", "", "lost", timeline.DropReasonStoreFailed, "update", k8s.ActiveClusterContext())
+	if failed := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, nil); !strings.Contains(failed.Incomplete, "Radar failed to record 1 ValidatingWebhookConfiguration change(s) in this window.") {
+		t.Fatalf("failed recording not disclosed: %+v", failed.Incomplete)
 	}
 	if got.Changes[0].Name != "policy-00" || got.Changes[0].Applicability != issuesapi.ClusterScopedApplies || !strings.Contains(got.NotListed[4], "MutatingWebhookConfiguration policy-09") {
 		t.Fatalf("rows=%+v notListed=%v", got.Changes, got.NotListed)
@@ -157,7 +167,7 @@ func TestClusterScopedForNamespaceBudgetsAndAuthorizesBeforeCapping(t *testing.T
 
 	// A kind the caller cannot read is said to be unread, never queried.
 	denied := ClusterScopedForNamespace(context.Background(), "shop", shop, time.Hour, func(kind string) bool { return kind != "MutatingWebhookConfiguration" })
-	if len(denied.Changes) != 0 || denied.Incomplete != "MutatingWebhookConfiguration changes are not readable by the caller." || !denied.Informative() {
+	if len(denied.Changes) != 0 || !strings.HasPrefix(denied.Incomplete, "MutatingWebhookConfiguration changes are not readable by the caller.") || strings.Contains(denied.Incomplete, "watched MutatingWebhookConfigurations") || !denied.Informative() {
 		t.Fatalf("denied section=%+v", denied)
 	}
 

@@ -786,7 +786,9 @@ Changes that do not concern the namespace are left out. Five rows are listed,
 up to five more are named in `not_listed`, and `truncated` marks anything
 beyond that or a saturated read. Rows pass per-kind RBAC before applicability
 and the row budget. `error` and `incomplete` say when the check could not be
-completed; an empty `changes` list is a complete negative only without them.
+completed: a kind the caller cannot read or Radar has not cached, a window
+longer than Radar has observed, retained or watched that kind, or a change
+Radar failed to record. An empty `changes` list is a complete negative only without them.
 Only changes appear: a webhook that existed unchanged throughout the window is
 not listed however much it affects the namespace, so long-standing admission
 configuration is covered by the Pod/template candidates above, not by this

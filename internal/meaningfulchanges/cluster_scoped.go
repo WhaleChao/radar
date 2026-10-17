@@ -105,10 +105,18 @@ func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels N
 		out.Error = err.Error()
 		return out
 	}
-	current, loaded := currentWebhookConfigurations()
+	current, loaded, watchedSince := currentWebhookConfigurations()
 	for _, kind := range readable {
-		if !loaded[kind] {
+		switch {
+		case !loaded[kind]:
 			incomplete = append(incomplete, fmt.Sprintf("Current %ss are not cached, so their scope could not be checked; their changes are listed as may_apply.", kind))
+		case watchedSince[kind].After(windowStart):
+			incomplete = append(incomplete, fmt.Sprintf("Radar has watched %ss only since %s; earlier changes in the window are unknown.", kind, watchedSince[kind].UTC().Format(time.RFC3339)))
+		}
+	}
+	for _, kind := range readable {
+		if failed := failedRecordings(kind, windowStart); failed > 0 {
+			incomplete = append(incomplete, fmt.Sprintf("Radar failed to record %d %s change(s) in this window.", failed, kind))
 		}
 	}
 	var applicable []issuesapi.ClusterScopedChange
@@ -149,14 +157,28 @@ type webhookScope struct {
 	scopeUnknown bool
 }
 
+// failedRecordings counts kind's changes the timeline failed to store since
+// windowStart, from the recent-drop record.
+func failedRecordings(kind string, windowStart time.Time) int {
+	failed := 0
+	for _, drop := range timeline.GetMetrics().GetSnapshot().RecentDrops {
+		if drop.Kind == kind && drop.Reason == timeline.DropReasonStoreFailed && drop.Time.After(windowStart) {
+			failed++
+		}
+	}
+	return failed
+}
+
 // currentWebhookConfigurations returns the cached webhook scopes of each kind
-// whose cache is synced; a kind missing from loaded was not checked.
-func currentWebhookConfigurations() (map[string][]webhookScope, map[string]bool) {
+// whose cache is synced, and since when each has been watched; a kind missing
+// from loaded was not checked.
+func currentWebhookConfigurations() (map[string][]webhookScope, map[string]bool, map[string]time.Time) {
 	out := make(map[string][]webhookScope)
 	loaded := make(map[string]bool)
+	watchedSince := make(map[string]time.Time)
 	cache, discovery := k8s.GetDynamicResourceCache(), k8s.GetResourceDiscovery()
 	if cache == nil || discovery == nil {
-		return out, loaded
+		return out, loaded, watchedSince
 	}
 	for _, kind := range clusterScopedKinds {
 		gvr, ok := discovery.GetGVRWithGroup(kind, "admissionregistration.k8s.io")
@@ -168,11 +190,14 @@ func currentWebhookConfigurations() (map[string][]webhookScope, map[string]bool)
 			continue
 		}
 		loaded[kind] = true
+		if since, ok := cache.WatchedSince(gvr); ok {
+			watchedSince[kind] = since
+		}
 		for _, item := range items {
 			out[kind+"/"+item.GetName()] = webhookScopes(kind, item)
 		}
 	}
-	return out, loaded
+	return out, loaded, watchedSince
 }
 
 func webhookScopes(kind string, item *unstructured.Unstructured) []webhookScope {
