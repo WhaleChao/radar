@@ -209,25 +209,24 @@ func webhookScopes(kind string, item *unstructured.Unstructured) []webhookScope 
 }
 
 // ruleScope reports whether a rule can match a namespaced object, and
-// whether that could not be established. An omitted or "*" scope matches both
-// scopes but only for the resources listed, so a rule naming only
-// cluster-scoped resources (nodes, say) does not reach a namespace. A wildcard
-// group, or a resource discovery cannot place, leaves the answer unknown.
+// whether that could not be established. The rule's scope narrows the
+// resources it lists but never widens them: a rule naming only cluster-scoped
+// resources (nodes, say) reaches no namespace whatever its scope. A wildcard
+// group, a wildcard resource outside the core group, or a resource discovery
+// cannot place leaves the answer unknown.
 func ruleScope(rule admissionv1.RuleWithOperations) (namespaced, unknown bool) {
-	if rule.Scope != nil && *rule.Scope == admissionv1.NamespacedScope {
-		return true, false
-	}
 	if rule.Scope != nil && *rule.Scope == admissionv1.ClusterScope {
 		return false, false
 	}
 	discovery := k8s.GetResourceDiscovery()
 	for _, resource := range rule.Resources {
 		base, _, _ := strings.Cut(resource, "/")
-		if base == "*" {
-			return true, false
-		}
 		for _, group := range rule.APIGroups {
-			if group == "*" || discovery == nil {
+			switch {
+			case base == "*" && group == "":
+				// The core group holds Pods.
+				return true, false
+			case base == "*" || group == "*" || discovery == nil:
 				unknown = true
 				continue
 			}

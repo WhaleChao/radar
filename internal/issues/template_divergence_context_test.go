@@ -7,6 +7,7 @@ import (
 
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/pkg/issuesapi"
+	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -116,6 +117,18 @@ func TestPodTemplateContextReportsFiniteSecondsOnAForeverToleration(t *testing.T
 	pod.Spec.Tolerations[0].TolerationSeconds = &seconds
 	if got := comparePodTemplateContext(pod, &template, false); len(got) != 1 || got[0].path != "tolerations" {
 		t.Fatalf("forever-to-0s toleration not reported: %+v", got)
+	}
+}
+
+func TestPodTemplateCandidatesDiscloseUncachedLimitRanges(t *testing.T) {
+	defer k8s.ResetTestState()
+	if err := k8s.InitScopedTestResourceCache(fake.NewClientset(), map[string]k8score.ResourceScope{"pods": {Enabled: true}, "namespaces": {Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	omitted := []templateDifference{{path: "containers[app].resources.limits.memory", resource: corev1.ResourceMemory, resourceKind: "limits", templateMissing: true}}
+	_, coverage := NewCacheProvider().templateCandidates(templateTestPod(), omitted, podTemplateAccess{cluster: func(string, string) bool { return false }})
+	if !strings.Contains(strings.Join(coverage, " "), "LimitRange defaults were not inspected") {
+		t.Fatalf("uncached LimitRanges not disclosed: %v", coverage)
 	}
 }
 
