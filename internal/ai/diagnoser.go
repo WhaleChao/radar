@@ -105,6 +105,20 @@ type MetricsAvailability = investigation.MetricsAvailability
 // exact scripts; read-only investigation turns (initial and follow-up) may
 // additionally learn that metrics are available. OSS lets a revised
 // assessment cite earlier turns of the run, which is what its binder proves.
+// turnSystemPrompt frames a fresh session: the investigation prompt, or the
+// apply prompt for a user-confirmed fix. A resumed session already carries its
+// prompt, so it gets none.
+func turnSystemPrompt(req Request, sessionID string) string {
+	switch {
+	case sessionID != "":
+		return ""
+	case req.Apply:
+		return investigation.ApplySystemPrompt
+	default:
+		return investigation.SystemPrompt
+	}
+}
+
 func turnPrompt(req Request) string {
 	target := investigation.Target{Kind: req.Kind, Group: req.Group, Namespace: req.Namespace, Name: req.Name}
 	if req.Apply {
@@ -488,10 +502,7 @@ func (d *Diagnoser) DiagnoseStream(ctx context.Context, req Request, onEvent fun
 	}
 
 	prompt := turnPrompt(req)
-	sys := ""
-	if sessionID == "" {
-		sys = investigation.SystemPrompt // a fresh session establishes the SRE + security framing
-	}
+	sys := turnSystemPrompt(req, sessionID)
 
 	cmd, cleanup, err := agent.command(ctx, turnSpec{
 		mcpURL: mcpURL, prompt: prompt, systemPrompt: sys,

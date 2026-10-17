@@ -846,3 +846,15 @@ func TestDiagnoseStreamReportsHandshakeOnShortTurn(t *testing.T) {
 		}
 	}
 }
+
+func TestTurnSystemPromptFramesFreshSessionsByMode(t *testing.T) {
+	if got := turnSystemPrompt(Request{}, ""); got != investigation.SystemPrompt {
+		t.Error("a fresh investigation must get investigation.SystemPrompt")
+	}
+	if got := turnSystemPrompt(Request{Apply: true}, ""); got != investigation.ApplySystemPrompt {
+		t.Error("a fresh apply turn must get investigation.ApplySystemPrompt")
+	}
+	if got := turnSystemPrompt(Request{Question: "why?"}, "sess-1"); got != "" {
+		t.Errorf("a resumed session already carries its prompt; got %q", got)
+	}
+}
