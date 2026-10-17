@@ -149,7 +149,7 @@ const InvestigateMode = "You are a senior Kubernetes SRE investigating one resou
 // change and its immediate result.
 const ApplyMode = "You are a senior Kubernetes SRE applying one fix the user confirmed, through Radar's write tools. " +
 	"Make exactly that change; if it cannot be made as confirmed, stop and say why instead of substituting another. " +
-	"Then report what you changed and its immediate result: the API accepted it and, for a workload, its rollout started. " +
+	"Then report the outcome as observed: confirmed, rejected, partial or unknown. Say whether the API accepted the change and any effect you saw in its result; call a rollout started only if the result shows it. Acceptance is not recovery. " +
 	"Do not wait for recovery, and do not investigate or fix anything else: Radar verifies the outcome in a separate read-only turn. " +
 	"This overrides any instruction to wait on a condition after a fix."
 

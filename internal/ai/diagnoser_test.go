@@ -858,3 +858,55 @@ func TestTurnSystemPromptFramesFreshSessionsByMode(t *testing.T) {
 		t.Errorf("a resumed session already carries its prompt; got %q", got)
 	}
 }
+
+// An apply turn reuses an investigation's run but must start a fresh session
+// on the full /mcp mount, under the apply prompt.
+func TestDiagnoseStreamFramesApplyTurnWithApplyPrompt(t *testing.T) {
+	agent := &captureTurnAgent{}
+	diagnoser := &Diagnoser{agents: map[string]Agent{"claude": agent}, defName: "claude"}
+	if _, err := diagnoser.DiagnoseStream(context.Background(), Request{
+		Kind: "Deployment", Namespace: "shop", Name: "api", MCPAddress: "localhost:9280",
+		SessionID: "investigation-session", Apply: true, Fix: "Set spec.replicas to 3",
+	}, func(StreamEvent) {}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.spec.sessionID != "" || agent.spec.systemPrompt != investigation.ApplySystemPrompt ||
+		agent.spec.mcpURL != "http://localhost:9280/mcp" {
+		t.Fatalf("apply turn spec: session=%q url=%q prompt=%q", agent.spec.sessionID, agent.spec.mcpURL, agent.spec.systemPrompt)
+	}
+}
+
+// Every adapter must put the system prompt in front of the model on a fresh
+// session: Claude as an appended system prompt, the others ahead of the turn
+// prompt.
+func TestAdaptersDeliverTheSystemPrompt(t *testing.T) {
+	cursorBin := writeCursorShim(t)
+	for _, tc := range []struct {
+		agent   Agent
+		profile ExecutionProfile
+	}{
+		{&claudeAgent{bin: "claude"}, ExecutionProfileSafeguarded},
+		{&codexAgent{bin: "codex"}, ExecutionProfileSafeguarded},
+		{&cursorAgent{bin: cursorBin}, ExecutionProfileFullLocal},
+		{&opencodeAgent{bin: "opencode"}, ExecutionProfileFullLocal},
+	} {
+		for _, prompt := range []string{investigation.SystemPrompt, investigation.ApplySystemPrompt} {
+			cmd, cleanup, err := tc.agent.command(context.Background(), turnSpec{
+				mcpURL: "http://localhost:1/mcp", prompt: "TURN", systemPrompt: prompt,
+				profile: tc.profile, workdir: t.TempDir(), maxTurns: 1,
+			})
+			if err != nil {
+				t.Fatalf("%s: %v", tc.agent.Name(), err)
+			}
+			rendered := strings.Join(cmd.Args, "\x00")
+			if cmd.Stdin != nil {
+				stdin, _ := io.ReadAll(cmd.Stdin)
+				rendered += "\x00" + string(stdin)
+			}
+			cleanup()
+			if strings.Count(rendered, prompt) != 1 {
+				t.Errorf("%s: system prompt delivered %d times, want 1", tc.agent.Name(), strings.Count(rendered, prompt))
+			}
+		}
+	}
+}
