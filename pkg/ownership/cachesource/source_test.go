@@ -342,6 +342,25 @@ func TestObjectSaysWhyItCannotAnswer(t *testing.T) {
 	}
 }
 
+// A 401 rejects Radar's credentials rather than refusing one kind, so the
+// remedy is new credentials, not more access.
+func TestObjectOfAKindWhoseCredentialsWereRejected(t *testing.T) {
+	f := newFixture(t, k8score.CacheConfig{}, func(f *fixture) {
+		f.dynamic.PrependReactor("list", "widgets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewUnauthorized("token rejected")
+		})
+	})
+	if err := f.caches.Dynamic.EnsureWatching(widgets); !apierrors.IsUnauthorized(err) {
+		t.Fatalf("scenario: EnsureWatching err=%v, want the credential rejection", err)
+	}
+	r := ref("example.io", "Widget", "alpha", "w1")
+	got := begin(t, f.source()).Object(r)
+	want := ownership.Gap{Kind: r.GroupKind(), Namespace: r.Namespace, Reason: readreason.RadarCredentialsRejected}
+	if got.State != ownership.Unavailable || got.Gap != want {
+		t.Fatalf("%v = %v %+v; want unavailable %+v", r, got.State, got.Gap, want)
+	}
+}
+
 func TestObjectIsUnavailableWhileItsStoreLoads(t *testing.T) {
 	var holdWidgets atomic.Bool
 	var widgetLists atomic.Int32
@@ -664,6 +683,7 @@ func TestReasonsForEveryCacheState(t *testing.T) {
 		{k8score.DynamicResourceObservation{State: k8score.DynamicObservationSyncing, ReasonCode: "sync_stalled"}, readreason.KindSyncTimedOut},
 		{k8score.DynamicResourceObservation{State: k8score.DynamicObservationSynced}, readreason.KindSyncPending},
 		{k8score.DynamicResourceObservation{State: k8score.DynamicObservationDenied}, readreason.RadarForbidden},
+		{k8score.DynamicResourceObservation{State: k8score.DynamicObservationDenied, ReasonCode: "credentials_rejected"}, readreason.RadarCredentialsRejected},
 		{k8score.DynamicResourceObservation{State: k8score.DynamicObservationUnsupported}, readreason.KindNotWatchable},
 	} {
 		if got := dynamicReason(tc.o); got != tc.want {

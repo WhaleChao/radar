@@ -272,6 +272,9 @@ func typedReason(rc *k8score.ResourceCache, resource, namespace string) readreas
 func dynamicReason(o k8score.DynamicResourceObservation) readreason.Code {
 	switch o.State {
 	case k8score.DynamicObservationDenied:
+		if o.ReasonCode == "credentials_rejected" {
+			return readreason.RadarCredentialsRejected
+		}
 		return readreason.RadarForbidden
 	case k8score.DynamicObservationUnsupported:
 		return readreason.KindNotWatchable
