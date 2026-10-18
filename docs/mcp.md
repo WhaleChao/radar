@@ -709,8 +709,8 @@ PriorityClass when the template omitted it, and mutating webhooks whose current
 core/v1 Pod CREATE rules and selectors match (UPDATE candidates apply only to
 image differences). Pod resize subresource rules are not inspected. Namespace selectors use
 namespace labels. CEL match conditions are not evaluated; such webhooks are
-listed as not evaluated. Each webhook candidate shows its configuration's
-creation time. CREATE-only configurations newer than the Pod are excluded. Validating
+listed as not evaluated. Fully described webhook candidates show their
+configuration's creation time; those past the line cap are named only. CREATE-only configurations newer than the Pod are excluded. Validating
 webhooks and Pod Security Admission are not mutation candidates. All named
 evidence is permission-filtered before producing prose; unreadable or unsynced
 candidate configuration does not suppress an observable Pod/template difference,
@@ -726,13 +726,13 @@ or start watches. Verify provenance with configuration history or
 
 ### Pod/template differences without an issue
 
-`get_resource` (default context) and `diagnose` add
-`resourceContext.templateDivergence` for a Pod, ReplicaSet, Deployment or Job
-whose live Pods differ from the current template of their own ReplicaSet or
-Job, so a rolling update is not a difference. It is context, not proof: a
-`summary`, the `differences` (for a workload, `podsCompared`, `podsDiffering`
-and an `examplePod`), and `sources`, the same candidate list as the issue fact.
-StatefulSet and DaemonSet Pods are not compared.
+`get_resource` (default context) adds `resourceContext.templateDivergence` for
+a Pod, ReplicaSet, Deployment or Job whose live Pods differ from the current
+template of their own ReplicaSet or Job, so a rolling update is not a
+difference; `diagnose` adds it for a Pod or Deployment. It is context, not
+proof: a `summary`, the `differences` (for a workload, `podsCompared`,
+`podsDiffering` and an `examplePod`), and `sources`, the same candidate list as
+the issue fact. StatefulSet and DaemonSet Pods are not compared.
 
 - Reported: resource requests and limits, images, node selector, required
   affinity, removed or changed tolerations, a template-set priority class, and
@@ -758,6 +758,7 @@ disclosed, each with `applicability` and `applies_because`:
   object selectors or CEL, rules of unknown scope, unreadable labels, or a
   deleted or re-scoped webhook.
 
-An empty list is a complete negative only without `error` or `incomplete`.
+An empty list is a complete negative only without `error`, `incomplete` or
+`truncated`.
 Webhooks unchanged in the window are not listed; the Pod/template candidates
 above cover them. List order does not indicate likelihood.

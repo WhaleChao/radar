@@ -93,7 +93,10 @@ func ClusterScopedForNamespace(ctx context.Context, namespace string, nsLabels N
 	windowStart := time.Now().Add(-since)
 	if start := timeline.ObservationStart(); !start.IsZero() && start.After(windowStart) {
 		startup = append(startup, fmt.Sprintf("Radar has recorded changes only since %s; earlier changes in the window are unknown.", start.UTC().Format(time.RFC3339)))
-	} else if stats := store.Stats(); stats.EventsEvicted && stats.OldestEvent.After(windowStart) {
+	}
+	// Eviction is a gap of its own: a recent start does not explain history
+	// recorded since and then dropped.
+	if stats := store.Stats(); stats.EventsEvicted && stats.OldestEvent.After(windowStart) {
 		incomplete = append(incomplete, fmt.Sprintf("Radar's change history now starts at %s (older events were evicted); earlier changes in the window are unknown.", stats.OldestEvent.UTC().Format(time.RFC3339)))
 	}
 	q := normalizeQuery(Query{Kinds: readable, Since: since})

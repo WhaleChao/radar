@@ -317,6 +317,14 @@ func TestClusterScopedForNamespaceDisclosesEvictedHistoryAndUncachedKinds(t *tes
 	if !strings.Contains(got.Incomplete, "Current ValidatingWebhookConfigurations are not cached") || strings.Contains(got.Incomplete, "Current MutatingWebhookConfigurations") {
 		t.Fatalf("per-kind cache coverage: %+v", got)
 	}
+
+	// A recent start must not hide eviction on the issues view, which drops
+	// startup-only notes: history recorded since the start was still lost.
+	timeline.SetObservationStartForTest(now.Add(-10 * time.Minute))
+	quiet := ClusterScopedForNamespace(context.Background(), "shop", NamespaceLabels{Known: true}, time.Hour, nil, true)
+	if !strings.Contains(quiet.Incomplete, "older events were evicted") || !strings.Contains(quiet.Incomplete, "Radar has recorded changes only since") || !quiet.Informative() {
+		t.Fatalf("eviction after a recent start hidden on the quiet view: %+v", quiet)
+	}
 }
 
 // A CEL-only edit has to survive the whole path: the history differ records
