@@ -256,7 +256,8 @@ func TestToolCatalogContextBudget(t *testing.T) {
 	// semantics in the catalog so agents do not infer fresh external health
 	// or treat absence as ruling out another pause mechanism.
 	const (
-		maxCatalogBytes         = 63800
+		// Includes the deletion preview, confirmation binding and uncertainty contract.
+		maxCatalogBytes         = 64850
 		maxToolDescriptionBytes = 3000
 	)
 
@@ -413,6 +414,7 @@ func TestRegisteredToolAnnotations(t *testing.T) {
 		"manage_gitops":   true,
 		"apply_resource":  true,
 		"patch_resource":  true,
+		"delete_resource": true,
 		"manage_node":     true,
 	}
 
@@ -464,7 +466,7 @@ func TestRegisteredToolAnnotations(t *testing.T) {
 // writeToolNames is the mutating tool set the read-only mount must exclude.
 var writeToolNames = []string{
 	"manage_workload", "manage_rollout", "manage_cronjob", "manage_gitops",
-	"apply_resource", "patch_resource", "manage_node",
+	"apply_resource", "patch_resource", "delete_resource", "manage_node",
 }
 
 // TestReadOnlyServerExcludesWriteTools is the load-bearing guarantee of the

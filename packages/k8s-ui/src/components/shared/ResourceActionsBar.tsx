@@ -1,4 +1,5 @@
 import { getNodeLifecycle } from '../../utils/node-lifecycle'
+import { resourceRefKey } from '../../utils/resource-refs'
 import { useEffect, useState, useRef, useId } from 'react'
 import {
   RefreshCw,
@@ -207,6 +208,13 @@ export function ResourceActionsBar({
 
   // Delete confirmation state
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const deleteMounted = useRef(true)
+  useEffect(() => {
+    deleteMounted.current = true
+    return () => { deleteMounted.current = false }
+  }, [])
+  const currentDeleteTarget = useRef({ key: resourceRefKey(resource), uid: data?.metadata?.uid })
+  currentDeleteTarget.current = { key: resourceRefKey(resource), uid: data?.metadata?.uid }
   useEffect(() => { onDeletePreviewOpenChange?.(showDeleteConfirm) }, [showDeleteConfirm, onDeletePreviewOpenChange])
 
   // Node operation confirmation state
@@ -243,12 +251,13 @@ export function ResourceActionsBar({
   const hasMultipleRevisions = (revisionsList?.length ?? 0) > 1
 
   function handleDeleteConfirm(force: boolean) {
+    const target = currentDeleteTarget.current
+    setShowDeleteConfirm(false)
     onDelete?.(
       { kind: resource.kind, group: resource.group, namespace: resource.namespace, name: resource.name, force },
       {
         onSuccess: () => {
-          setShowDeleteConfirm(false)
-          onClose?.()
+          if (deleteMounted.current && currentDeleteTarget.current.key === target.key && currentDeleteTarget.current.uid === target.uid) onClose?.()
         },
       }
     )
@@ -676,12 +685,14 @@ export function ResourceActionsBar({
       )}
 
       {onDelete && !((kind === 'node' || kind === 'nodes') && data?.metadata?.deletionTimestamp) && (
-        <Tooltip content="Delete resource">
+        <Tooltip content={isDeleting ? 'Deleting resource' : 'Delete resource'}>
           <button
+            aria-label={isDeleting ? 'Deleting resource' : 'Delete resource'}
+            disabled={isDeleting}
             onClick={() => setShowDeleteConfirm(true)}
             className="p-1.5 text-theme-text-secondary border border-theme-border-light rounded-lg hover:text-red-400 hover:border-red-400/50 hover:bg-red-500/10 transition-colors"
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            {isDeleting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
           </button>
         </Tooltip>
       )}

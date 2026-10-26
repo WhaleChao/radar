@@ -73,6 +73,17 @@ func NewReadOnlyHandler() http.Handler {
 	return handlerForServer(newServer(false, serverInstructions(false)))
 }
 
+// newApplyServer omits deletion until the built-in approval flow presents its
+// preview. Removing it here enforces the boundary for every agent client.
+func newApplyServer() *mcpsdk.Server {
+	server := newServer(true, serverInstructions(true))
+	server.RemoveTools("delete_resource")
+	return server
+}
+
+// NewApplyHandler is the built-in remediation transport for built-in agents.
+func NewApplyHandler() http.Handler { return handlerForServer(newApplyServer()) }
+
 // NewInvestigationHandler creates the private read-only MCP transport used by
 // Radar's built-in investigation runner. It deliberately has a separate mount
 // from the public /mcp-readonly surface: the evidence marker is an internal

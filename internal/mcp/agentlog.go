@@ -126,7 +126,12 @@ func logToolCall[In any](
 	handler func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, any, error),
 ) func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, any, error) {
-		args, _ := json.Marshal(input)
+		loggedInput := any(input)
+		if deletion, ok := loggedInput.(deleteResourceInput); ok {
+			deletion.Confirm = ""
+			loggedInput = deletion
+		}
+		args, _ := json.Marshal(loggedInput)
 		log.Printf("\033[1;35m[MCP]\033[0m \033[1m%s\033[0m %s", name, string(args))
 
 		start := time.Now()

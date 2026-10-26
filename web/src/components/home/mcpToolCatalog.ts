@@ -366,6 +366,20 @@ export const MCP_TOOL_CATALOG: MCPToolInfo[] = [
     ],
   },
   {
+    name: 'delete_resource',
+    write: true,
+    desc: 'Delete one object after reviewing its server-side preview. Confirmation binds caller, context, root identity/spec/finalizers and propagation. Dependent lists are advisory. Shows uncertain dependents and GitOps cleanup with coverage limits. Does not patch finalizers.',
+    params: [
+      { arg: 'kind', required: true, desc: 'Resource kind or plural' },
+      { arg: 'name', required: true, desc: 'One object name' },
+      { arg: 'namespace', desc: 'Required for namespaced resources' },
+      { arg: 'group', desc: 'API group for ambiguous kinds' },
+      { arg: 'propagation', desc: 'background (default), foreground, or orphan' },
+      { arg: 'dry_run', desc: 'Default true; false requires confirm from the preview' },
+      { arg: 'confirm', desc: 'Reviewed preview token; expires after five minutes' },
+    ],
+  },
+  {
     name: 'patch_resource',
     write: true,
     desc: 'Patch one existing resource with JSON Patch, JSON Merge Patch, or built-in-kind strategic merge patch for precise edits without rewriting the full manifest.',

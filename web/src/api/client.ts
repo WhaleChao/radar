@@ -4511,7 +4511,7 @@ export function useCascadeDeletePreview(
     queryKey: ["cascade-preview", kind, group, namespace, name],
     queryFn: () =>
       fetchJSON<CascadeDeletePreview>(
-        `/resources/${kind}/${namespace}/${name}/cascade-preview${group ? `?group=${encodeURIComponent(group)}` : ""}`,
+        `/resources/${kind}/${namespace || "_"}/${name}/cascade-preview${group ? `?group=${encodeURIComponent(group)}` : ""}`,
       ),
     enabled,
     staleTime: 0,
@@ -4519,6 +4519,54 @@ export function useCascadeDeletePreview(
 }
 
 // Delete a resource
+interface DeleteResourceResult {
+  deletionTimestamp?: string;
+  pendingFinalizers?: string[];
+  observationError?: string;
+  outcomeUnknown?: boolean;
+}
+
+async function readDeleteResult(request: Promise<Response>): Promise<DeleteResourceResult> {
+  let response: Response;
+  try {
+    response = await request;
+  } catch (error) {
+    return { outcomeUnknown: true, observationError: String(error) };
+  }
+  if (!response.ok) {
+    const error = await readErrorBody(response);
+    if (response.status >= 500 || response.status === 408) {
+      return { outcomeUnknown: true, observationError: error.error || `HTTP ${response.status}` };
+    }
+    throw new Error(error.error || `HTTP ${response.status}`);
+  }
+  const unconfirmed = { observationError: "Deletion accepted; the response did not confirm cleanup." };
+  try {
+    const result = JSON.parse(await response.text()) as DeleteResourceResult;
+    if (result === null || typeof result !== "object" || Array.isArray(result)
+      || (result.deletionTimestamp !== undefined && typeof result.deletionTimestamp !== "string")
+      || (result.observationError !== undefined && typeof result.observationError !== "string")
+      || (result.pendingFinalizers !== undefined && (!Array.isArray(result.pendingFinalizers) || result.pendingFinalizers.some(value => typeof value !== "string")))) {
+      return unconfirmed;
+    }
+    return result;
+  } catch {
+    return unconfirmed;
+  }
+}
+
+function deleteResourceNotification(result: DeleteResourceResult): { message: string; type: "info" | "success"; detail?: string } {
+  if (result.outcomeUnknown) return { message: "Deletion outcome unknown; inspect before retrying", type: "info", detail: result.observationError };
+  if (result.observationError) {
+    return { message: "Deletion accepted; completion unconfirmed", type: "info", detail: result.observationError };
+  }
+  if (result.pendingFinalizers?.length) {
+    return { message: `Deleting — waiting on finalizers: ${result.pendingFinalizers.join(", ")}`, type: "info" };
+  }
+  if (result.deletionTimestamp) return { message: "Deleting…", type: "info" };
+  return { message: "Resource deleted", type: "success" };
+}
+
 export function useDeleteResource() {
   const queryClient = useQueryClient();
 
@@ -4537,7 +4585,7 @@ export function useDeleteResource() {
       force?: boolean;
     }) => {
       const url = new URL(
-        `${getApiBase()}/resources/${kind}/${namespace}/${name}`,
+        apiUrl(`/resources/${kind}/${namespace || "_"}/${name}`),
         window.location.origin,
       );
       if (group) {
@@ -4546,21 +4594,18 @@ export function useDeleteResource() {
       if (force) {
         url.searchParams.set("force", "true");
       }
-      const response = await apiFetch(url.toString(), {
-        method: "DELETE",
-      });
-      if (!response.ok) {
-        const error = await readErrorBody(response);
-        throw new Error(error.error || `HTTP ${response.status}`);
-      }
-      // DELETE returns 204 No Content, no body to parse
-      return { success: true };
+      return readDeleteResult(apiFetch(url.toString(), { method: "DELETE" }));
     },
     meta: {
       errorMessage: "Failed to delete resource",
-      successMessage: "Resource deleted",
     },
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
+      const { message, detail, type } = deleteResourceNotification(result);
+      if (type === "success") {
+        showApiSuccess(message, detail);
+      } else {
+        showApiNotice(message, detail, type);
+      }
       queryClient.invalidateQueries({
         queryKey: ["resources", variables.kind],
       });
@@ -4588,32 +4633,60 @@ export function useBulkDeleteResources() {
       const results = await Promise.allSettled(
         items.map(async ({ kind, group, namespace, name }) => {
           const url = new URL(
-            `${getApiBase()}/resources/${kind}/${namespace}/${name}`,
+            apiUrl(`/resources/${kind}/${namespace || "_"}/${name}`),
             window.location.origin,
           );
           if (group) url.searchParams.set("group", group);
           if (force) url.searchParams.set("force", "true");
-          const response = await apiFetch(url.toString(), { method: "DELETE" });
-          if (!response.ok) {
-            const error = await readErrorBody(response);
-            throw new Error(
-              error.error || `Failed to delete ${namespace}/${name}`,
-            );
-          }
-          return { kind, namespace, name };
+          return { kind, namespace, name, result: await readDeleteResult(apiFetch(url.toString(), { method: "DELETE" })) };
         }),
       );
       const failed = results.filter((r) => r.status === "rejected");
       if (failed.length > 0) {
+        const unknown = results.filter(result => result.status === "fulfilled" && result.value.result.outcomeUnknown).length;
         throw new Error(
-          `Failed to delete ${failed.length} of ${items.length} resources`,
+          `Failed to delete ${failed.length} of ${items.length} ${items.length === 1 ? "resource" : "resources"}${unknown ? `; deletion outcome unknown for ${unknown}; inspect before retrying` : ""}`,
         );
       }
-      return { deleted: items.length };
+      return results.flatMap((r) => r.status === "fulfilled" ? [r.value] : []);
     },
     meta: {
       errorMessage: "Failed to delete some resources",
-      successMessage: "Resources deleted",
+    },
+    onSuccess: (deleted) => {
+      const pending = deleted.filter(({ result }) => result.pendingFinalizers?.length);
+      const unknown = deleted.filter(({ result }) => result.outcomeUnknown);
+      const unobserved = deleted.filter(({ result }) => result.observationError);
+      const deleting = deleted.filter(({ result }) => result.deletionTimestamp);
+      const resources = `${deleted.length} ${deleted.length === 1 ? "resource" : "resources"}`;
+      let message = `${resources} deleted`;
+      let type: "info" | "success" = "success";
+      const unread = `completion unconfirmed for ${unobserved.length}`;
+      if (unknown.length) {
+        message = `Deletion outcome unknown for ${unknown.length} ${unknown.length === 1 ? "resource" : "resources"}; inspect before retrying${pending.length ? `; ${pending.length} waiting on finalizers` : ""}`;
+        type = "info";
+      } else if (pending.length) {
+        message = `Deleting — ${pending.length} ${pending.length === 1 ? "resource" : "resources"} waiting on finalizers${unobserved.length ? `; ${unread}` : ""}`;
+        type = "info";
+      } else if (unobserved.length) {
+        message = `Deletion accepted for ${resources}; ${unread}`;
+        type = "info";
+      } else if (deleting.length) {
+        message = `Deleting ${deleting.length} ${deleting.length === 1 ? "resource" : "resources"}…`;
+        type = "info";
+      }
+      const details = deleted.flatMap(({ namespace, name, result }) => {
+        const notification = deleteResourceNotification(result);
+        return result.observationError || result.pendingFinalizers?.length || result.deletionTimestamp
+          ? [`${namespace}/${name}: ${notification.message}${notification.detail ? `: ${notification.detail}` : ""}`]
+          : [];
+      });
+      const detail = details.length ? listWithOverflow(details) : undefined;
+      if (type === "success") {
+        showApiSuccess(message, detail);
+      } else {
+        showApiNotice(message, detail, type);
+      }
     },
     // onSettled, not onSuccess — a partial failure still deleted some
     // resources, and the table must refetch to drop them.

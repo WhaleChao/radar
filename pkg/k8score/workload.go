@@ -587,44 +587,58 @@ func isOnlyRadarFieldManagerConflict(err error) bool {
 
 // DeleteResource deletes a Kubernetes resource.
 func (m *WorkloadManager) DeleteResource(ctx context.Context, opts DeleteResourceOptions) error {
+	_, err := m.DeleteResourceWithResult(ctx, opts)
+	return err
+}
+
+// DeleteResourceWithResult deletes a resource and observes asynchronous cleanup.
+func (m *WorkloadManager) DeleteResourceWithResult(ctx context.Context, opts DeleteResourceOptions) (*DeleteResourceResult, error) {
 	if m.discovery == nil {
-		return fmt.Errorf("resource discovery not initialized")
+		return nil, fmt.Errorf("resource discovery not initialized")
 	}
 	if m.dynClient == nil {
-		return fmt.Errorf("dynamic client not initialized")
+		return nil, fmt.Errorf("dynamic client not initialized")
 	}
 
 	gvr, ok := m.discovery.GetGVRWithGroup(opts.Kind, opts.Group)
 	if !ok {
-		return fmt.Errorf("unknown resource kind: %s", opts.Kind)
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("unknown resource kind: %s", opts.Kind))
+	}
+
+	var client dynamic.ResourceInterface = m.dynClient.Resource(gvr)
+	if opts.Namespace != "" {
+		client = m.dynClient.Resource(gvr).Namespace(opts.Namespace)
+	}
+	// A caller may have delete permission without get permission. Only observe
+	// cleanup when a pre-delete read identifies the object by UID.
+	var uid types.UID
+	obj, readErr := client.Get(ctx, opts.Name, metav1.GetOptions{})
+	if readErr == nil {
+		uid = obj.GetUID()
 	}
 
 	// Background propagation avoids legacy defaults that orphan a Job's Pods.
 	background := metav1.DeletePropagationBackground
 	deleteOpts := metav1.DeleteOptions{PropagationPolicy: &background}
-	var client dynamic.ResourceInterface = m.dynClient.Resource(gvr)
-	if opts.Namespace != "" {
-		client = m.dynClient.Resource(gvr).Namespace(opts.Namespace)
-	}
-	current, readErr := client.Get(ctx, opts.Name, metav1.GetOptions{})
-	if readErr == nil && current.GetUID() != "" {
-		uid := current.GetUID()
+	if uid != "" {
 		deleteOpts.Preconditions = &metav1.Preconditions{UID: &uid}
 	}
 	if readErr == nil {
-		if _, pending := PendingDeletionPolicy(current.GetFinalizers()); pending {
+		// Only GC finalizers record a policy to preserve; Background has no finalizer.
+		// Omitting the policy otherwise can orphan a terminating Job's Pods.
+		if _, ok := PendingDeletionPolicy(obj.GetFinalizers()); ok {
 			deleteOpts.PropagationPolicy = nil
 		}
 	}
 
-	if opts.Force && (readErr != nil || len(current.GetFinalizers()) > 0) {
+	if opts.Force && (readErr != nil || len(obj.GetFinalizers()) > 0) {
 		metadata := map[string]any{"finalizers": nil}
 		if readErr == nil {
-			if current.GetUID() != "" {
-				metadata["uid"] = current.GetUID()
+			if obj.GetUID() != "" {
+				metadata["uid"] = obj.GetUID()
 			}
-			if current.GetResourceVersion() != "" {
-				metadata["resourceVersion"] = current.GetResourceVersion()
+			if obj.GetResourceVersion() != "" {
+				metadata["resourceVersion"] = obj.GetResourceVersion()
 			}
 		}
 		finalizerPatch, _ := json.Marshal(map[string]any{"metadata": metadata})
@@ -636,9 +650,9 @@ func (m *WorkloadManager) DeleteResource(ctx context.Context, opts DeleteResourc
 		}
 		if patchErr != nil && !apierrors.IsNotFound(patchErr) {
 			if apierrors.IsForbidden(patchErr) {
-				return fmt.Errorf("force delete requires patch permission to strip finalizers: %w", patchErr)
+				return nil, fmt.Errorf("force delete requires patch permission to strip finalizers: %w", patchErr)
 			}
-			return fmt.Errorf("force delete could not strip finalizers: %w", patchErr)
+			return nil, fmt.Errorf("force delete could not strip finalizers: %w", patchErr)
 		}
 	}
 
@@ -656,24 +670,20 @@ func (m *WorkloadManager) DeleteResource(ctx context.Context, opts DeleteResourc
 	}
 	if err != nil {
 		if opts.Force && apierrors.IsNotFound(err) {
-			return nil
+			return &DeleteResourceResult{}, nil
 		}
-		return fmt.Errorf("failed to delete resource: %w", err)
+		return nil, fmt.Errorf("failed to delete resource: %w", err)
 	}
 
-	if !opts.Force {
-		var obj *unstructured.Unstructured
-		if opts.Namespace != "" {
-			obj, _ = m.dynClient.Resource(gvr).Namespace(opts.Namespace).Get(ctx, opts.Name, metav1.GetOptions{})
-		} else {
-			obj, _ = m.dynClient.Resource(gvr).Get(ctx, opts.Name, metav1.GetOptions{})
+	if uid == "" {
+		result := &DeleteResourceResult{ObservationError: "Deletion target UID is unavailable; cleanup was not observed."}
+		if readErr != nil && !apierrors.IsNotFound(readErr) {
+			result.ObservationError = readErr.Error()
 		}
-		if obj != nil && obj.GetDeletionTimestamp() != nil && len(obj.GetFinalizers()) > 0 {
-			return fmt.Errorf("resource is stuck in Terminating state due to finalizers — use force delete to remove it")
-		}
+		return result, nil
 	}
 
-	return nil
+	return ObserveResourceDeletion(ctx, client, opts.Name, uid), nil
 }
 
 // TriggerCronJob creates a Job from a CronJob.

@@ -97,6 +97,7 @@ type Server struct {
 	listener                net.Listener
 	updater                 *updater.Updater
 	mcpHandler              http.Handler
+	mcpApplyHandler         http.Handler
 	mcpReadOnlyHandler      http.Handler
 	mcpInvestigationHandler http.Handler
 	diagConfig              *DiagConfig
@@ -204,15 +205,16 @@ type Config struct {
 	Port                    int
 	PortFallback            bool // Port is a preference: when it's taken, bind an OS-assigned port instead of failing
 	ListenAddress           string
-	BasePath                string                      // Optional URL path prefix for in-cluster subpath deployments
-	StartupLog              bool                        // Emit the operator-facing startup block after a successful bind
-	RemoteAccessHint        bool                        // Explain the explicit shared-listener opt-in (native CLI only)
-	DevMode                 bool                        // Serve frontend from filesystem instead of embedded
-	EnablePprof             *bool                       // nil uses the listener/authentication default; Cloud always disables profiling
-	TrustedOrigins          []string                    // Extra origins allowed to make changes, from ParseTrustedOrigins
-	StaticFS                embed.FS                    // Embedded frontend files
-	StaticRoot              string                      // Path within StaticFS
-	MCPHandler              http.Handler                // Full MCP server handler (nil = full endpoint disabled)
+	BasePath                string       // Optional URL path prefix for in-cluster subpath deployments
+	StartupLog              bool         // Emit the operator-facing startup block after a successful bind
+	RemoteAccessHint        bool         // Explain the explicit shared-listener opt-in (native CLI only)
+	DevMode                 bool         // Serve frontend from filesystem instead of embedded
+	EnablePprof             *bool        // nil uses the listener/authentication default; Cloud always disables profiling
+	TrustedOrigins          []string     // Extra origins allowed to make changes, from ParseTrustedOrigins
+	StaticFS                embed.FS     // Embedded frontend files
+	StaticRoot              string       // Path within StaticFS
+	MCPHandler              http.Handler // Full MCP server handler (nil = full endpoint disabled)
+	MCPApplyHandler         http.Handler
 	MCPReadOnlyHandler      http.Handler                // public read-only MCP handler (read tools only)
 	MCPInvestigationHandler http.Handler                // internal read-only MCP handler with evidence correlation
 	InvestigationRefs       *investigationrefs.Registry // shared private evidence issuance ledger
@@ -255,6 +257,7 @@ func New(cfg Config) *Server {
 		enablePprof:             cfg.EnablePprof,
 		startTime:               time.Now(),
 		mcpHandler:              cfg.MCPHandler,
+		mcpApplyHandler:         cfg.MCPApplyHandler,
 		mcpReadOnlyHandler:      cfg.MCPReadOnlyHandler,
 		mcpInvestigationHandler: cfg.MCPInvestigationHandler,
 		diagConfig:              cfg.DiagConfig,
@@ -986,6 +989,7 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 	r.Handle("/.well-known/*", http.NotFoundHandler())
 	r.Handle("/mcp/.well-known/*", http.NotFoundHandler())
 	r.Handle("/mcp-readonly/.well-known/*", http.NotFoundHandler())
+	r.Handle("/mcp-apply/.well-known/*", http.NotFoundHandler())
 	r.Handle("/mcp-investigation/.well-known/*", http.NotFoundHandler())
 
 	// MCP server (Model Context Protocol for AI tools)
@@ -998,6 +1002,11 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 		r.Mount("/mcp-readonly", s.mcpReadOnlyHandler)
 	} else {
 		r.Mount("/mcp-readonly", http.NotFoundHandler())
+	}
+	if s.mcpApplyHandler != nil {
+		r.Mount("/mcp-apply", s.mcpApplyHandler)
+	} else {
+		r.Mount("/mcp-apply", http.NotFoundHandler())
 	}
 	if s.mcpInvestigationHandler != nil {
 		r.Mount("/mcp-investigation", s.mcpInvestigationHandler)
@@ -4367,17 +4376,23 @@ func (s *Server) handleUpdateResource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
 	namespace := chi.URLParam(r, "namespace")
+	if namespace == "_" {
+		namespace = ""
+	}
 	name := chi.URLParam(r, "name")
 	force := r.URL.Query().Get("force") == "true"
 	group := r.URL.Query().Get("group")
 
 	auth.AuditLog(r, namespace, name)
+	if !s.requireConnectedForAction(w) {
+		return
+	}
 	client := s.getDynamicClientForRequest(r)
 	if client == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "cluster client not available — check cluster connection")
 		return
 	}
-	err := k8s.DeleteResourceWithClient(r.Context(), k8s.DeleteResourceOptions{
+	result, err := k8s.DeleteResourceWithClient(r.Context(), k8s.DeleteResourceOptions{
 		Kind:      kind,
 		Group:     group,
 		Namespace: namespace,
@@ -4393,8 +4408,13 @@ func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
-		if strings.Contains(err.Error(), "stuck in Terminating state") {
+		if apierrors.IsConflict(err) {
 			s.writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		var status apierrors.APIStatus
+		if errors.As(err, &status) && status.Status().Code >= 400 && status.Status().Code < 500 {
+			s.writeError(w, int(status.Status().Code), err.Error())
 			return
 		}
 		log.Printf("[delete] Failed to delete %s %s/%s (force=%v): %v", kind, namespace, name, force, err)
@@ -4402,7 +4422,7 @@ func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	s.writeJSON(w, result)
 }
 
 // handleCascadeDeletePreview reads the root as the caller, then projects

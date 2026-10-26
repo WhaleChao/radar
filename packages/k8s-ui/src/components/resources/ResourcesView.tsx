@@ -7133,13 +7133,12 @@ export function ResourcesView({
       open={tableActive && showBulkDeleteConfirm}
       onClose={() => { setShowBulkDeleteConfirm(false); setBulkForceDelete(false) }}
       onConfirm={() => {
+        const submittedKeys = new Set(checkedItems.map(getResourceKey))
+        setShowBulkDeleteConfirm(false)
+        setBulkForceDelete(false)
         onBulkDelete?.(checkedBulkItems, {
           force: bulkForceDelete,
-          onSuccess: () => {
-            clearBulkSelection()
-            setShowBulkDeleteConfirm(false)
-            setBulkForceDelete(false)
-          },
+          onSuccess: () => setCheckedResources(current => new Set([...current].filter(key => !submittedKeys.has(key)))),
         })
       }}
       title={`Delete ${checkedItems.length} ${selectedKind.kind}${checkedItems.length > 1 ? 's' : ''}?`}

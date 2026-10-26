@@ -670,6 +670,15 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 	}, logToolCall("patch_resource", handlePatchResource))
 
 	addToolWithRegistry(paramRegistry, server, &mcp.Tool{
+		Name: "delete_resource",
+		Description: "Delete one Kubernetes object as the caller. Review the mandatory server dry-run preview before confirming with dry_run=false. " +
+			"The token binds the caller, context and target UID/spec/finalizers/policy; dependent lists are advisory. Unavailable preview produces no token. " +
+			"Owner-reference dependents, uncertain dependents and root GitOps finalizer cleanup are separate, caller-readable observations with coverage limits. Namespace/CRD deletion removes all contents/instances, even with orphan. " +
+			"Defaults to background unless GC finalizers record a policy to preserve. Never patches finalizers; accepted deletion may remain pending. Inspect cleanup before explicit finalizer intervention through patch_resource.",
+		Annotations: writeTool,
+	}, logToolCall("delete_resource", handleDeleteResource))
+
+	addToolWithRegistry(paramRegistry, server, &mcp.Tool{
 		Name: "manage_node",
 		Description: "Cordon, uncordon or drain a node. Drain waits for deletion. " +
 			"outcome: complete/incomplete/unconfirmed/started. started: status ok; incomplete/unconfirmed: partial. " +

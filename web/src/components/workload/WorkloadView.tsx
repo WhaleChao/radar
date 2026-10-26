@@ -404,7 +404,7 @@ function useActionsBarProps(
     onDelete: (
       params: Parameters<typeof deleteMutation.mutate>[0],
       callbacks?: { onSuccess?: () => void },
-    ) => deleteMutation.mutate(params, { onSuccess: callbacks?.onSuccess }),
+    ) => deleteMutation.mutate(params, { onSuccess: result => { if (!result.outcomeUnknown) callbacks?.onSuccess?.() } }),
     isDeleting: deleteMutation.isPending,
     onDeletePreviewOpenChange: setDeletePreviewOpen,
     cascadeDetail: cascadePreview,
