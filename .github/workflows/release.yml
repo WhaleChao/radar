@@ -100,7 +100,7 @@ jobs:
             echo "## CLI Release ${VERSION}"
             echo ""
             if [[ "$VERSION" == *-* ]]; then
-              echo "> **Pre-release** — not published to Homebrew/Scoop/Krew/Helm"
+              echo "> **Pre-release** — not published to Homebrew/Scoop/Krew; the Helm chart is published as a prerelease (helm --devel)"
               echo ""
             fi
             echo "### Assets"
