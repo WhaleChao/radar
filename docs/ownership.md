@@ -1,8 +1,8 @@
-# Ownership: owners, dependents and GitOps membership
+# Ownership: owners, dependents and managers
 
-Radar answers "what owns this object?", "what does it own?" and "which GitOps manager records it?" from the informer
-caches it already holds, with no API calls. This page is the map: the model, the layers, and where each rule lives.
-The doc comments at the linked code are the specification.
+Radar answers "what owns this object?", "what does it own?" and "what manages it?" from the informer caches it already
+holds, with no API calls. This page is the map: the model, which field answers which question, the layers, and where
+each rule lives. The doc comments at the linked code are the specification.
 
 ## The model
 
@@ -15,6 +15,20 @@ Three kinds of evidence, kept apart:
 | **Claims** | Labels and annotations on the object (Argo CD's tracking annotation or label, Flux's `*.toolkit.fluxcd.io/name` labels, Helm's release annotations) | What the object says manages it: a candidate, not a verdict. Argo CD decides membership by its configured tracking method and installation ID, which Radar may not be able to read. Parsed by `pkg/gitops/claims.go`, every candidate kept. |
 
 Every answer in this package says what it couldn't read. An empty answer means "none" only when it is complete.
+
+## Which field answers what
+
+| Question | Field | Evidence |
+|---|---|---|
+| What owns it / what does it own | `relationships.owner`, `owners`, `children` (REST resource GET); `resourceContext.owner` (AI context) | Owner references |
+| Which managers record it / what a manager records | `relationships.managers`, `manages` (Related Resources → Managed By / Manages) | Recorded membership, plus graph links for other managing controllers (a cert-manager Certificate) |
+| What manages it, weighed | `relationships.ownership.manager`; `resourceContext.manager` (compact) | Recorded membership and claims, through the controller chain ([below](#what-manages-an-object)) |
+| Legacy manager pointer | `relationships.managedBy` | The manager the object's metadata names (Argo CD, Flux, Helm) if any, else the topmost object its manages edges reach — not a controller-owner answer; read by workload selection and summary grouping |
+| Other managers, for agents | `resourceContext.managedBy` | The legacy pointer, filtered to what the caller may read and, when `resourceContext.manager` is present, without the Argo CD, Flux and Helm managers it covers (so a controller or a cert-manager Certificate may remain) |
+| What a list row or search hit belongs to, for triage | `summaryContext.managedBy` (REST and MCP lists and search) | A compact pointer (`source`: `native`, `argocd`, `flux`, `helm`): the legacy pointer the caller may read, else the row's direct owner; a Trivy report names its scanned object's workload. References Radar reads from the cache are left out when the caller can't read them; coordinates already on the readable report or row stay |
+| Where a request change belongs | rightsizing `managedBy: {tool, signal}` | Controller owner, GitOps/Helm metadata, `addonmanager` mode ([mcp.md](mcp.md)) |
+
+The four `managedBy` fields answer different questions; read `manager` for "which GitOps manager".
 
 ## Layers
 
@@ -73,8 +87,14 @@ read differently earlier (still loading, or another incarnation) leaves the answ
 
 On the wire (`relationships.ownership.manager`) the answer carries the state and the evidence that answered. Which
 lists Radar couldn't read stays internal: `unknown` reports it left no answer. A positive state doesn't mean every list
-was read or that management is exclusive. `ownership.managers` separately covers the object's own recorder search, and
-`relationships.managedBy` keeps its meaning, the topmost owner the graph links.
+was read or that management is exclusive. `ownership.managers` separately covers the object's own recorder search.
+
+Every answer is computed as the caller. Recorded membership comes only from managers the caller may read: an unreadable
+manager contributes no evidence. A name already in the object's own metadata stays as a claim, checked `withheld` when
+the caller can't read that manager. `narrowed` means the answer is scoped to the caller and may be incomplete; a
+manager they can't read may still revert a change. REST decides readability by namespace (Radar's [trust model](authentication.md#read-granularity-namespace-level));
+MCP checks each manager kind exactly, so the two can differ for a user whose namespace access is wider than their
+GitOps permissions.
 
 ## Coverage
 
