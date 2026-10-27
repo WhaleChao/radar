@@ -1458,22 +1458,23 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.Deployment = k8s.DeploymentInfo{Mode: deploymentMode()}
 	caps.CloudConnect = s.cloudConnectCapability()
 	caps.Features = k8s.FeatureCapabilities{
-		ResourceReadCoverage:  true,
-		SearchCoverage:        true,
-		YAMLReview:            true,
-		YAMLSchemas:           true,
-		WorkloadImages:        true,
-		ResourceIssues:        true,
-		ResourceIssueCoverage: true,
-		PodEnvironment:        true,
-		PolicyResource:        true,
-		WorkloadHistory:       true,
-		CNPGWorkspace:         true,
-		CNPGProtectionSetup:   true,
-		ServiceEndpointSlices: true,
-		TrafficRecords:        true,
-		GitOpsWriteEvidence:   true,
-		HelmSourceIdentity:    true,
+		ResourceReadCoverage:     true,
+		SearchCoverage:           true,
+		YAMLReview:               true,
+		YAMLSchemas:              true,
+		WorkloadImages:           true,
+		ResourceIssues:           true,
+		ResourceIssueCoverage:    true,
+		PodEnvironment:           true,
+		PolicyResource:           true,
+		WorkloadHistory:          true,
+		CNPGWorkspace:            true,
+		CNPGProtectionSetup:      true,
+		ServiceEndpointSlices:    true,
+		TrafficRecords:           true,
+		GitOpsWriteEvidence:      true,
+		HelmSourceIdentity:       true,
+		ClusterScopedPlaceholder: true,
 	}
 	caps.AuthEnabled = s.authConfig.Enabled()
 	caps.ConfigManagement = s.configManagement()
@@ -4312,7 +4313,7 @@ func (s *Server) handleApplyResource(w http.ResponseWriter, r *http.Request) {
 // handleUpdateResource updates a Kubernetes resource from YAML
 func (s *Server) handleUpdateResource(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
-	namespace := chi.URLParam(r, "namespace")
+	namespace := normalizeNamespaceParam(chi.URLParam(r, "namespace"))
 	name := chi.URLParam(r, "name")
 
 	// Read request body (YAML content)
@@ -4379,10 +4380,7 @@ func (s *Server) handleUpdateResource(w http.ResponseWriter, r *http.Request) {
 // handleDeleteResource deletes a Kubernetes resource
 func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
-	namespace := chi.URLParam(r, "namespace")
-	if namespace == "_" {
-		namespace = ""
-	}
+	namespace := normalizeNamespaceParam(chi.URLParam(r, "namespace"))
 	name := chi.URLParam(r, "name")
 	force := r.URL.Query().Get("force") == "true"
 	group := r.URL.Query().Get("group")
