@@ -1468,10 +1468,12 @@ export function WorkloadView({
           </div>
         )}
         {effectiveTab === 'yaml' && (
-          <div className="flex h-full min-h-0">
+          // Phones put the objects in a scrolling row above the YAML, which
+          // gets the full width.
+          <div className="flex h-full min-h-0 phone:flex-col">
             {renderRelatedYaml && yamlObjects.length > 1 && (
-              <div className="flex w-56 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-theme-border bg-theme-base px-2 py-2">
-                <div className="px-1.5 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-theme-text-tertiary">Objects</div>
+              <div className="flex w-56 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-theme-border bg-theme-base px-2 py-2 phone:w-full phone:flex-row phone:gap-1 phone:overflow-x-auto phone:overflow-y-hidden phone:border-b phone:border-r-0">
+                <div className="px-1.5 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-theme-text-tertiary phone:hidden">Objects</div>
                 {yamlObjects.map((o) => {
                   const active = o.primary ? yamlObjectId === null : yamlObjectId === o.id
                   return (
@@ -1480,7 +1482,7 @@ export function WorkloadView({
                       type="button"
                       onClick={() => setYamlObjectId(o.primary ? null : o.id)}
                       className={clsx(
-                        'flex w-full flex-col rounded-md px-1.5 py-1.5 text-left transition-colors',
+                        'flex w-full flex-col rounded-md px-1.5 py-1.5 text-left transition-colors phone:w-auto phone:max-w-[11rem] phone:shrink-0',
                         active ? 'selection selection-ring' : 'hover:bg-theme-hover',
                       )}
                     >
