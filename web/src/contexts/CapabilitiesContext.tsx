@@ -43,6 +43,7 @@ const restrictedCapabilities: Capabilities = {
     rollouts: false,
   },
   mcpEnabled: false,
+  mcpExecTools: false,
   deployment: { mode: 'local' },
 }
 

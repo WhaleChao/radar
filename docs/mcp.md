@@ -40,7 +40,7 @@ Radar's MCP server solves these:
 - **Token-optimized** — resources are minified, stripping noise (managed fields, internal annotations, redundant status) while preserving what matters
 - **Enriched data** — topology graphs, health assessments, deduplicated events, filtered logs (prioritizing errors/warnings)
 - **Safe operations** — write tools such as restart, scale, apply, and rollback are identified for client confirmation and enforced through Kubernetes RBAC. Diagnosis is read-only by default; optional in-cluster route probing uses short-lived, self-deleting probe pods
-- **Secret-safe** — Secret data is never exposed, environment values are redacted, log output is scrubbed for API keys and tokens
+- **Secret-safe reads** — resource and log tools redact Secret data and sensitive values. The optional `exec_pod` tool returns raw command output, which can contain credentials
 - **RBAC-aware** — respects your cluster's RBAC permissions
 - **Vendor-neutral** — works with any MCP-compatible AI tool
 
@@ -100,6 +100,94 @@ configurations. Radar's setup dialog, settings and interactive investigation
 handoffs select this endpoint automatically. Existing client configurations
 using `/mcp` must be updated. Startup output and `/api/capabilities`
 (`mcpEnabled`, `mcpReadOnly`) describe the effective mode.
+
+## exec_pod
+
+Run one non-interactive argv command in a container, like `kubectl exec`.
+Enable with `--mcp-exec-tools` (CLI/Desktop), `"mcpExecTools": true` in
+`~/.radar/config.json`, or Helm `mcp.execTools: true`. It defaults off.
+`--disable-exec`, `--mcp-read-only` and disabled MCP override the opt-in.
+It is destructive, available only on full `/mcp`, and excluded from built-in
+Diagnose and Apply. `/api/capabilities.mcpExecTools` reports registration,
+not the caller's permission; absent/false means unavailable. Startup logs explain
+suppressed opt-in, and `/api/config.effective.mcpExecTools` reports the running state.
+
+Pass `namespace` and `name` as strings and `command` as an argv array. There is
+no implicit shell, stdin or TTY. For pipes/variables, explicitly use
+`["sh", "-c", "..."]`. The binary (including `sh`) must exist in the image.
+For minimal images, use Radar's **Debug container** UI, which requires separate
+permission to add an ephemeral container. It does not necessarily share the
+application's filesystem or environment. Reading a config file or a new
+process's environment does not prove what the running app has loaded.
+
+Name a Pod directly, or set `kind` to Deployment, StatefulSet, DaemonSet, Job,
+ReplicaSet or Rollout. Workload targeting requires a Running, Ready,
+non-terminating Pod of the **desired revision**, which may be a canary/preview
+rather than the revision serving traffic. Job/ReplicaSet use their current
+controller incarnation. There is no fallback to an older revision, including
+OnDelete/partition-held updates; name a serving Pod explicitly when appropriate.
+Reuse the returned `pod` for follow-up commands to avoid selecting another
+replica. A named Pod needs a running container, not Pod readiness; this permits
+running init containers in Pending Pods.
+
+`container` defaults to the `kubectl.kubernetes.io/default-container` annotation
+(an invalid name is an error), then the first non-mesh app container. A valid
+annotation or explicit name can select a proxy, init or ephemeral container.
+Without either, a proxy-only Pod requires an explicit container name.
+
+Every Kubernetes request uses one snapshot of the caller's credentials
+(impersonation or forwarded token); no-auth calls use Radar's kubeconfig or
+ServiceAccount. No privileged fallback occurs. Resolution needs reads of the
+Pod and, for workloads, its revision evidence. Exec uses WebSocket (`get` on
+`pods/exec`) with SPDY fallback (`create`). Kubernetes 1.35's default-on
+`AuthorizePodWebsocketUpgradeCreatePermission` gate additionally checks `create`
+for WebSocket. Forbidden errors carry `rbac_denied` and permission guidance.
+See the [Helm enablement matrix](../deploy/helm/radar/README.md#mcp-container-commands).
+
+One deadline covers lookup and execution: zero/omitted defaults to 30 seconds;
+1–45 is accepted, negative/larger values are rejected. Lookup timeout is a tool
+error. Execution timeout returns partial output with `timedOut: true`.
+Cancellation/broken streams return the same evidence envelope with MCP
+`isError: true`; validation/setup/authorization failures return tool errors.
+A nonzero command exit is a normal result.
+
+Results are JSON in MCP text content:
+
+| Fields | Meaning |
+|---|---|
+| `namespace`, `pod`, `container`, `selectedPodUID` | Selected target. UID is the Pod read before execution; exec has no UID precondition, so this does not prove the incarnation that ran. |
+| `podSelection` | Workload-only explanation; count includes non-Ready Pods of the selected revision. |
+| `stdout`, `stderr` | Separate UTF-8 text, each bounded to 65,536 bytes. Oversized streams retain head and tail with an omitted-middle marker. |
+| `stdoutBytes`, `stderrBytes` | Raw bytes received so far, including omitted bytes; not the command's eventual total after timeout. |
+| `stdoutTruncated`, `stderrTruncated` | Optional `true` when output was omitted. |
+| `stdoutEncodingLoss`, `stderrEncodingLoss` | Optional `true` when retained invalid/incomplete UTF-8 sequences needed replacement with `�`. Encode binary output in-container if needed. |
+| `exitCode` | Integer from the executor, or `null` when unknown. Inherited client-go behavior can report zero on a normal WebSocket close without an exit-status payload. |
+| `timedOut`, `message` | Deadline/unknown-outcome guidance when applicable. |
+| `durationMs` | Lookup plus execution time. |
+
+Runtime error text and 5xx upgrade responses are conservatively treated as unknown
+outcomes, even if the command may not have started. A closed stream does not
+guarantee process termination. A stalled SPDY fallback
+handshake can also outlive the call. Inspect effects before retrying an unknown
+outcome; use command-native deadlines for long-running checks.
+
+**Security:** Never put literal secrets in argv: Kubernetes audit can record
+the full request URI, including arguments, even at Metadata level. Output is
+unredacted, potentially sensitive and untrusted. Commands can change external
+state and use mounted credentials. Prefer read-only checks. Opt-in applies to
+all clients; Kubernetes controls caller permissions and the MCP host controls
+per-call approval. With auth off, reachable clients share Radar's authority.
+The namespace cache pin does not constrain named-Pod exec.
+
+Radar's audit/tool logs omit raw argv and output. Audit records include caller,
+requested/selected target, observed UID/node, safe executable name, argument
+count (excluding executable), and command hash. An `attempt` precedes streaming;
+its `invocationID` links the completion. Outcomes are `exit_N`, `timeout`,
+`canceled`, `stream_error`, `rejected` (setup/authorization/transport rejection),
+or `failed` (before execution). Duration covers lookup and execution.
+The hash is lowercase hex SHA-256 of Go `json.Marshal` of the complete argv
+array; it permits guessed-command comparison, not secrecy. Upstream transport
+logs may independently include peer-supplied error text.
 
 ## MCP Endpoint
 
@@ -1181,6 +1269,12 @@ selector change.
 | `manage_cronjob` | Trigger, suspend, or resume a CronJob | `action` (required: `trigger`, `suspend`, `resume`), `namespace` (required), `name` (required) |
 | `manage_gitops` | Manage ArgoCD and FluxCD resources — sync, refresh, terminate, suspend, resume, rollback (Argo), reconcile (Flux), reconcile-with-source (Flux) | `action` (required), `tool` (required: `argocd` or `fluxcd`), `namespace` (required), `name` (required), `kind` (FluxCD only). For `sync`: `revision`, `prune`, `dry_run`, `force`, `apply_only`, `sync_options`. For `rollback` (Argo only): `history_id` (required), `prune`, `dry_run`. Per-action input validation rejects flags that don't apply to the action (e.g. `force` on `suspend`) so callers fail loudly instead of silently. |
 | `manage_node` | Cordon, uncordon, or drain a Kubernetes node. A drain waits by default until the evicted pods are deleted, and reports `outcome` as `complete`, `incomplete`, `unconfirmed` or `started`. Incomplete/unconfirmed results return `partial`: check `errors`, observed `pendingPods`, `unconfirmedPods` and `verificationError`. Expected DaemonSet, static and terminal exclusions are listed in `skippedPods` with `expectedSkip: true`; they do not prevent completion. Completion confirms required workload removal, not overall shutdown safety | `action` (required: `cordon`, `uncordon`, `drain`), `name` (required), `delete_empty_dir_data` (optional, default true), `force` (optional), `wait_for_deletion` (optional, default true), `timeout` (optional, seconds; default 2 minutes when waiting, 60 otherwise) |
+
+Optional write tool (off by default):
+
+| Tool | Description | Parameters |
+| --- | --- | --- |
+| `exec_pod` | [One non-interactive container command](#exec_pod), enabled by `--mcp-exec-tools` | `namespace`, `name`, `command` (required argv array); `kind`, `container`, `timeout_seconds` (optional) |
 
 ## Strimzi connector evidence
 

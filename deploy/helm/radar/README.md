@@ -451,6 +451,7 @@ trend charts remain unavailable for Kubecost.
 | `argocd.token` | Inline Argo CD API token (dev only — lands in the release state) | `""` |
 | `argocd.url` | Explicit `argocd-server` URL; blank auto-discovers in-cluster | `""` |
 | `argocd.insecureTls` | Skip TLS verification for a self-signed `argocd-server` | `false` |
+| `mcp.execTools` | Opt in to `exec_pod` (`--mcp-exec-tools`); requires exec access. With auth off, every reachable client shares Radar’s ServiceAccount permissions. Ignored with `--disable-exec` or `--mcp-read-only` | `false` |
 | `usageReporting.enabled` | Anonymous daily usage stats: views, actions and MCP tools used, plus this cluster's version, platform, node-count range and known integrations. Off unless `true`; Radar never asks in a cluster ([what is sent](https://radarhq.io/docs/configuration/usage-stats)) | unset |
 | `resources.requests.cpu` | CPU request | `200m` |
 | `resources.requests.memory` | Memory request | `256Mi` |
@@ -534,7 +535,7 @@ Always granted (required for basic functionality):
 | API Group | Resources |
 |-----------|-----------|
 | Core (`""`) | pods, services, configmaps, events, namespaces, nodes, pvcs, serviceaccounts, endpoints |
-| `apps` | deployments, daemonsets, statefulsets, replicasets |
+| `apps` | deployments, daemonsets, statefulsets, replicasets, controllerrevisions |
 | `networking.k8s.io` | ingresses, networkpolicies |
 | `batch` | jobs, cronjobs |
 | `autoscaling` | horizontalpodautoscalers |
@@ -556,6 +557,26 @@ Disabled by default for security:
 | RBAC view | `rbac.viewRBAC: true` | Show ClusterRoles, ClusterRoleBindings, Roles, RoleBindings in the resource browser. Off by default — cache-served reads bypass per-user RBAC, so this exposes the cluster's authorization graph to every authenticated Radar user. Auto-enabled under auth or cloud mode (every read is re-checked per user there). |
 | Webhooks view | `rbac.viewWebhooks: true` | Show MutatingWebhookConfigurations and ValidatingWebhookConfigurations in the resource browser. Off by default — the configurations reveal which admission controls are enforced (Gatekeeper / Kyverno policies, image scanners, DLP) and where the gaps are, which is recon value for a low-trust viewer. Auto-enabled under auth or cloud mode. |
 | Node runtime evidence | `rbac.viewNodeRuntime: true` | Let upgrade-impact checks inspect kubelet metrics and effective configuration through `nodes/proxy`. Off by default because this exposes node-level runtime and configuration details to anyone who can reach a no-auth Radar install. Under auth, grant `get` on `nodes/proxy` to each Kubernetes identity that should inspect this evidence. |
+
+### MCP container commands
+
+`mcp.execTools` registers `exec_pod`; `rbac.podExec` grants Radar's ServiceAccount
+exec permission. These are separate controls:
+
+| `mcp.execTools` | `rbac.podExec` | Result |
+|---|---|---|
+| false | false | MCP exec unavailable; chart grants no SA exec access. |
+| false | true | MCP exec unavailable; SA exec grant supports the existing terminal. |
+| true | false | MCP exec registered; no SA exec grant from this option. It works only if the executing identity has permission from another grant. |
+| true | true | MCP exec registered; SA exec grant present except in user-token mode. |
+
+With auth off, execution uses the ServiceAccount, shared by every reachable
+client. With proxy/OIDC impersonation, it uses the caller's Kubernetes permissions;
+the SA grant does not grant the caller exec. In user-token mode, the chart emits
+no SA exec rule and execution uses the forwarded caller token. The chart's SA
+rule grants `create pods/exec` (SPDY); WebSocket also needs `get pods/exec`.
+`--disable-exec`, read-only mode and disabled MCP suppress registration regardless
+of either value. See [the exec contract](../../../docs/mcp.md#exec_pod).
 
 ### In-app Agent Upgrades (opt-in, for Radar Cloud users)
 
