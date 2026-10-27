@@ -13,13 +13,16 @@ import (
 	"net/http"
 
 	"github.com/skyhook-io/radar/internal/issues"
+	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/summarycontext"
+	"github.com/skyhook-io/radar/pkg/ownership"
 )
 
+var summaryTopologyGate = summarycontext.NewBudgetGate(1)
+
 // newResourceSummaryContextBuilder assembles the per-request closure for the
-// list/search handlers. Returns nil when the cache or topology isn't
-// available, in which case callers should skip context attachment
-// rather than emit empty objects.
+// list/search handlers. A missing typed cache returns nil; WithBudget turns that
+// into cheap context with omissions for unavailable enrichment.
 //
 // Callers pass the namespace list they're scanning so the issue index
 // is scoped to just those rows (the full Compose call on a 100-namespace
@@ -35,7 +38,12 @@ func (s *Server) newResourceSummaryContextBuilder(r *http.Request, namespaces []
 		return nil
 	}
 	idx := summarycontext.BuildIssueIndex(provider, issues.Filters{Namespaces: namespaces, CanReadClusterScoped: s.issueClusterScopedAccess(r), CanReadRelated: s.issueRelatedResourceAccess(r), CanReadSubject: s.issueSubjectAccess(r), CanReadEvidence: s.issueEvidenceAccess(r)})
-	return summarycontext.BuilderFromIndexes(s.broadcaster.GetCachedTopology(), idx, idx, s.summaryRefReader(r))
+	return summarycontext.BuilderFromIndexes(r.Context(), func() summarycontext.IndexedTopology {
+		return summarycontext.WithinContext(r.Context(), summaryTopologyGate, func() summarycontext.IndexedTopology {
+			graph, index := s.broadcaster.GetCachedTopologyWithIndex()
+			return summarycontext.IndexedTopology{Topology: graph, Index: index}
+		})
+	}, idx, idx, s.summaryRefReader(r), s.summaryAgentOwnership(r))
 }
 
 // newSearchSummaryContextBuilder is the search-specific variant. Search
@@ -68,7 +76,12 @@ func (s *Server) newSearchSummaryContextBuilder(r *http.Request, scanNamespaces 
 	if scanNamespaces != nil {
 		clusterIdx = summarycontext.BuildIssueIndex(provider, issues.Filters{Namespaces: nil, CanReadClusterScoped: s.issueClusterScopedAccess(r), CanReadRelated: s.issueRelatedResourceAccess(r), CanReadSubject: s.issueSubjectAccess(r), CanReadEvidence: s.issueEvidenceAccess(r)})
 	}
-	return summarycontext.BuilderFromIndexes(s.broadcaster.GetCachedTopology(), namespacedIdx, clusterIdx, s.summaryRefReader(r))
+	return summarycontext.BuilderFromIndexes(r.Context(), func() summarycontext.IndexedTopology {
+		return summarycontext.WithinContext(r.Context(), summaryTopologyGate, func() summarycontext.IndexedTopology {
+			graph, index := s.broadcaster.GetCachedTopologyWithIndex()
+			return summarycontext.IndexedTopology{Topology: graph, Index: index}
+		})
+	}, namespacedIdx, clusterIdx, s.summaryRefReader(r), s.summaryAgentOwnership(r))
 }
 
 // summaryRefReader is the caller's access to a reference a summary names, as
@@ -76,4 +89,10 @@ func (s *Server) newSearchSummaryContextBuilder(r *http.Request, scanNamespaces 
 func (s *Server) summaryRefReader(r *http.Request) func(group, kind, namespace string) bool {
 	checker := s.newRequestScopedChecker(r)
 	return func(group, kind, namespace string) bool { return checker.CanRead(r.Context(), group, kind, namespace) }
+}
+
+// summaryAgentOwnership reads each row's controller chain as the request's
+// user, with the exact access the agent resource context reads with.
+func (s *Server) summaryAgentOwnership(r *http.Request) *k8s.AgentOwnership {
+	return k8s.NewAgentOwnership(func(c *ownership.Catalog) ownership.Access { return s.agentOwnershipAccess(r, c) })
 }

@@ -2,14 +2,18 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -23,6 +27,132 @@ import (
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 	"github.com/skyhook-io/radar/pkg/resourceid"
 )
+
+func TestAgentMCPListBoundsSlowOwnershipAuthorization(t *testing.T) {
+	objects := []runtime.Object{}
+	for i := range 80 {
+		ns := fmt.Sprintf("budget-%03d", i)
+		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pod", UID: types.UID(ns)}, Status: corev1.PodStatus{Phase: corev1.PodFailed}})
+	}
+	if err := k8s.InitTestResourceCache(fake.NewClientset(objects...)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k8s.ResetTestState)
+	k8s.SetConnectionStatus(k8s.ConnectionStatus{State: k8s.StateConnected, Context: "budget"})
+	fd := &fakediscovery.FakeDiscovery{Fake: &k8stesting.Fake{}}
+	fd.Resources = []*metav1.APIResourceList{{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch", "delete"}}}}}
+	restore, err := k8s.SetTestResourceDiscovery(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restore)
+	previous := k8s.SetTestClient(&kubernetes.Clientset{})
+	t.Cleanup(func() { k8s.SetTestClient(previous) })
+	ctx := withTestUserPerms(t, "budget-reader", nil, nil)
+	var gets atomic.Int32
+	stubSubjectCanI(t, func(ctx context.Context, _ kubernetes.Interface, _ string, _ []string, _, _, resource, verb string) (bool, error) {
+		if verb == "get" && resource == "pods" {
+			gets.Add(1)
+			select {
+			case <-time.After(100 * time.Millisecond):
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+		return true, nil
+	})
+	start := time.Now()
+	result, _, err := handleListResources(ctx, nil, listResourcesInput{Kind: "pods"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 6*time.Second || gets.Load() >= 60 {
+		t.Fatalf("unbounded list: %s, %d checks", time.Since(start), gets.Load())
+	}
+	rows, _ := completeListBody(t, result)
+	if len(rows) != 80 {
+		t.Fatalf("got %d rows", len(rows))
+	}
+	budgetNotes := 0
+	for _, row := range rows {
+		b, _ := json.Marshal(row)
+		var got struct {
+			Summary *resourcecontext.ResourceSummaryContext `json:"summaryContext"`
+		}
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Summary == nil || got.Summary.Health == "" {
+			t.Fatalf("health lost: %s", b)
+		}
+		for _, o := range got.Summary.Omitted {
+			if o.Field == "managedBy" && o.Reason == resourcecontext.OmittedBudgetExceeded {
+				budgetNotes++
+			}
+		}
+	}
+	if budgetNotes == 0 {
+		t.Fatal("expired enrichment not reported")
+	}
+}
+
+func TestAgentOwnershipMCPListAndGetPreferController(t *testing.T) {
+	yes := true
+	replicas := int32(1)
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "web", UID: "uid-dep"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "web"}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "nginx"}}}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "alpha", Name: "web-a", UID: "uid-pod", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "web", UID: "uid-dep", Controller: &yes}}, Labels: map[string]string{"argocd.argoproj.io/instance": "copied"}}}
+	if err := k8s.InitTestResourceCache(fake.NewClientset(deployment, pod, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "alpha"}})); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k8s.ResetTestState)
+	k8s.SetConnectionStatus(k8s.ConnectionStatus{State: k8s.StateConnected, Context: "ownership-test"})
+	verbs := metav1.Verbs{"get", "list", "watch", "delete"}
+	fd := &fakediscovery.FakeDiscovery{Fake: &k8stesting.Fake{}}
+	fd.Resources = []*metav1.APIResourceList{
+		{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: verbs}}},
+		{GroupVersion: "apps/v1", APIResources: []metav1.APIResource{{Name: "deployments", Kind: "Deployment", Namespaced: true, Verbs: verbs}}},
+	}
+	restore, err := k8s.SetTestResourceDiscovery(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restore)
+	result, _, err := handleListResources(context.Background(), nil, listResourcesInput{Kind: "pods", Namespace: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := completeListBody(t, result)
+	if len(rows) != 1 {
+		t.Fatalf("rows %+v", rows)
+	}
+	encoded, err := json.Marshal(rows[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row struct {
+		Summary *resourcecontext.ResourceSummaryContext `json:"summaryContext"`
+	}
+	if err := json.Unmarshal(encoded, &row); err != nil {
+		t.Fatal(err)
+	}
+	if row.Summary == nil || row.Summary.ManagedBy == nil || row.Summary.ManagedBy.Kind != "Deployment" {
+		t.Fatalf("summary %+v", row.Summary)
+	}
+	result, _, err = handleGetResource(context.Background(), nil, getResourceInput{Kind: "pods", Namespace: "alpha", Name: "web-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Context *resourcecontext.ResourceContext `json:"resourceContext"`
+	}
+	if err := json.Unmarshal([]byte(extractText(t, result)), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Context == nil || len(body.Context.ManagedBy) != 1 || body.Context.ManagedBy[0].Kind != "Deployment" {
+		t.Fatalf("context %+v", body.Context)
+	}
+}
 
 // A namespaced kind in any namespace: a cluster-wide grant allows it, and
 // anything else is undecided rather than checked namespace by namespace.

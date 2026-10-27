@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -89,11 +90,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// (CanReadClusterScoped) already constrains which cluster-scoped
 	// kinds are reachable.
 	if r.URL.Query().Get("context") != "none" {
-		if builder := summarycontext.Within(summarycontext.SearchBudget, func() summarycontext.Builder {
-			return s.newSearchSummaryContextBuilder(r, scanNamespaces)
-		}); builder != nil {
-			opts.SummaryBuilder = search.SummaryBuilderFunc(builder)
-		}
+		builder, cancel := summarycontext.WithBudget(r.Context(), func(ctx context.Context) summarycontext.Builder {
+			return s.newSearchSummaryContextBuilder(r.WithContext(ctx), scanNamespaces)
+		})
+		defer cancel()
+		opts.SummaryBuilder = search.SummaryBuilderFunc(builder)
 	}
 	if expr := r.URL.Query().Get("filter"); expr != "" {
 		f, err := filter.CachedObjectFilter(expr)
