@@ -2,6 +2,57 @@
 
 Radar automatically discovers and displays **any** Custom Resource Definition (CRD) in your cluster — no configuration needed. For popular tools, Radar provides dedicated detail views, topology edges, smart table columns, and AI-optimized summaries for seamless integration.
 
+## OpenTelemetry Operator
+
+Radar provides native resource details for `opentelemetry.io` **OpenTelemetryCollector**
+and **Instrumentation**. Native list columns add reconciliation/configuration status
+while retaining mode, version, image, management and instrumentation settings.
+
+Collector details show deployment mode, management state, the reported Pod-count
+snapshot, version/image and configured pipelines. Each pipeline lists receiver,
+processor and exporter component names; components declared as connectors are
+marked explicitly. Five pipelines are shown initially, with a control to show all.
+Collector `v1beta1` structured configuration and served `v1alpha1` YAML configuration
+are supported. An unreadable preview directs you to YAML rather than claiming the
+configuration has no pipelines.
+
+**Reconciliation is separate from runtime health.** The operator writes `Ready=True`
+when reconciliation succeeds, even if collector Pods are unready. Radar labels
+this **Reconciled**, with a neutral status. Earlier-generation observations are
+**Status stale**. Inspect the generated Deployment, DaemonSet or StatefulSet through
+existing ownership/Related Resources for current workload readiness. Reported Pod
+counts are a reconciliation-time snapshot: ready/observed total for Deployment
+and StatefulSet, or ready/desired scheduled Pods for DaemonSet.
+Neither readiness nor configuration proves telemetry delivery.
+
+Instrumentation details show the declared OTLP endpoint, propagators, sampler and
+runtime images. The configuration is **Configured**, not healthy; blocked automatic
+image upgrades are highlighted. This does not attribute injected Pods or infer
+collector relationships from endpoint strings.
+
+**REST and MCP:** existing resource list/get tools gain concise native summaries.
+Collector summaries include reconciliation state, mode, version and image; the
+reconciliation-time Pod count is confined to the labeled UI. Instrumentation summaries distinguish configuration from blocked upgrades.
+No new MCP tool or response field is introduced. Existing generic ownership remains;
+no endpoint-derived topology edges, telemetry queries, or new Issues source are added.
+Existing condition Issues surface managed reconciliation failures and status-read
+errors with the operator's message; unmanaged and stale observations are suppressed.
+A status-read warning does not establish a Collector Pod failure.
+
+| Resource | Group | Topology | Detail View | AI Summary |
+|---|---|---|---|---|
+| OpenTelemetryCollector | opentelemetry.io | No dedicated nodes or edges; owned-workload navigation is in Related Resources | Reconciliation, reported Pods and pipeline components | Reconciliation, mode, version and image |
+| Instrumentation | opentelemetry.io | No inferred injected-workload edges | Injection settings and blocked upgrades | Configuration and upgrade state |
+
+**Permissions:** the Helm chart already collects `opentelemetry.io` resources when
+`rbac.crdGroups.opentelemetry` is enabled. The Cloud integration-read baseline does
+not grant these full objects to default caller tiers: collector configuration and
+instrumentation environment values can contain credentials. Supply explicit
+customer-managed read permissions for caller-authorized tools when needed. This
+baseline exception is not a full-object UI/REST confidentiality guarantee; runtime
+response authorization remains separate. It does not revoke
+permissions already granted by other roles.
+
 ## ConfigMap and Secret reflection (Reflector)
 
 [EmberStack Reflector](https://github.com/emberstack/kubernetes-reflector) copies

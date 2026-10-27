@@ -158,6 +158,14 @@ func unstructuredHealth(u *unstructured.Unstructured) string {
 	if u == nil {
 		return ""
 	}
+	if u.GroupVersionKind().Group == "opentelemetry.io" {
+		switch u.GetKind() {
+		case "OpenTelemetryCollector":
+			return levelToString(health.OpenTelemetryCollector(u).Level)
+		case "Instrumentation":
+			return levelToString(health.OpenTelemetryInstrumentation(u).Level)
+		}
+	}
 	conditions, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if !found || len(conditions) == 0 {
 		return ""

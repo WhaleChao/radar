@@ -147,6 +147,14 @@ func detectGenericCRDIssues(p Provider, f Filters, ownedSubjects map[string]bool
 					continue
 				}
 			}
+			// Unmanaged collectors retain their last condition while the operator
+			// deliberately stops reconciling; it is not a current managed failure.
+			if gvr.Group == "opentelemetry.io" && kind == "OpenTelemetryCollector" {
+				management, _, _ := unstructured.NestedString(u.Object, "spec", "managementState")
+				if management == "unmanaged" {
+					continue
+				}
+			}
 			if gvr.Group == "kafka.strimzi.io" && kind == "KafkaConnector" {
 				out = append(out, detectStrimziConnectorIssues(gvr, u)...)
 				continue

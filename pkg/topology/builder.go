@@ -8350,6 +8350,14 @@ func sealedSecretHealth(resource *unstructured.Unstructured) HealthStatus {
 
 // extractGenericStatus determines health from common CRD status patterns
 func extractGenericStatus(resource *unstructured.Unstructured) HealthStatus {
+	if resource.GroupVersionKind().Group == "opentelemetry.io" {
+		switch resource.GetKind() {
+		case "OpenTelemetryCollector":
+			return healthLevelToStatus(health.OpenTelemetryCollector(resource).Level)
+		case "Instrumentation":
+			return healthLevelToStatus(health.OpenTelemetryInstrumentation(resource).Level)
+		}
+	}
 	status, found, _ := unstructured.NestedMap(resource.Object, "status")
 	if !found {
 		return StatusUnknown
