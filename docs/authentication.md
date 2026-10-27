@@ -297,13 +297,33 @@ A `radar:member` attempting to install a chart that bundles its own RBAC will ge
 <a id="user-token-mode"></a>
 #### User-token mode (no impersonation)
 
-Set `auth.kubernetesCredentials: user-token` (requires `cloud.enabled: true`; flag `--auth-k8s-credentials=user-token`, env `RADAR_AUTH_K8S_CREDENTIALS`) to stop Radar from impersonating anyone. The chart then grants the ServiceAccount no `impersonate` permission. Radar treats each tunneled request as follows:
+**Radar Cloud only.** This mode is for clusters connected to a self-managed Radar Cloud control plane that uses user tokens. Standalone Radar doesn't use it. Set it up on the control plane: [User tokens](https://radarhq.io/docs/cloud/self-hosted/user-tokens).
+
+Set `auth.kubernetesCredentials: user-token` (flag `--auth-k8s-credentials=user-token`, env `RADAR_AUTH_K8S_CREDENTIALS`). Radar then stops impersonating people, and the chart grants the ServiceAccount no `impersonate` permission.
+
+**How Radar handles each tunneled request:**
 
 - **With the user's token** (`X-Forwarded-Kubernetes-Token`): Radar asks the API server who the token belongs to (SelfSubjectReview) and makes every live call — writes, logs, exec, Helm — with that token alone, so the API server applies your own RBAC and audit logs show the real user. The forwarded username must match the token's username, or the request is refused.
 - **Without a token, as a person** (for example cross-cluster views): Radar serves its cache, filtered by that person's permissions, and refuses every live call with a 403 (`reason: user_token_required`).
 - **Without a token, as `radar:system:*` (group `radar:system`) or `radar:ai:<org>` (group `radar:ai:reader`)**: Radar reads with its ServiceAccount, after a SubjectAccessReview of every request against that identity's bindings (`cloud.systemRbac`, `cloud.aiRbac`).
 
-The `radar:*` role groups gate only Radar's own settings in this mode; they are never part of the identity Radar checks Kubernetes permissions for. The chart requires `cloud.defaultRbac.create=false`, because the API server would otherwise apply the tier bindings to any token whose IdP groups happen to be named `radar:owner`, `radar:member` or `radar:viewer`. Some Radar features read with the ServiceAccount in every mode and keep doing so: Prometheus queries, permission lookups for other subjects, and the in-cluster reachability check. They never write. The chart drops the ServiceAccount's `pods/exec` and `pods/portforward` grants in this mode (shells and port-forwards run on each person's token), so integrations that fall back to a ServiceAccount port-forward (Hubble, OpenCost) only work over their in-cluster Service. Your API servers must accept the ID tokens your identity provider issues to your self-managed Radar Cloud control plane's sign-in client. The tunnel must be verified: `wss://` with `cloud.insecureSkipVerify=false` (the chart and the binary both refuse otherwise). Tokens whose groups start with `radar:`, `cloud:` or `system:` (other than `system:authenticated`) are refused, because the API server would apply the chart's `radar:system` and `radar:ai:reader` bindings, or `system:masters`, to them; give your API server a non-empty `--oidc-groups-prefix`. Background identities only read through Radar: any other verb is refused before it reaches the API server. Cached reads still rely on the identity Radar Cloud forwards, as in every mode: the cache is filled by the ServiceAccount (Secrets included under auth) and filtered per person, so a compromised control plane could read the cache as anyone it names, although it can't make live calls without that person's token. The ServiceAccount keeps its cluster-wide reads (including Secrets under auth), as in every mode.
+**Requirements:**
+
+- Radar Cloud mode (`cloud.enabled: true`), with `cloud.defaultRbac.create=false`. With the default bindings, the API server would apply them to any token whose IdP groups are named `radar:owner`, `radar:member` or `radar:viewer`.
+- A verified tunnel: `wss://` with `cloud.insecureSkipVerify=false`. The chart and the binary both refuse otherwise.
+- API servers that accept the token the control plane relays: the ID token your identity provider issues to its sign-in client, or the access token, with `auth.oidc.clusterToken: access_token`.
+- A non-empty `--oidc-groups-prefix` on the API servers. Radar refuses tokens whose groups start with `radar:`, `cloud:` or `system:` (other than `system:authenticated`), because the API server would apply the chart's `radar:system` and `radar:ai:reader` bindings, or `system:masters`, to them.
+
+**What still uses the ServiceAccount:**
+
+- The cache. The ServiceAccount fills it and keeps its cluster-wide reads (Secrets included under auth), as in every mode. Each person's view is filtered by the identity Radar Cloud forwards, so a compromised control plane could read the cache as anyone it names, although it can't make live calls without that person's token.
+- Background identities. They only read: any other verb is refused before it reaches the API server.
+- Prometheus queries, permission lookups for other subjects, and the in-cluster reachability check. They never write.
+
+**Other effects:**
+
+- The `radar:*` role groups only gate Radar's own settings. Radar never uses them when it checks Kubernetes permissions.
+- The chart drops the ServiceAccount's `pods/exec` and `pods/portforward` grants, since shells and port-forwards run on each person's token. Integrations that fall back to a ServiceAccount port-forward (Hubble, OpenCost) only work over their in-cluster Service.
 
 Customer-facing documentation for Radar Cloud lives on [radarhq.io](https://radarhq.io). The authoritative reference for the Cloud-mode chart values is the comment block in [`deploy/helm/radar/values.yaml`](../deploy/helm/radar/values.yaml) under `cloud:`.
 
