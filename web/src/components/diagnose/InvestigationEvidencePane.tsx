@@ -91,7 +91,6 @@ export function InvestigationEvidencePane({
     report: string;
     evidence?: DiagnosisEvidenceItem[];
   };
-  /** Open the story fully instead of the bounded preview — when the layout has room for it. */
   collecting: boolean;
   animateGroupIds: ReadonlySet<string>;
   onViewSource: (
@@ -352,7 +351,10 @@ export function InvestigationEvidencePane({
     projection.groups.map((group) => [group.id, group] as const),
   );
   const renderStoryPlacement = useCallback(
-    (target: StoryPlacementTarget, { compact }: { compact: boolean }) => {
+    (
+      target: StoryPlacementTarget,
+      { compact, preview }: { compact: boolean; preview: boolean },
+    ) => {
       const group = target.item.groupId
         ? groupsById.get(target.item.groupId)
         : undefined;
@@ -366,6 +368,7 @@ export function InvestigationEvidencePane({
           onViewSource={onViewSource}
           spanFullRow
           compact={compact}
+          storyPreview={preview}
           noteMode="chip"
           gapRoles={storyGapRoles}
         />
@@ -408,8 +411,16 @@ export function InvestigationEvidencePane({
   // A card behind the fold may be mounted and inert, or not mounted at all
   // before the fold first opens; either way the fold opens first and the
   // card is found once it has settled.
+  const [storyReveal, setStoryReveal] = useState<{
+    domId: string;
+    requestId: number;
+  }>();
   const revealStoryTarget = useCallback(
     (target: StoryPlacementTarget) => {
+      setStoryReveal((previous) => ({
+        domId: target.domId,
+        requestId: (previous?.requestId ?? 0) + 1,
+      }));
       const land = (placed: HTMLElement) => {
         placed.scrollIntoView({
           block: "center",
@@ -703,6 +714,7 @@ export function InvestigationEvidencePane({
         onGroupOpenChange,
         revealSourceId: caseReveal?.sourceId ?? revealRequest?.sourceId,
         revealRequestId: caseReveal?.requestId ?? revealRequest?.requestId,
+        storyReveal,
         caseByGroup: investigationCaseByGroup(investigationCase),
         excludedByItem: new Map(
           (investigationCase?.ruledOut ?? []).map((entry) => [
