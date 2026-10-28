@@ -29,6 +29,7 @@ import {
   recordConsent,
   DiagnoseError,
   investigationRefusal,
+  investigationCapacity,
 } from "../../api/diagnose";
 import { getApiBase } from "../../api/config";
 import {
@@ -107,6 +108,10 @@ interface DiagnoseCtx {
   // The host's refusal behind startError, when it sent one, so the surface can
   // offer the host's action beside the message.
   startRefusal: InvestigationRefusal | null;
+  // Set when the start failed because every investigation slot is taken: the
+  // start to retry once one is free, how many run at once, and the cluster
+  // the start was refused in.
+  startCapacity: StartCapacity | null;
   // Kept apart from startError: the consent card renders this as "why your
   // approval was refused", and a run-start failure landing in the same slot
   // would be read as exactly that — the two paths don't share a lifecycle.
@@ -230,6 +235,20 @@ const AGENT_LABELS: Record<string, string> = {
 
 export function agentLabelFor(name: string, fallbackLabel?: string): string {
   return AGENT_LABELS[name] || fallbackLabel || name || "your AI agent";
+}
+
+export interface StartCapacity {
+  target: Target;
+  limit: number;
+  context?: string;
+}
+
+function startCapacity(
+  error: unknown,
+  target: Target,
+): StartCapacity | undefined {
+  const capacity = investigationCapacity(error);
+  return capacity ? { target, ...capacity } : undefined;
 }
 
 // openDiagnoseSettings opens the Settings dialog (App.tsx listens for this DOM
@@ -475,6 +494,7 @@ function RoutedDiagnoseProvider({
   const [startFailure, setStartFailure] = useState<{
     message: string;
     refusal: InvestigationRefusal | null;
+    capacity?: StartCapacity;
   } | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
   const [width, setWidth] = useState<number>(() => {
@@ -786,6 +806,7 @@ function RoutedDiagnoseProvider({
               ? e.message
               : "Couldn't start the investigation.",
           refusal: investigationRefusal(e),
+          capacity: startCapacity(e, t),
         });
       });
   };
@@ -818,6 +839,9 @@ function RoutedDiagnoseProvider({
   const openRun = useCallback(
     (id: string) => {
       unavailableRunIDsRef.current.delete(id);
+      // A start still in flight no longer owns the pane: its refusal must not
+      // replace the run the user just chose.
+      startSeqRef.current++;
       setStartFailure(null);
       setActiveRunId(id);
       setView("investigation");
@@ -1125,6 +1149,7 @@ function RoutedDiagnoseProvider({
     needsConsent: !!pendingTarget,
     startError: startFailure?.message ?? null,
     startRefusal: startFailure?.refusal ?? null,
+    startCapacity: startFailure?.capacity ?? null,
     consentError,
     openInvestigation,
     openRun,

@@ -39,6 +39,7 @@ import {
 } from "./DiagnoseContext";
 import { useDiagnoseCustomization } from "../../context/DiagnoseCustomization";
 import { InvestigationRefusalAction } from "./InvestigationRefusalAction";
+import { InvestigationCapacityRecovery } from "./InvestigationCapacityNotice";
 import { useNavCustomization } from "../../context/NavCustomization";
 import { InvestigationView } from "./InvestigationView";
 import type { InvestigationTimelineScope } from "./InvestigationEvidencePane";
@@ -514,7 +515,8 @@ export function DiagnoseSurface({
   const activeRun = d.runs.find((r) => r.id === d.activeRunId) ?? null;
   // Consent replaces the detail pane even if goHome retained an older run id.
   // Header identity and actions must describe what is actually visible.
-  const visibleRunDetail = d.needsConsent ? null : activeRun;
+  const visibleRunDetail =
+    d.needsConsent || d.startCapacity ? null : activeRun;
   // A focused run shows the agent it actually ran with; Home reflects the current pick.
   const activeAgentLabel = visibleRunDetail?.agent
     ? agentLabelFor(visibleRunDetail.agent)
@@ -574,6 +576,10 @@ export function DiagnoseSurface({
         />
       </div>
     </div>
+  ) : d.startCapacity ? (
+    // Before the focused run: the start the user just asked for is what this
+    // pane is about, and a focused run's view would bury the way out.
+    <InvestigationCapacityRecovery capacity={d.startCapacity} />
   ) : activeRun ? (
     <InvestigationView
       key={activeRun.id}
@@ -770,6 +776,7 @@ export function DiagnoseSurface({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {activeRun &&
+            visibleRunDetail &&
             canRerunInvestigation(d.view, activeRun, d.needsConsent) && (
               <Tooltip
                 content="Re-run this investigation from scratch"

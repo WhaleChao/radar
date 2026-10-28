@@ -496,7 +496,7 @@ func (s *Server) handleDiagnoseStart(w http.ResponseWriter, r *http.Request) {
 	run, err := runs.Start(spec)
 	if err != nil {
 		if errors.Is(err, ai.ErrAtCapacity) {
-			s.writeError(w, http.StatusConflict, "too many investigations running — stop or finish one first")
+			writeInvestigationCapacity(w, runs.MaxConcurrent(), k8s.GetContextName())
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, err.Error())
@@ -611,7 +611,7 @@ func (s *Server) handleDiagnoseTurn(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ai.ErrTurnInFlight):
 		s.writeError(w, http.StatusConflict, "a turn is already running")
 	case errors.Is(err, ai.ErrAtCapacity):
-		s.writeError(w, http.StatusConflict, err.Error())
+		writeInvestigationCapacity(w, runs.MaxConcurrent(), k8s.GetContextName())
 	case errors.Is(err, ai.ErrHistoryUnavailable):
 		s.writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, ai.ErrHistoryCorrupt):
