@@ -7,7 +7,7 @@ import {
   type StartCapacity,
   type Target,
 } from "./DiagnoseContext";
-import { formatInvestigationTarget } from "./target";
+import { formatInvestigationTarget, formatInvestigationTitle } from "./target";
 
 // The runs holding a slot, oldest first: the order they were started in.
 export function runsHoldingSlots(runs: RunSummary[]): RunSummary[] {
@@ -19,14 +19,18 @@ export function runsHoldingSlots(runs: RunSummary[]): RunSummary[] {
     );
 }
 
+// A question-only run is named by its question, as in the history.
 function runLabel(run: RunSummary): string {
-  return run.name
-    ? formatInvestigationTarget(run)
+  return run.name || run.question
+    ? formatInvestigationTitle(run)
     : run.preview || "Investigation";
 }
 
 function targetLabel(target: Target): string {
-  return target.name ? formatInvestigationTarget(target) : "this investigation";
+  if (target.name) return formatInvestigationTarget(target);
+  return target.question
+    ? `“${formatInvestigationTitle(target)}”`
+    : "this investigation";
 }
 
 // A start refused without a cluster name (a host that sends none) has

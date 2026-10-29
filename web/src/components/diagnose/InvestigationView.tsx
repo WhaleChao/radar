@@ -113,7 +113,15 @@ import {
 } from "./InvestigationEvidencePane";
 import { partitionInvestigationEvidence } from "./investigationEvidencePartition";
 import type { DiagnosisResourceRef } from "./diagnoseEvidenceTypes";
-import { formatInvestigationTarget } from "./target";
+import { QuestionFocus } from "./QuestionFocus";
+import { focusFromCase } from "./investigationFocus";
+import {
+  formatInvestigationTarget,
+  formatInvestigationTitle,
+  isQuestionOnly,
+  questionAskedAt,
+  rerunOpening,
+} from "./target";
 import { parseContextName } from "../../utils/context-name";
 import type { InvestigationSourceExcerpt } from "./investigationSourceFocus";
 import { diagnosisHasStoryShape } from "./investigationStory";
@@ -294,6 +302,7 @@ export function InvestigationView({
   const {
     refreshRuns,
     openInvestigation,
+    openQuestion,
     startError,
     startRefusal,
     dismissError,
@@ -303,25 +312,15 @@ export function InvestigationView({
   // the picker's: a reopened run keeps the backend it was made with.
   const runAgent = agents.find((agent) => agent.name === run.agent);
   const explanationEnabled = supportsAssessmentExplanation(runAgent);
-  const canApply = runAgent?.apply === true;
+  // A question-only run has no resource to bind a confirmed fix to.
+  const canApply = runAgent?.apply === true && !isQuestionOnly(run);
   // Read through a ref by the stream callback, which lives as long as the
   // run and would otherwise keep the value from before the agents loaded.
   const verifiesAfterApplyRef = useRef(false);
   verifiesAfterApplyRef.current = runAgent?.verification === true;
-  // Investigate again means look again, so it asks for a new session explicitly and only
-  // carries the issue forward — being handed the previous answer is the one
-  // thing someone clicking this doesn't want.
   const retryDiagnosis = useCallback(
-    () =>
-      openInvestigation({
-        kind,
-        group: run.group,
-        namespace,
-        name,
-        issueId: run.issueId,
-        fresh: true,
-      }),
-    [openInvestigation, kind, namespace, name, run.group, run.issueId],
+    () => openInvestigation(rerunOpening(run)),
+    [openInvestigation, run],
   );
   const queryClient = useQueryClient();
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -1181,11 +1180,24 @@ export function InvestigationView({
         : undefined,
     [currentAssessment, currentAssessmentIdx, projection],
   );
+  const questionOnly = isQuestionOnly(run);
+  const questionFocus = useMemo(
+    () => (questionOnly ? focusFromCase(investigationCase) : []),
+    [questionOnly, investigationCase],
+  );
   // Findings is the newest assessment and nothing else: its own citations,
   // its own case, its own story. Earlier assessments stay complete in
   // Activity; answers that did not revise the assessment stay there too.
   const paneResolution = rootCauseEvidenceResolution;
   const storyShape = diagnosisHasStoryShape(currentAssessment?.diagnosis);
+  // A run that stopped without an assessment will never cite anything, so
+  // what it collected is all there is to show.
+  const assessmentPending = !currentAssessment?.diagnosis;
+  const showUncited =
+    assessmentPending &&
+    !busy &&
+    run.status !== "running" &&
+    run.status !== "stopping";
   const visibleEvidenceGroupIds = useMemo(
     () =>
       new Set(
@@ -1194,9 +1206,16 @@ export function InvestigationView({
           paneResolution,
           investigationCase,
           storyShape,
+          showUncited,
         ).collectionByGroup.keys(),
       ),
-    [projection.groups, paneResolution, investigationCase, storyShape],
+    [
+      projection.groups,
+      paneResolution,
+      investigationCase,
+      storyShape,
+      showUncited,
+    ],
   );
   const evidenceStepIdsByTurn = useMemo(
     () =>
@@ -1616,7 +1635,8 @@ export function InvestigationView({
       .slice(0, 3);
     return {
       context: {
-        target: formatInvestigationTarget(run),
+        target: formatInvestigationTitle(run),
+        asked: isQuestionOnly(run) ? undefined : run.question,
         cluster: run.context,
         startedAt: run.createdAt,
         agent: agentLabel,
@@ -1861,7 +1881,9 @@ export function InvestigationView({
               ? assessmentNeedsCurrentStateVerification
                 ? "Proposed before the apply attempt. Current state has not been verified."
                 : "Proposed before the latest evidence. Reassess before applying."
-              : undefined
+              : questionOnly
+                ? "To apply a fix, investigate the resource it changes from Focused on above."
+                : undefined
           }
           onApply={
             canOfferInvestigationApply({
@@ -2117,6 +2139,11 @@ export function InvestigationView({
                           turn={turn}
                           agentLabel={agentLabel}
                           turnIndex={index}
+                          openingQuestion={
+                            index === 0 && !turn.question
+                              ? run.question
+                              : undefined
+                          }
                           evidenceStepIds={evidenceStepIdsByTurn.get(index)}
                           onViewEvidence={viewEvidenceSource}
                           sourceRevealRequest={activityRevealRequest}
@@ -2536,6 +2563,40 @@ export function InvestigationView({
                       ) : null}
                     </section>
 
+                    {questionOnly && investigationCase ? (
+                      <QuestionFocus
+                        focus={questionFocus}
+                        stale={stale}
+                        onOpenResource={onOpenResource}
+                        // These start a new investigation, so a run that can
+                        // no longer take follow-ups doesn't block them.
+                        disabled={investigationInteractionsBlocked({
+                          streamReady,
+                          busy,
+                          requestPending,
+                          readOnly: false,
+                          verificationPending,
+                        })}
+                        onChooseResource={() =>
+                          openQuestion({
+                            text: run.question,
+                            namespaces: run.namespaces,
+                            lookBack: run.lookBack,
+                            askedAt: questionAskedAt(run),
+                            pickResource: true,
+                          })
+                        }
+                        onInvestigate={(resource) =>
+                          openInvestigation({
+                            ...resource,
+                            question: run.question,
+                            lookBack: run.lookBack,
+                            askedAt: questionAskedAt(run),
+                          })
+                        }
+                      />
+                    ) : null}
+
                     {hasMultipleAssessments ? (
                       <button
                         type="button"
@@ -2556,6 +2617,9 @@ export function InvestigationView({
 
                   <InvestigationEvidencePane
                     projection={projection}
+                    withoutTarget={questionOnly}
+                    assessmentPending={assessmentPending}
+                    showUncited={showUncited}
                     rootCauseEvidence={paneResolution}
                     investigationCase={investigationCase}
                     story={

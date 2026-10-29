@@ -19,6 +19,9 @@ export interface AgentInfo {
   apply?: boolean;
   /** The backend re-checks the resource after an Apply. Absent means it does not. */
   verification?: boolean;
+  /** The backend opens a run from a question, with or without a resource.
+   *  Absent means it accepts only a resource. */
+  questions?: boolean;
 }
 
 export interface AgentsResponse {
@@ -239,6 +242,16 @@ export interface RunSummary {
   effort?: string;
   managedBy?: string; // GitOps/Helm owner of the target ("Argo CD"/"Flux"/"Helm"), for the Apply warning
   health?: ResourceHealthSignal;
+  /** The engineer's opening question, when the run started with one. A run
+   *  with a question and an empty name has no resource. */
+  question?: string;
+  /** Where the question said to start looking; empty means the whole cluster. */
+  namespaces?: string[];
+  /** How far before the question the problem started: 15m, 1h, 6h or 24h. */
+  lookBack?: string;
+  /** When the question was first asked, when that was before this run
+   *  started (a re-run or a narrowed run). */
+  askedAt?: string;
   status: "running" | "stopping" | "done" | "error" | "stopped" | "stale";
   sessionId?: string;
   preview?: string;
@@ -443,6 +456,10 @@ export async function createRun(
     // otherwise hand back for this target. Inert for Radar's own backend, which
     // only ever continues an in-flight run — and that one is never bypassed.
     fresh?: boolean;
+    question?: string;
+    namespaces?: string[];
+    lookBack?: string;
+    askedAt?: string;
   },
   opts?: {
     agent?: string;

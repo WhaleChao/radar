@@ -32,6 +32,11 @@ vi.mock("../../api/diagnose", async (importOriginal) => ({
   createRun: api.createRun,
 }));
 
+vi.mock("../../api/client", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useContexts: () => ({ data: [{ name: "cluster-a", isCurrent: true }] }),
+}));
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root;
 const probe = {} as { d: ReturnType<typeof useDiagnose> };
@@ -83,8 +88,10 @@ describe("a start refused at capacity", () => {
     api.createRun.mockRejectedValue(atCapacity());
     await act(async () => probe.d.openInvestigation(target));
     await flush();
+    // The start is bound to the cluster it was made in, so a retry can't
+    // land on a same-named resource elsewhere.
     expect(probe.d.startCapacity).toEqual({
-      target,
+      target: { ...target, context: "cluster-a" },
       limit: 3,
       context: "cluster-a",
     });

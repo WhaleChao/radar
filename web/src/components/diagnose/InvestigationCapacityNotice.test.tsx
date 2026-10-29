@@ -121,10 +121,45 @@ describe("InvestigationCapacityNotice", () => {
       (li) => li.textContent,
     );
     expect(rows).toHaveLength(3);
-    expect(rows[0]).toContain("Deployment.apps prod/api");
+    expect(rows[0]).toContain("Deployment prod/api");
     expect(rows[0]).toContain("Started 5m ago");
     expect(rows[2]).toContain("Started 1m ago");
     expect(button("Start investigation").disabled).toBe(true);
+  });
+
+  it("names question-only runs and starts by their question", async () => {
+    const asking = {
+      ...run("q", "", "running", "2026-10-28T10:03:00Z"),
+      kind: "",
+      group: "",
+      namespace: "",
+      question: "checkout is slow",
+    } as RunSummary;
+    await act(async () =>
+      root.render(
+        <InvestigationCapacityNotice
+          capacity={{
+            target: {
+              kind: "",
+              group: "",
+              namespace: "",
+              name: "",
+              question: "why is web timing out",
+            },
+            limit: 3,
+          }}
+          runs={[...threeRunning.slice(0, 2), asking]}
+          runsKnown
+          cluster="same"
+          {...handlers}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain(
+      "Stop one to start “why is web timing out”",
+    );
+    expect(container.textContent).toContain("checkout is slow");
+    expect(button("Stop checkout is slow")).toBeDefined();
   });
 
   it("opens and stops the run the user picks", async () => {
@@ -132,9 +167,9 @@ describe("InvestigationCapacityNotice", () => {
     await render(threeRunning);
     await act(async () => button("Open").click());
     expect(handlers.onOpenRun).toHaveBeenCalledWith("a");
-    await act(async () => button("Stop Deployment.apps prod/billing").click());
+    await act(async () => button("Stop Deployment prod/billing").click());
     expect(handlers.onStop).toHaveBeenCalledWith("b");
-    expect(button("Stop Deployment.apps prod/billing").disabled).toBe(true);
+    expect(button("Stop Deployment prod/billing").disabled).toBe(true);
     expect(container.textContent).toContain("Stopping…");
   });
 
@@ -156,7 +191,7 @@ describe("InvestigationCapacityNotice", () => {
         new Promise<void>((_, reject) => (fail = () => reject(new Error("x")))),
     );
     await render(threeRunning);
-    const stop = () => button("Stop Deployment.apps prod/api");
+    const stop = () => button("Stop Deployment prod/api");
     await act(async () => stop().click());
     expect(stop().disabled).toBe(true);
     await act(async () => fail());
@@ -196,11 +231,11 @@ describe("InvestigationCapacityNotice", () => {
 
   it("says when a stop didn't take", async () => {
     await render(threeRunning);
-    await act(async () => button("Stop Deployment.apps prod/api").click());
+    await act(async () => button("Stop Deployment prod/api").click());
     // The refreshed list still shows it running.
     await render([...threeRunning]);
     expect(container.textContent).toContain("Radar couldn’t stop it");
-    expect(button("Stop Deployment.apps prod/api").disabled).toBe(false);
+    expect(button("Stop Deployment prod/api").disabled).toBe(false);
   });
 
   it("cancels the pending start", async () => {

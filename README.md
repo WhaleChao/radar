@@ -508,6 +508,14 @@ read-only MCP tools with `--mcp-read-only` and connect to `/mcp-readonly`.
 This setting does not restrict UI or REST API writes. See the
 **[MCP Guide](docs/mcp.md)** for setup and configuration precedence.
 
+Radar can also run your own agent CLI for you (see
+[configuration](docs/configuration.md#ai-investigations-agent-cli)). Start an
+investigation from a resource's **Investigate** action, from an issue, or by
+describing what you are seeing on the AI investigations page: say where to start
+and since when, and optionally pin the resource it is about. Every
+investigation ends on the same Findings page, with the evidence behind each
+claim; a fix is applied from an investigation of the resource it changes.
+
 ### Authentication
 
 For shared in-cluster deployments, Radar supports optional user authentication with per-user Kubernetes RBAC.
