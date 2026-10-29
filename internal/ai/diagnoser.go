@@ -283,6 +283,7 @@ type Diagnoser struct {
 	agents       map[string]Agent
 	defName      string
 	evidenceRefs *investigationrefs.Registry
+	signin       *signinChecker
 }
 
 func newDiagnoser(backends []Agent, evidenceRefs *investigationrefs.Registry) *Diagnoser {
@@ -412,6 +413,24 @@ func (d *Diagnoser) AgentInfos(ctx context.Context, withVersions bool) []AgentIn
 		infos = append(infos, info)
 	}
 	return infos
+}
+
+// CheckSignin asks an installed agent's CLI whether it is signed in for runs
+// with profile, before the user consents to one. ok is false when no such
+// backend is installed. refresh discards a cached answer (the user's "check
+// again").
+func (d *Diagnoser) CheckSignin(ctx context.Context, name string, profile ExecutionProfile, refresh bool) (SigninStatus, bool) {
+	d.mu.Lock()
+	agent, ok := d.agents[name]
+	if d.signin == nil {
+		d.signin = newSigninChecker()
+	}
+	checker := d.signin
+	d.mu.Unlock()
+	if !ok {
+		return SigninStatus{}, false
+	}
+	return checker.check(ctx, agent, profile, refresh), true
 }
 
 // AgentName normalizes a client-requested backend name to one that actually

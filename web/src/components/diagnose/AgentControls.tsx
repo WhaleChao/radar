@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { AlertTriangle, Check, ShieldCheck, ChevronDown } from "lucide-react";
 import {
   TRANSITION_MENU,
@@ -420,11 +420,18 @@ function ConsentCardShell({
   approveLabel = "Approve & investigate",
   warning = false,
   error,
+  notice,
+  approveBusy = false,
   onOpenSettings,
   onApprove,
   onCancel,
 }: DiagnoseConsentCopy & {
   warning?: boolean;
+  // Something to know before approving, e.g. that the agent isn't signed in.
+  // It informs; Approve stays available.
+  notice?: ReactNode;
+  // Approve was pressed and waits on a check that hasn't answered yet.
+  approveBusy?: boolean;
   // Why the last approval failed, straight from the server. The card stays up on
   // failure so retrying works in place, which means this is the ONLY chance to
   // say why — a host that records consent above the individual refuses the
@@ -476,6 +483,7 @@ function ConsentCardShell({
           {resolvedSettingsLabel}
         </button>
       )}
+      {notice}
       {/* Red, not amber: the full-local card is itself amber, so an amber box on
           it reads as another paragraph of body copy. role="alert" because nothing
           else moves on failure — focus stays on Approve, so without it a screen
@@ -498,9 +506,10 @@ function ConsentCardShell({
         </button>
         <button
           onClick={onApprove}
+          disabled={approveBusy}
           className="flex-1 rounded-lg btn-brand py-1.5 text-sm"
         >
-          {approveLabel}
+          {approveBusy ? "Checking sign-in…" : approveLabel}
         </button>
       </div>
     </div>
@@ -523,6 +532,8 @@ export function ConsentCard({
   profile,
   copy,
   error,
+  notice,
+  approveBusy,
   onOpenSettings,
   onApprove,
   onCancel,
@@ -532,11 +543,20 @@ export function ConsentCard({
   profile: ExecutionProfile;
   copy?: DiagnoseConsentCopy;
   error?: string | null;
+  notice?: ReactNode;
+  approveBusy?: boolean;
   onOpenSettings?: () => void;
   onApprove: () => void;
   onCancel: () => void;
 }) {
-  const chrome = { onOpenSettings, onApprove, onCancel, error };
+  const chrome = {
+    onOpenSettings,
+    onApprove,
+    onCancel,
+    error,
+    notice,
+    approveBusy,
+  };
 
   // Tier 1: a host (e.g. radar-hub-web) supplied its own copy — use it verbatim.
   if (copy) return <ConsentCardShell {...copy} {...chrome} />;
