@@ -155,6 +155,8 @@ radar --auth-mode=proxy \
       --auth-groups-header=X-Forwarded-Groups
 ```
 
+Groups can arrive as one comma-separated header or as one header per group, as proxies that forward Kubernetes impersonation headers send them (`groupsHeader: Impersonate-Group`). Radar refuses Kubernetes-reserved `system:` users and groups, except the group `system:authenticated`, which every signed-in user has.
+
 > **Security:** Your ingress must strip `X-Forwarded-User` and `X-Forwarded-Groups` headers from external requests to prevent spoofing. The auth proxy should be the **only** path to Radar. Radar logs a warning at startup as a reminder.
 
 > **Proxies:** Preserve the browser-facing `Host` header when proxying Radar. Radar accepts changes and pod exec sessions only from its own page, and it recognizes that page by comparing the browser's `Origin` with `Host` (or by `Sec-Fetch-Site`, which browsers send over HTTPS). If your proxy must rewrite `Host`, list the address users open Radar at in `trustedOrigins` (Helm) or `RADAR_TRUSTED_ORIGINS`. See [Changes fail with "Radar refused this request"](in-cluster.md#changes-fail-with-radar-refused-this-request).
