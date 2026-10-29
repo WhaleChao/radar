@@ -275,17 +275,6 @@ export function ClusterHealthCard({
               )}
               {radarVersion}
               <span><span className="font-mono">{counts.namespaces}</span> namespaces</span>
-              {/* Show raw kubeconfig context as muted metadata only when
-                  it differs from the headline AND we're in local mode
-                  (in-cluster has no meaningful context name, cloud
-                  shell already renders the canonical name). */}
-              {cluster.name && cluster.name !== headlineName && deployment.mode === 'local' && (
-                <Tooltip content={cluster.name}>
-                <span className="font-mono text-[10px] text-theme-text-disabled break-all leading-snug pt-0.5">
-                  {cluster.name}
-                </span>
-                </Tooltip>
-              )}
             </div>
             {freshness && <div className="mt-2">{freshness}</div>}
             {nodeVersionSkew && (
@@ -578,15 +567,17 @@ function KubernetesVersionLine({
       }
       wrapperClassName="w-fit"
     >
+      {/* Inline text, not flex: flex items shrink and wrap separately, which
+          splits a long distribution version and the link into two columns. */}
       <button
         onClick={onNavigate}
-        className="group flex items-center gap-1 hover:text-theme-text-secondary transition-colors"
+        className="group text-left hover:text-theme-text-secondary transition-colors"
       >
-        <span>Kubernetes {version}</span>
+        Kubernetes {version}
         {behind > 0 && (
-          <span>· Upgrade impact</span>
+          <> · <span className="whitespace-nowrap">Upgrade impact</span></>
         )}
-        <ArrowRight className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+        <ArrowRight className="inline-block w-3 h-3 ml-1 align-[-2px] opacity-0 group-hover:opacity-100 transition-opacity" />
       </button>
     </Tooltip>
   )
