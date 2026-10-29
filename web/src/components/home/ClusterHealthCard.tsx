@@ -1,15 +1,15 @@
-import { useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import type { DashboardResponse, DashboardMetrics, DashboardCRDCount } from '../../api/client'
 import { HealthRing } from './HealthRing'
 import {
   AlertTriangle, CheckCircle, XCircle,
   Cpu, MemoryStick, Database, Container, Globe, Network as NetworkIcon, Briefcase, Clock,
-  ArrowRight, Server, Boxes, Shield, Radio, Info,
+  ArrowRight, Server, Boxes, Shield, Info,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { formatCPUMillicores, formatMemoryMiB } from '../../utils/format'
 import { useCapabilitiesContext } from '../../contexts/CapabilitiesContext'
-import { MCPSetupDialog } from './MCPSetupDialog'
+import { HomeAgentBlock } from './HomeAgentBlock'
 import { assetUrl, pluralize, parseContextName } from '@skyhook-io/k8s-ui'
 import { Tooltip } from '../ui/Tooltip'
 import { mcpEndpointUrl } from '../../api/config'
@@ -148,7 +148,6 @@ export function ClusterHealthCard({
 }: ClusterHealthCardProps) {
   void _topCRDs // Reserved for future CRD display
 
-  const [mcpDialogOpen, setMcpDialogOpen] = useState(false)
   const caps = useCapabilitiesContext()
   // Default to local mode when the backend doesn't ship a `deployment`
   // field (older Radar binaries pre-0.2.2). Local rendering is the safe
@@ -300,28 +299,12 @@ export function ClusterHealthCard({
                 </span>
               </Tooltip>
             )}
-            {/* MCP Server indicator. OSS-only: in Cloud, MCP discovery
-                lives at the hub level (org-wide endpoint, PAT-authed)
-                rather than per-cluster, so this localhost/no-auth card
-                would mislead a Cloud user. */}
+            {/* OSS-only: in Cloud, MCP discovery lives at the hub level
+                (org-wide endpoint, PAT-authed) rather than per-cluster, so this
+                localhost/no-auth entry would mislead a Cloud user. */}
             {showLocalMcpCard && (
-              <button
-                onClick={() => setMcpDialogOpen(true)}
-                className="flex items-center gap-2 mt-3 px-2.5 py-2 bg-purple-500/5 hover:bg-purple-500/10 border border-purple-500/20 rounded-md transition-colors w-full"
-              >
-                <Radio className="w-3.5 h-3.5 text-purple-400 animate-pulse shrink-0" />
-                <div className="flex flex-col gap-0.5 min-w-0 flex-1 text-left">
-                  <span className="text-xs font-medium text-purple-400">{caps.mcpReadOnly ? 'MCP Server Live (read-only)' : 'MCP Server Live'}</span>
-                  <Tooltip content={mcpUrl} wrapperClassName="min-w-0">
-                  <span className="text-[10px] text-theme-text-tertiary truncate font-mono">
-                    HTTP · {mcpUrl}
-                  </span>
-                  </Tooltip>
-                </div>
-                <Info className="w-3.5 h-3.5 text-purple-400/60 shrink-0" />
-              </button>
+              <HomeAgentBlock mcpUrl={mcpUrl} readOnly={caps.mcpReadOnly} execTools={caps.mcpExecTools} />
             )}
-            <MCPSetupDialog open={mcpDialogOpen} onClose={() => setMcpDialogOpen(false)} mcpUrl={mcpUrl} readOnly={caps.mcpReadOnly} execTools={caps.mcpExecTools} />
           </div>
 
           {/* Center: Three health rings */}
